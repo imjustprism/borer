@@ -2,10 +2,13 @@
 //! control-flow graph.
 //!
 //! Every graph shares its edges, what its caps left out, and the walk and
-//! layout that draw it. The calls around a function and the references to
-//! an address are typed values a front end draws and derives nothing from.
+//! layout that draw it. The calls around a function, the references to an
+//! address and the class hierarchy are typed values a front end draws and
+//! derives nothing from.
 
 use super::*;
+use crate::analysis::rtti::Hierarchies;
+use crate::analysis::vtables::{BaseOffset, ClassInfo, ParentEvidence, ParentLink};
 
 /// One edge of a laid-out graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,11 +177,13 @@ const NODE_ROWS: u32 = 3;
 /// down the drawing.
 #[derive(Debug)]
 pub struct TypedGraph<N, E> {
-    /// The nodes, in address order.
+    /// The nodes, in address order; a class graph's in name order.
     pub nodes: Vec<N>,
-    /// The node the graph was asked about: in a graph of callees, at the
-    /// top; of callers or references, at the bottom, what reaches it
-    /// above.
+    /// The node the layout counts its layers from: in a graph of callees,
+    /// the function asked about, at the top; of callers or references, the
+    /// address asked about, at the bottom, what reaches it above; in a
+    /// class graph, the topmost ancestor of the class asked about, or the
+    /// first class with no parent ([`class_graph`]).
     pub root: usize,
     /// The edges among the nodes, by source, then target, then kind; each
     /// points down the drawing.
@@ -548,6 +553,58 @@ fn draw_inward<E>(sizes: Vec<(u32, u32)>, root: usize, edges: &mut [Link<E>]) ->
     d
 }
 
+/// Lays a graph out from every node nothing points at, each on the top
+/// layer, so a forest or a node with several parents draws every edge
+/// down.
+///
+/// The sources hang under one added node, the root [`draw`] lays out from;
+/// it, its edges and the rows it took are taken out of the drawing after.
+/// A graph with one source is laid out from it, one with none from
+/// `root`.
+///
+/// # Arguments
+///
+/// * `sizes` - Each node's box in text cells.
+/// * `root` - The node to lay out from when there is no second source.
+/// * `edges` - The edges; each `back` is set here.
+fn draw_forest<E>(mut sizes: Vec<(u32, u32)>, root: usize, edges: &mut [Link<E>]) -> Drawing {
+    let n = sizes.len();
+    let led: BTreeSet<usize> = edges.iter().map(|e| e.to).collect();
+    let sources: Vec<usize> = (0..n).filter(|v| !led.contains(v)).collect();
+    if sources.len() < 2 {
+        return draw(sizes, sources.first().copied().unwrap_or(root), edges);
+    }
+    sizes.push((2, 0));
+    let mut all: Vec<Link<()>> = edges
+        .iter()
+        .map(|e| (e.from, e.to))
+        .chain(sources.iter().map(|&s| (n, s)))
+        .map(|(from, to)| Link {
+            from,
+            to,
+            kind: (),
+            back: false,
+        })
+        .collect();
+    let mut d = draw(sizes, n, &mut all);
+    for (e, added) in edges.iter_mut().zip(&all) {
+        e.back = added.back;
+    }
+    d.at.truncate(n);
+    d.sizes.truncate(n);
+    d.routes.truncate(edges.len());
+    d.routed.truncate(edges.len());
+    let top = d.at.iter().map(|at| at.1).min().unwrap_or(0);
+    for at in &mut d.at {
+        at.1 -= top;
+    }
+    for point in d.routes.iter_mut().flatten() {
+        point.1 -= top;
+    }
+    d.size.1 = d.size.1.saturating_sub(u32::try_from(top).unwrap_or(0));
+    d
+}
+
 /// Returns the heap bytes a graph of addresses holds.
 ///
 /// # Arguments
@@ -750,4 +807,490 @@ fn referrers(a: &Analysis, at: u64) -> Vec<(u64, Sites<RefKind>)> {
             (from, Sites::of(kind, &sites))
         })
         .collect()
+}
+
+/// A node of a class graph.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassNode {
+    /// The qualified name.
+    pub name: Box<str>,
+    /// The class's primary vtable, when it has one.
+    pub vtable: Option<u64>,
+    /// Whether the analysis recovered the class
+    /// ([`crate::analysis::ClassFacts::by_name`]); a class only a parent
+    /// link names is not recovered.
+    pub recovered: bool,
+    /// Whether the class has a parent or child the cap left out of the
+    /// graph.
+    pub open: bool,
+}
+
+/// An edge of a class graph: from a parent to a class deriving from it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Derivation {
+    /// Where the parent's subobject sits in the derived class.
+    pub offset: BaseOffset,
+    /// How the parent is known.
+    pub evidence: ParentEvidence,
+}
+
+/// Tells whether a name is a subobject offset in hex rather than a class.
+///
+/// A further base's table no base names is filed under its offset
+/// ([`crate::analysis::ClassFacts::secondary_vtables`]); no C++ name starts
+/// with a digit.
+///
+/// # Arguments
+///
+/// * `name` - The name.
+fn is_offset(name: &str) -> bool {
+    name.strip_prefix("0x")
+        .is_some_and(|h| !h.is_empty() && h.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// Returns a class's direct parents: every link its bases state, leaving
+/// out the class itself and offsets standing in for unnamed bases, the
+/// first link naming each parent kept.
+///
+/// # Arguments
+///
+/// * `p` - The image, which run-time type information is read from.
+/// * `rtti` - The type descriptor names read so far.
+/// * `info` - The class.
+fn links_of(p: &Program, rtti: &mut Hierarchies, info: &ClassInfo) -> Vec<ParentLink> {
+    let mut named: BTreeSet<Arc<str>> = BTreeSet::new();
+    rtti.listed(p, &info.bases)
+        .into_iter()
+        .filter(|l| *l.name != *info.name && !is_offset(&l.name))
+        .filter(|l| named.insert(Arc::clone(&l.name)))
+        .collect()
+}
+
+/// Every class a class graph may hold, by index in name order, and each
+/// one's direct parents by index.
+///
+/// Built once per graph from what the analysis keeps and the run-time type
+/// information read on request: a name for each class and parent and four
+/// bytes for each link, however the classes share their lists.
+struct Lineages<'a> {
+    /// Every class and every name a parent link states, but offsets,
+    /// sorted.
+    names: Vec<&'a str>,
+    /// Where each name's parents start in `parents`, then one past the
+    /// last.
+    starts: Vec<usize>,
+    /// Each name's parents, by index, in the order its links state them.
+    parents: Vec<u32>,
+}
+
+impl<'a> Lineages<'a> {
+    /// Returns every class and parent of the analysis with its parents.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The image, which run-time type information is read from.
+    /// * `a` - The analysis.
+    /// * `rtti` - The type descriptor names read so far.
+    /// * `named` - Every parent name no class of the analysis has.
+    fn new(p: &Program, a: &'a Analysis, rtti: &mut Hierarchies, named: &'a [Arc<str>]) -> Self {
+        let classes = a.classes.by_name.keys().map(String::as_str);
+        let mut names: Vec<&str> = classes.filter(|c| !is_offset(c)).collect();
+        names.extend(named.iter().map(|n| &**n));
+        names.sort_unstable();
+        names.dedup();
+        let mut h = Lineages {
+            starts: Vec::with_capacity(names.len() + 1),
+            names,
+            parents: Vec::new(),
+        };
+        h.starts.push(0);
+        for k in 0..h.names.len() {
+            let links = h
+                .names
+                .get(k)
+                .and_then(|n| a.classes.by_name.get(*n))
+                .map(|info| links_of(p, rtti, info))
+                .unwrap_or_default();
+            let row: Vec<u32> = links
+                .iter()
+                .filter_map(|l| u32::try_from(h.index(&l.name)?).ok())
+                .collect();
+            h.parents.extend(row);
+            h.starts.push(h.parents.len());
+        }
+        h
+    }
+
+    /// Returns a name's index, when the graph may hold it.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The class's qualified name.
+    fn index(&self, name: &str) -> Option<usize> {
+        self.names.binary_search(&name).ok()
+    }
+
+    /// Returns a class's parents by index.
+    ///
+    /// # Arguments
+    ///
+    /// * `k` - The class's index.
+    fn parents(&self, k: usize) -> impl Iterator<Item = usize> + '_ {
+        let (from, to) = (self.starts.get(k), self.starts.get(k + 1));
+        let row = from
+            .zip(to)
+            .and_then(|(&f, &t)| self.parents.get(f..t))
+            .unwrap_or_default();
+        row.iter()
+            .map(|&i| usize::try_from(i).unwrap_or(usize::MAX))
+    }
+
+    /// Returns each class's children by index: where each one's start,
+    /// then one past the last, and the children in index order.
+    fn children(&self) -> (Vec<usize>, Vec<u32>) {
+        let n = self.names.len();
+        let mut starts = vec![0usize; n + 1];
+        for k in 0..n {
+            for parent in self.parents(k) {
+                if let Some(s) = starts.get_mut(parent + 1) {
+                    *s += 1;
+                }
+            }
+        }
+        for i in 1..starts.len() {
+            starts[i] += starts[i - 1];
+        }
+        let mut filled = starts.clone();
+        let mut children = vec![0u32; self.parents.len()];
+        for k in 0..n {
+            let Ok(child) = u32::try_from(k) else { break };
+            for parent in self.parents(k) {
+                if let Some(at) = filled.get_mut(parent) {
+                    if let Some(slot) = children.get_mut(*at) {
+                        *slot = child;
+                    }
+                    *at += 1;
+                }
+            }
+        }
+        (starts, children)
+    }
+}
+
+/// Returns every parent name no class of the analysis has, sorted.
+///
+/// # Arguments
+///
+/// * `p` - The image, which run-time type information is read from.
+/// * `a` - The analysis.
+/// * `rtti` - The type descriptor names read so far.
+fn parent_names(p: &Program, a: &Analysis, rtti: &mut Hierarchies) -> Vec<Arc<str>> {
+    let mut named: BTreeSet<Arc<str>> = BTreeSet::new();
+    for (c, info) in &a.classes.by_name {
+        if is_offset(c) {
+            continue;
+        }
+        for l in links_of(p, rtti, info) {
+            if !a.classes.by_name.contains_key(&*l.name) {
+                named.insert(l.name);
+            }
+        }
+    }
+    named.into_iter().collect()
+}
+
+/// Returns the classes a graph about one class holds, in the order it
+/// takes them, by index.
+///
+/// The class, its ancestors a level at a time, its descendants a level at
+/// a time, then the other parents of those descendants.
+///
+/// # Arguments
+///
+/// * `h` - Every class and its parents.
+/// * `focus` - The class's index.
+fn lineage(h: &Lineages<'_>, focus: usize) -> Vec<usize> {
+    let mut seen = vec![false; h.names.len()];
+    let mut take = |k: usize, out: &mut Vec<usize>| {
+        if let Some(s) = seen.get_mut(k).filter(|s| !**s) {
+            *s = true;
+            out.push(k);
+            return true;
+        }
+        false
+    };
+    let mut out = Vec::new();
+    take(focus, &mut out);
+    let mut at = 0;
+    while let Some(&c) = out.get(at) {
+        at += 1;
+        for parent in h.parents(c) {
+            take(parent, &mut out);
+        }
+    }
+    let (starts, children) = h.children();
+    let mut down = vec![focus];
+    let mut at = 0;
+    while let Some(&c) = down.get(at) {
+        at += 1;
+        let row = starts
+            .get(c)
+            .zip(starts.get(c + 1))
+            .and_then(|(&f, &t)| children.get(f..t))
+            .unwrap_or_default();
+        for &child in row {
+            let child = usize::try_from(child).unwrap_or(usize::MAX);
+            if take(child, &mut out) {
+                down.push(child);
+            }
+        }
+    }
+    for &d in &down {
+        for parent in h.parents(d) {
+            take(parent, &mut out);
+        }
+    }
+    out
+}
+
+/// Returns the class hierarchy as a typed graph: each class a node, each
+/// edge from a direct parent to a class deriving from it, with where the
+/// parent sits and how it is known.
+///
+/// About one class, the graph holds its ancestors and descendants and the
+/// other parents of those descendants, in that order when the cap cuts,
+/// and its root is the class's topmost ancestor along first parents;
+/// about none, every class in name order, its root the first with no
+/// parent. Edges point from parent to child, down the drawing; only those
+/// among the drawn classes are held, the rest counted. A class named its
+/// own parent is left out of its parents, and a cycle of parents closes
+/// with a back edge. Run-time type information is read from the image as
+/// the graph is built. It reads no names, so it is built once per class
+/// and cap and kept in the memo.
+///
+/// # Arguments
+///
+/// * `p` - The image, which run-time type information is read from.
+/// * `a` - The analysis.
+/// * `focus` - The class the graph is about, by qualified name, or `None`
+///   for every class.
+/// * `cap` - Most nodes, from 1 to [`GRAPH_NODES_MAX`].
+///
+/// # Returns
+///
+/// The graph, its nodes by name; `None` when `focus` names no class the
+/// analysis recovered or a parent link names, or the program has no class.
+#[must_use]
+pub fn class_graph(
+    p: &Program,
+    a: &Analysis,
+    focus: Option<&str>,
+    cap: usize,
+) -> Option<Arc<TypedGraph<ClassNode, Derivation>>> {
+    let cap = cap.clamp(1, GRAPH_NODES_MAX);
+    let built = a.derived.get_or_build_item(
+        "class graph",
+        Overlay::default().fingerprint(),
+        (focus.map(str::to_owned), cap),
+        || classes(p, a, focus, cap).map(Arc::new),
+        |g| {
+            g.as_ref().map_or(0, |g| {
+                g.shell_bytes() + g.nodes.iter().map(|n| n.name.len()).sum::<usize>()
+            })
+        },
+    );
+    (*built).clone()
+}
+
+/// The edges a class graph holds, the classes with a parent or child it
+/// leaves out, and how many edges there are among the classes it
+/// considers ([`class_links`]).
+struct ClassLinks {
+    /// The edges between drawn classes, by parent, then child.
+    edges: Vec<Link<Derivation>>,
+    /// The classes, by index, with an edge the graph does not hold.
+    open: BTreeSet<usize>,
+    /// Edges among every class the graph considers.
+    total: usize,
+}
+
+/// Returns a class graph's edges among its drawn classes.
+///
+/// Only an edge between drawn classes is held, the first
+/// [`GRAPH_EDGES_MAX`] by parent, then child; the rest are counted. A
+/// drawn class's links are read again for where each parent sits and how
+/// it is known.
+///
+/// # Arguments
+///
+/// * `p` - The image, which run-time type information is read from.
+/// * `a` - The analysis.
+/// * `rtti` - The type descriptor names read so far.
+/// * `h` - Every class and its parents.
+/// * `within` - Whether the graph considers each class, by index.
+/// * `drawn` - The drawn classes' indices, sorted.
+fn class_links(
+    p: &Program,
+    a: &Analysis,
+    rtti: &mut Hierarchies,
+    h: &Lineages<'_>,
+    within: &[bool],
+    drawn: &[usize],
+) -> ClassLinks {
+    let considered = |k: usize| within.get(k).copied().unwrap_or(false);
+    let place = |k: usize| drawn.binary_search(&k).ok();
+    let mut out = ClassLinks {
+        edges: Vec::new(),
+        open: BTreeSet::new(),
+        total: 0,
+    };
+    for (child, name) in h.names.iter().enumerate().filter(|(k, _)| considered(*k)) {
+        out.total += h.parents(child).filter(|&q| considered(q)).count();
+        let Some(to) = place(child) else {
+            out.open.extend(
+                h.parents(child)
+                    .filter(|&q| considered(q) && place(q).is_some()),
+            );
+            continue;
+        };
+        let links = a
+            .classes
+            .by_name
+            .get(*name)
+            .map(|info| links_of(p, rtti, info));
+        for l in links.unwrap_or_default() {
+            let Some(parent) = h.index(&l.name).filter(|&q| considered(q)) else {
+                continue;
+            };
+            let Some(from) = place(parent) else {
+                out.open.insert(child);
+                continue;
+            };
+            let kind = Derivation {
+                offset: l.offset,
+                evidence: l.evidence,
+            };
+            out.edges.push(Link {
+                from,
+                to,
+                kind,
+                back: false,
+            });
+        }
+    }
+    out.edges.sort_by_key(|e| (e.from, e.to));
+    for e in out.edges.get(GRAPH_EDGES_MAX..).unwrap_or_default() {
+        out.open
+            .extend([e.from, e.to].iter().filter_map(|&k| drawn.get(k)));
+    }
+    out.edges.truncate(GRAPH_EDGES_MAX);
+    out.edges.shrink_to_fit();
+    out
+}
+
+/// Builds the graph [`class_graph`] keeps.
+///
+/// # Arguments
+///
+/// * `p` - The image, which run-time type information is read from.
+/// * `a` - The analysis.
+/// * `focus` - The class the graph is about, if any.
+/// * `cap` - Most nodes.
+fn classes(
+    p: &Program,
+    a: &Analysis,
+    focus: Option<&str>,
+    cap: usize,
+) -> Option<TypedGraph<ClassNode, Derivation>> {
+    let mut rtti = Hierarchies::default();
+    let named = parent_names(p, a, &mut rtti);
+    let h = Lineages::new(p, a, &mut rtti, &named);
+    let focus = match focus {
+        Some(f) => Some(h.index(f)?),
+        None => None,
+    };
+    let found: Vec<usize> = match focus {
+        Some(f) => lineage(&h, f),
+        None => (0..h.names.len()).collect(),
+    };
+    let mut within = vec![false; h.names.len()];
+    for &k in &found {
+        if let Some(w) = within.get_mut(k) {
+            *w = true;
+        }
+    }
+    let mut drawn: Vec<usize> = found.iter().take(cap).copied().collect();
+    drawn.sort_unstable();
+    if drawn.is_empty() {
+        return None;
+    }
+    let ClassLinks {
+        mut edges,
+        open,
+        total,
+    } = class_links(p, a, &mut rtti, &h, &within, &drawn);
+    let root = class_root(&h, focus, &drawn, &edges);
+    let nodes: Vec<ClassNode> = drawn
+        .iter()
+        .filter_map(|&k| Some((k, *h.names.get(k)?)))
+        .map(|(k, n)| ClassNode {
+            name: n.into(),
+            vtable: a.classes.by_name.get(n).and_then(|c| c.vtable),
+            recovered: a.classes.by_name.contains_key(n),
+            open: open.contains(&k),
+        })
+        .collect();
+    let cut = Cut {
+        shown: nodes.len(),
+        total: found.len(),
+        edges_shown: edges.len(),
+        edges_total: total,
+        shortened: 0,
+    };
+    let sizes = nodes.iter().map(|n| name_box(&n.name)).collect();
+    let drawing = draw_forest(sizes, root, &mut edges);
+    Some(TypedGraph {
+        nodes,
+        root,
+        edges,
+        cut: cut.kept(),
+        incomplete: a.incomplete,
+        unseen: Unseen::Uncounted(Uncounted::NoCalls),
+        drawing: Arc::new(drawing),
+    })
+}
+
+/// Returns the node a class graph's layers count from: the topmost
+/// ancestor of the class asked about along first parents, else the first
+/// class with no parent drawn.
+///
+/// # Arguments
+///
+/// * `h` - Every class and its parents.
+/// * `focus` - The index of the class the graph is about, if any.
+/// * `drawn` - The drawn classes' indices, sorted.
+/// * `edges` - The edges, from parent to child.
+fn class_root<E>(
+    h: &Lineages<'_>,
+    focus: Option<usize>,
+    drawn: &[usize],
+    edges: &[Link<E>],
+) -> usize {
+    let place = |k: usize| drawn.binary_search(&k).ok();
+    match focus {
+        Some(f) => {
+            let mut top = f;
+            for _ in 0..drawn.len() {
+                match h.parents(top).next() {
+                    Some(q) if place(q).is_some() => top = q,
+                    Some(_) | None => break,
+                }
+            }
+            place(top).unwrap_or(0)
+        }
+        None => {
+            let derived: BTreeSet<usize> = edges.iter().map(|e| e.to).collect();
+            (0..drawn.len()).find(|n| !derived.contains(n)).unwrap_or(0)
+        }
+    }
 }

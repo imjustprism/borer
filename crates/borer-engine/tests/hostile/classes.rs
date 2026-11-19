@@ -6,7 +6,7 @@ use borer_engine::analysis::Analysis;
 use borer_engine::num::from_usize;
 use borer_engine::program::{Arch, Program, Section};
 
-use super::{kept, measured, put32, serial};
+use super::{LOAD_HEAP_PER_BYTE, kept, measured, put32, serial};
 
 /// Classes with a locator of their own.
 const RTTI_CLASSES: usize = 2000;
@@ -227,4 +227,97 @@ fn classes_with_sliding_base_arrays_keep_no_bases_each() {
         all <= one + one / 10,
         "63 sliding bases each kept {all} bytes of heap, one {one}"
     );
+}
+
+/// A graph about one class, every class's base array sliding, stays
+/// within the load bar.
+///
+/// No two classes list the same bases; finding the class's children costs
+/// four bytes a link, not a list of names per distinct list.
+///
+/// The names, one list per distinct list, took 3.5 MB for this 0.3 MB
+/// file (2026-11-23).
+#[test]
+fn a_class_graph_over_sliding_base_arrays_stays_within_the_bar() {
+    use borer_engine::analysis::render::{GRAPH_NODES_MAX, class_graph};
+    let _serial = serial();
+    let p = rtti_classes(64, Spread::Sliding);
+    let a = Analysis::compute(&p);
+    let (g, extra) = measured(|| class_graph(&p, &a, Some("C0007"), GRAPH_NODES_MAX));
+    let g = g.expect("a graph");
+    assert_eq!(g.nodes.len(), 64, "the class and its 63 parents");
+    let size = p.bytes.len();
+    println!("class graph: {extra} bytes of heap for a {size} byte file");
+    assert!(
+        extra <= LOAD_HEAP_PER_BYTE * size,
+        "a {size} byte file took {extra} bytes of heap"
+    );
+}
+
+/// Most classes [`classes_sharing_their_bases`] builds.
+const SHARING: usize = 16_384;
+/// Heap a class graph may take per class it considers but does not draw.
+///
+/// That is its name in the lists of classes found and seen, and four
+/// bytes for each of its at most 63 parent links, once as a parent and
+/// once as a child. It measured 300 bytes about every class and 585 about
+/// a base (2026-11-23).
+const CLASS_GRAPH_BYTES: usize = 640;
+
+/// Returns an analysis of `n` classes, each with the same 63 direct bases,
+/// one shared list.
+///
+/// # Arguments
+///
+/// * `n` - How many classes.
+fn classes_sharing_their_bases(n: usize) -> Analysis {
+    use borer_engine::analysis::vtables::{Bases, ClassInfo, ParentEvidence, ParentLink};
+    let bases: std::sync::Arc<[ParentLink]> = (0..63)
+        .map(|k| ParentLink::at_start(format!("B{k:02}"), ParentEvidence::Rtti))
+        .collect();
+    let mut a = Analysis::default();
+    for i in 0..n {
+        let name = format!("C{i:05}");
+        let info = ClassInfo {
+            name: name.clone(),
+            bases: Bases::Stated(std::sync::Arc::clone(&bases)),
+            ..ClassInfo::default()
+        };
+        a.classes.by_name.insert(name, info);
+    }
+    a
+}
+
+/// A class graph of classes sharing 63 bases holds links only for the
+/// nodes it draws and counts the rest.
+///
+/// About every class or about a base, past the 1024 nodes the cap draws,
+/// each further class costs at most [`CLASS_GRAPH_BYTES`] of heap.
+///
+/// Built over every class first, the links of the graph of 16,384
+/// classes took 113 MB, about 7 KB of heap per class.
+#[test]
+fn a_class_graph_of_classes_sharing_their_bases_holds_what_it_draws() {
+    use borer_engine::analysis::render::{GRAPH_NODES_MAX, class_graph};
+    let _serial = serial();
+    let p = Program::raw(Vec::new(), Arch::X86, 0, None, Vec::new());
+    for focus in [None, Some("B00")] {
+        let heap = |n: usize| {
+            let a = classes_sharing_their_bases(n);
+            let (g, extra) = measured(|| class_graph(&p, &a, focus, GRAPH_NODES_MAX));
+            let g = g.expect("a graph");
+            let cut = g.cut.expect("the cap cuts");
+            assert_eq!((g.nodes.len(), cut.edges_total), (GRAPH_NODES_MAX, 63 * n));
+            extra
+        };
+        let (few, many) = (heap(SHARING / 4), heap(SHARING));
+        println!(
+            "class graph about {focus:?}: {few} bytes of heap, {many} for 4 times the classes"
+        );
+        let more = SHARING - SHARING / 4;
+        assert!(
+            many <= few + CLASS_GRAPH_BYTES * more,
+            "{focus:?}: {many} bytes of heap for {SHARING} classes, {few} for a quarter"
+        );
+    }
 }

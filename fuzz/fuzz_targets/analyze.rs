@@ -12,7 +12,7 @@
 //! request takes after a load. The first functions' call graphs, typed
 //! and mermaid, and call tree levels are walked both ways too, with their
 //! reference graphs, and the callers of the first imports, which have no
-//! body.
+//! body; the class graph is drawn whole and about the first class.
 
 #![no_main]
 
@@ -22,7 +22,7 @@ use borer_engine::analysis::decompile::{decompile, unit_of};
 use borer_engine::analysis::modsdk::{self, header::class_headers};
 use borer_engine::analysis::render::{
     Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, call_graph, callgraph, cfg,
-    disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv,
+    class_graph, disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv,
     source_vocabulary_tsv, triage, xref_graph,
 };
 use borer_engine::analysis::split::{sources, split_map};
@@ -142,6 +142,14 @@ fuzz_target!(|data: &[u8]| {
     _ = asserted_fields_tsv(&program, &analysis, &overlay, "");
     _ = source_tree_tsv(&program, &analysis, ".");
     _ = source_vocabulary_tsv(&program, &analysis, &overlay, ".");
+    for focus in [
+        None,
+        analysis.classes.by_name.keys().next().map(String::as_str),
+    ] {
+        if let Some(g) = class_graph(&program, &analysis, focus, LISTED) {
+            assert_eq!(g.layout().at.len(), g.nodes.len());
+        }
+    }
     for class in analysis.classes.by_name.keys().take(DECOMPILED) {
         _ = family_of(&analysis, &overlay, class);
         if let Some(layout) = class_layout(&program, &analysis, &overlay, class) {

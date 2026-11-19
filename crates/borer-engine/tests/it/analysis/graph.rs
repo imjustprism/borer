@@ -950,6 +950,174 @@ fn past_the_edge_limit_every_node_keeps_the_edge_that_reached_it() {
     drawn_down(&g, |n| &n.name);
 }
 
+/// The class hierarchy is a typed graph: each edge from a direct parent to
+/// a class deriving from it says where the parent sits and how it is known.
+///
+/// Run-time type information gives `Foo` three direct bases, `Base` at 0,
+/// `Other` at 8 and the virtual `VBase`, and leaves out `Root`, which
+/// `Base` contains. In the shared fixture `Der`'s parent is known from a
+/// vtable, at offset 0, and `Ns::T3`'s from a descriptor, which says no
+/// offset.
+#[test]
+fn the_class_hierarchy_is_a_typed_graph_with_evidence() {
+    use borer_engine::analysis::render::{Cut, Derivation, class_graph};
+    use borer_engine::analysis::vtables::{BaseOffset, ParentEvidence};
+    let p = classes::multiple_bases();
+    let a = Analysis::compute(&p);
+    let g = class_graph(&p, &a, Some("Foo"), 16).expect("Foo is a class");
+    let nodes: Vec<(&str, Option<u64>, bool)> = g
+        .nodes
+        .iter()
+        .map(|n| (&*n.name, n.vtable, n.recovered))
+        .collect();
+    assert_eq!(
+        nodes,
+        [
+            ("Base", None, false),
+            ("Foo", Some(0x402018), true),
+            ("Other", None, false),
+            ("VBase", None, false)
+        ],
+        "{g:?}"
+    );
+    let rtti = |offset| Derivation {
+        offset,
+        evidence: ParentEvidence::Rtti,
+    };
+    let edges: Vec<(usize, usize, Derivation)> =
+        g.edges.iter().map(|e| (e.from, e.to, e.kind)).collect();
+    let want = [
+        (0, 1, rtti(BaseOffset::At(0))),
+        (2, 1, rtti(BaseOffset::At(8))),
+        (3, 1, rtti(BaseOffset::Virtual)),
+    ];
+    assert_eq!(edges, want, "{g:?}");
+    assert_eq!((g.root, g.cut), (0, None));
+    drawn_down(&g, |n| &n.name);
+    assert!(class_graph(&p, &a, Some("Nobody"), 16).is_none());
+    let all = class_graph(&p, &a, None, 2).expect("every class");
+    let names: Vec<&str> = all.nodes.iter().map(|n| &*n.name).collect();
+    assert_eq!(names, ["Base", "Foo"], "{all:?}");
+    let cut = Cut {
+        shown: 2,
+        total: 4,
+        edges_shown: 1,
+        edges_total: 3,
+        shortened: 0,
+    };
+    assert_eq!(all.cut, Some(cut));
+    let open: Vec<bool> = all.nodes.iter().map(|n| n.open).collect();
+    assert_eq!(open, [false, true], "Foo's other bases are cut: {all:?}");
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let parent_of = |class: &str| {
+        let g = class_graph(&p, &a, Some(class), 64).expect("a class");
+        let at = |name: &str| g.nodes.iter().position(|n| &*n.name == name);
+        let e = g.edges.iter().find(|e| Some(e.to) == at(class))?;
+        Some((g.nodes[e.from].name.to_string(), e.kind))
+    };
+    let parent =
+        |name: &str, offset, evidence| Some((name.to_owned(), Derivation { offset, evidence }));
+    let (vtable, descriptor) = (ParentEvidence::Vtable, ParentEvidence::Descriptor);
+    assert_eq!(parent_of("Der"), parent("Base", BaseOffset::At(0), vtable));
+    let thing = parent("Ns::Thing", BaseOffset::Unstated, descriptor);
+    assert_eq!(parent_of("Ns::T3"), thing);
+}
+
+/// Returns an analysis holding only classes and their parents, as a
+/// hostile or hand-built one might.
+///
+/// # Arguments
+///
+/// * `classes` - Each class's name and its parents' names.
+fn stated_classes(classes: &[(&str, &[&str])]) -> Analysis {
+    use borer_engine::analysis::vtables::{ClassInfo, ParentEvidence, ParentLink};
+    let mut a = Analysis::default();
+    for &(name, parents) in classes {
+        let links: Vec<ParentLink> = parents
+            .iter()
+            .map(|&p| ParentLink::at_start(p, ParentEvidence::Rtti))
+            .collect();
+        let info = ClassInfo {
+            name: name.to_owned(),
+            bases: borer_engine::analysis::vtables::Bases::Stated(links.into()),
+            ..ClassInfo::default()
+        };
+        a.classes.by_name.insert(name.to_owned(), info);
+    }
+    a
+}
+
+/// A class graph holds what hostile or odd parents state.
+///
+/// About a base it shows the other parents of its descendants; it leaves
+/// out a class named its own parent and a base named by its offset, closes
+/// a cycle of parents with a back edge, and is no graph without a class.
+#[test]
+fn a_class_graph_holds_what_hostile_parents_state() {
+    use borer_engine::analysis::render::class_graph;
+    let p = Program::raw(Vec::new(), Arch::X86_64, 0, None, Vec::new());
+    let a = stated_classes(&[
+        ("CBase", &[]),
+        ("CFoo", &["CBase", "IFoo"]),
+        ("Self", &["Self"]),
+        ("Odd", &["0x10"]),
+        ("A", &["B"]),
+        ("B", &["A"]),
+    ]);
+    let g = class_graph(&p, &a, Some("CBase"), 16).expect("CBase is a class");
+    let names: Vec<&str> = g.nodes.iter().map(|n| &*n.name).collect();
+    assert_eq!(names, ["CBase", "CFoo", "IFoo"], "{g:?}");
+    assert_eq!(g.edges.len(), 2, "{g:?}");
+    let alone = class_graph(&p, &a, Some("Self"), 16).expect("a class");
+    assert_eq!((alone.nodes.len(), alone.edges.len()), (1, 0), "{alone:?}");
+    let odd = class_graph(&p, &a, Some("Odd"), 16).expect("a class");
+    assert_eq!((odd.nodes.len(), odd.edges.len()), (1, 0), "{odd:?}");
+    assert!(class_graph(&p, &a, Some("0x10"), 16).is_none());
+    let cycle = class_graph(&p, &a, Some("A"), 16).expect("a class");
+    let back: Vec<bool> = cycle.edges.iter().map(|e| e.back).collect();
+    assert_eq!(back.iter().filter(|&&b| b).count(), 1, "{cycle:?}");
+    drawn_down(&cycle, |n| &n.name);
+    let all = class_graph(&p, &a, None, 64).expect("every class");
+    assert!(all.nodes.iter().all(|n| &*n.name != "0x10"), "{all:?}");
+    assert!(class_graph(&p, &Analysis::default(), None, 64).is_none());
+    let twice = stated_classes(&[("A", &[]), ("B", &["A", "A"])]);
+    let g = class_graph(&p, &twice, None, 64).expect("every class");
+    assert_eq!((g.edges.len(), g.cut), (1, None), "{g:?}");
+    let one_source = stated_classes(&[
+        ("F", &[]),
+        ("S", &[]),
+        ("T", &["F", "S"]),
+        ("D", &["T", "S"]),
+    ]);
+    let g = class_graph(&p, &one_source, Some("D"), 3).expect("D is a class");
+    drawn_down(&g, |n| &n.name);
+}
+
+/// A class graph and its drawing come out the same over two analyses and
+/// with the analysis run on one worker or sixteen.
+#[test]
+fn a_class_graph_draws_the_same_at_any_worker_count() {
+    use borer_engine::analysis::render::class_graph;
+    use borer_engine::progress::Workers;
+    let p = fixture();
+    let drawn = |a: &Analysis| {
+        let g = class_graph(&p, a, None, 64).expect("every class");
+        let input = laid_from(&g, |n| &n.name);
+        (
+            crate::drawn::digest(&input, &g.layout()),
+            format!("{:?}", g.edges),
+        )
+    };
+    let want = drawn(&Analysis::compute(&p));
+    assert!(want.1.len() > 2 && want == drawn(&Analysis::compute(&p)));
+    for n in [1, 16] {
+        let count = std::num::NonZeroUsize::new(n).unwrap_or(std::num::NonZeroUsize::MIN);
+        let a = Workers(count).within(|| Analysis::compute(&p));
+        assert_eq!(drawn(&a), want, "{n} workers");
+    }
+}
+
 /// Builds a raw x86-64 image with one unresolved call.
 ///
 /// `sub_401000` calls `sub_401040`, calls through `rax` and reads the
@@ -1032,4 +1200,55 @@ fn an_address_in_no_function_is_code_only_in_an_executable_section() {
     };
     assert_eq!(kind(0x4010f0), Some(AddrKind::Code));
     assert_eq!(kind(0x403000), Some(AddrKind::Data));
+}
+
+/// A typed graph says which of three things it knows of the calls it could
+/// not see, and which functions it counted.
+///
+/// None were left unresolved, how many were, or why it did not count
+/// them.
+#[test]
+fn a_typed_graph_says_whether_it_counted_what_it_could_not_see() {
+    use borer_engine::analysis::render::{
+        Among, Uncounted, Unseen, Walk, call_graph, class_graph, xref_graph,
+    };
+    let o = Overlay::default();
+    let p = unseen_image();
+    let a = Analysis::compute(&p);
+    let missed = |u: Unseen| match u {
+        Unseen::Missed(m) => Some((m.sites(), m.functions(), m.among())),
+        Unseen::Resolved(_) | Unseen::Uncounted(_) => None,
+    };
+    let callees = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 2, 16).unseen;
+    assert_eq!(missed(callees), Some((1, 1, Among::Walked)), "{callees:?}");
+    let leaf = call_graph(&p, &a, &o, 0x401080, Walk::Callees, 2, 16).unseen;
+    assert_eq!(leaf, Unseen::Resolved(Among::Walked));
+    let callers = call_graph(&p, &a, &o, 0x401080, Walk::Callers, 2, 16).unseen;
+    assert_eq!(missed(callers), Some((1, 1, Among::Program)), "{callers:?}");
+    let global = xref_graph(&p, &a, &o, 0x403000, 1, 16).unseen;
+    assert_eq!(
+        (global, global.among()),
+        (Unseen::Uncounted(Uncounted::Uncalled), None)
+    );
+    let clean = call_tree_image();
+    let resolved = xref_graph(&clean, &Analysis::compute(&clean), &o, 0x401020, 1, 16).unseen;
+    assert_eq!(resolved, Unseen::Resolved(Among::Program));
+    let wide = wide_calls();
+    let shared = Analysis::compute(&wide);
+    let helper = 0x401000 + 0x6000;
+    let many = call_graph(&wide, &shared, &o, helper, Walk::Callers, 1, 16).unseen;
+    assert_eq!(
+        (many, many.among()),
+        (Unseen::Uncounted(Uncounted::ManyCallers), None)
+    );
+    let refs = xref_graph(&wide, &shared, &o, helper, 1, 16).unseen;
+    assert_eq!(refs, Unseen::Uncounted(Uncounted::ManyCallers));
+    let rtti = classes::multiple_bases();
+    let classes = class_graph(&rtti, &Analysis::compute(&rtti), None, 16)
+        .expect("a class graph")
+        .unseen;
+    assert_eq!(
+        (classes, classes.among()),
+        (Unseen::Uncounted(Uncounted::NoCalls), None)
+    );
 }
