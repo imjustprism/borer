@@ -94,7 +94,7 @@ type CardState = (usize, std::mem::Discriminant<thread::Verdict>, bool);
 pub const PANEL: PanelSpec = PanelSpec {
     key: "Chat",
     title: "Chat",
-    icon: Glyph::Zed(IconName::AiClaude),
+    icon: Glyph::Zed(IconName::Chat),
     toggle: &ToggleChat,
     dock: DockPosition::Right,
     docks: &[
@@ -111,7 +111,7 @@ pub const PANEL: PanelSpec = PanelSpec {
     },
     remove: remove::<ChatPanel>,
     focus: |workspace, window, cx| {
-        workspace.toggle_panel_focus::<ChatPanel>(window, cx);
+        (crate::rail::panel::<ChatPanel>().click)(workspace, window, cx);
     },
     current: always_current,
 };

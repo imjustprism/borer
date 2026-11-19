@@ -43,7 +43,7 @@ use workspace::{
 
 use crate::actions::{CheckForUpdates, CloseBinary, MinimizeWindow, Open, ZoomWindow};
 use crate::app_dirs::with_host_env;
-use crate::binary::{Binary, BinaryEvent, StatusLine};
+use crate::binary::{Binary, BinaryEvent};
 use crate::commands;
 use crate::functions_panel::FunctionsPanel;
 use crate::measure::CliMode;
@@ -457,10 +457,6 @@ pub fn new_workspace(
         let id = WorkspaceId::from_i64(APP_WORKSPACE_ID);
         let mut workspace = Workspace::new(Some(id), project, app_state.clone(), window, cx);
         crate::overview::open_on_load(&binary, window, cx);
-        let status = cx.new(|cx| StatusLine::new(binary.clone(), cx));
-        workspace
-            .status_bar()
-            .update(cx, |bar, cx| bar.add_left_item(status, window, cx));
         crate::status::add_items(&mut workspace, &binary, window, cx);
         workspace.status_bar().update(cx, |bar, cx| {
             while let Some(ix) = bar.position_of_item::<PanelButtons>() {

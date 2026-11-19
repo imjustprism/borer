@@ -533,7 +533,7 @@ mod tests {
     /// Before a load every cell is disabled; the load opens the functions cell; a click
     /// closes and opens it, Zed's own dock key closes it too, and after a move to the right
     /// dock it opens there, a move to the bottom being refused; Zed's own dock buttons are
-    /// gone from the status bar, so the rail is the one switch.
+    /// gone from the status bar, so the rail is the one list of panels.
     ///
     /// # Panics
     ///

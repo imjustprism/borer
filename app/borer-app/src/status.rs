@@ -2,7 +2,8 @@
 //!
 //! They are the engine's check grades of the function in the active tab, the running work
 //! with the engine's phase and progress (the load with its cancel), the active function's
-//! address, the light and dark switch and the palette's key.
+//! address, the light and dark switch, the palette's key, and a dock switch at each end:
+//! the left dock's and the chat's.
 //!
 //! Each formats what the engine or the binary holds and derives nothing; the grades come
 //! from a background engine call, never from the UI thread.
@@ -14,20 +15,21 @@ use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
 use borer_engine::progress::{Progress, Snapshot};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity, Hsla,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
+    Action, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity,
+    EntityId, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px,
 };
 use theme::{ActiveTheme as _, Theme};
 use ui::{
-    ButtonCommon as _, Clickable as _, Color, IconButton, IconName, IconSize, KeyBinding, Label,
-    LabelCommon as _, ProgressBar, Tooltip, h_flex, rems_from_px,
+    ButtonCommon as _, Clickable as _, Color, Disableable as _, IconButton, IconName, IconSize,
+    Indicator, KeyBinding, Label, LabelCommon as _, ProgressBar, Toggleable as _, Tooltip, h_flex,
+    rems_from_px,
 };
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 use crate::actions::{KEY_PX, PALETTE_HINT, ToggleTheme};
 use crate::app_assets::{AppIcon, Glyph};
-use crate::binary::{Binary, reading_label, status_label};
+use crate::binary::{Binary, StatusLine, reading_label, status_label};
 use crate::check_marks::GRADE_COUNT;
 use crate::decompile_item::DecompileItem;
 use crate::worker::{GradeCounts, Job, Jobs, LoadedBinary, grade_counts_blocking};
@@ -745,9 +747,189 @@ impl StatusItemView for PaletteHint {
     }
 }
 
-/// Adds the status items to `workspace`'s status bar beside the facts line, in the order
-/// the bar shows them: grades and work on the left, then address, theme and palette on
-/// the right.
+/// A dock switch at one end of the status bar, as Zed's are for whole docks; the panels
+/// themselves are listed on the rail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DockToggle {
+    /// At the left end: shows or hides the left dock.
+    LeftDock,
+    /// At the right end: opens or closes the chat panel, in the right dock.
+    Chat,
+}
+
+/// One dock switch of the status bar.
+///
+/// Its icon shows the state Zed's docks hold, pressed while open, and a click runs the same
+/// toggle as its key, named in its tooltip; the chat's carries a dot while a turn runs with
+/// the panel hidden.
+pub struct DockSwitch {
+    /// What it switches.
+    toggle: DockToggle,
+    /// The window's workspace, whose docks it reads.
+    workspace: WeakEntity<workspace::Workspace>,
+    /// The chat thread followed, by its panel, so the dot shows when a turn starts or ends.
+    thread: Option<(EntityId, Subscription)>,
+    /// Redraws the switch when a dock changes.
+    _observe: Vec<Subscription>,
+}
+
+impl std::fmt::Debug for DockSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DockSwitch")
+            .field("toggle", &self.toggle)
+            .finish_non_exhaustive()
+    }
+}
+
+impl DockSwitch {
+    /// Returns the switch `toggle` over `workspace`'s docks.
+    ///
+    /// # Arguments
+    ///
+    /// * `toggle` - What it switches.
+    /// * `workspace` - The window's workspace.
+    /// * `cx` - Item context.
+    #[must_use]
+    pub fn new(
+        toggle: DockToggle,
+        workspace: &workspace::Workspace,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let docks = [
+            workspace.left_dock().clone(),
+            workspace.right_dock().clone(),
+        ];
+        let observe = docks
+            .iter()
+            .map(|dock| cx.observe(dock, |_, _, cx| cx.notify()))
+            .collect();
+        Self {
+            toggle,
+            workspace: workspace.weak_handle(),
+            thread: None,
+            _observe: observe,
+        }
+    }
+
+    /// Returns whether a chat turn runs with the chat panel hidden, following the panel's
+    /// thread from now on; false for the left dock's switch.
+    ///
+    /// # Arguments
+    ///
+    /// * `open` - Whether the chat panel is open.
+    /// * `cx` - Item context.
+    fn hidden_turn(&mut self, open: bool, cx: &mut Context<'_, Self>) -> bool {
+        let panel = self
+            .workspace
+            .upgrade()
+            .and_then(|workspace| workspace.read(cx).panel::<crate::chat::ChatPanel>(cx));
+        let Some(panel) = panel.filter(|_| self.toggle == DockToggle::Chat) else {
+            return false;
+        };
+        if self
+            .thread
+            .as_ref()
+            .is_none_or(|(id, _)| *id != panel.entity_id())
+        {
+            let thread = panel.read(cx).thread().clone();
+            let follow = cx.observe(&thread, |_, _, cx| cx.notify());
+            self.thread = Some((panel.entity_id(), follow));
+        }
+        !open && panel.read(cx).is_running(cx)
+    }
+
+    /// Returns whether what the switch toggles is open, `None` while the chat panel is not
+    /// docked; the left dock's switch shows, disabled, while the dock holds no panel.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The window.
+    /// * `cx` - Application context reading the docks.
+    #[must_use]
+    pub fn open(&self, window: &Window, cx: &App) -> Option<bool> {
+        let workspace = self.workspace.upgrade()?;
+        let workspace = workspace.read(cx);
+        match self.toggle {
+            DockToggle::LeftDock => Some(workspace.left_dock().read(cx).is_open()),
+            DockToggle::Chat => {
+                let placed = (crate::chat::PANEL.hooks.placed)(workspace, window, cx)?;
+                Some(placed.open)
+            }
+        }
+    }
+}
+
+impl Render for DockSwitch {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let Some(open) = self.open(window, cx) else {
+            return div().into_any_element();
+        };
+        let (icon, tooltip) = match (self.toggle, open) {
+            (DockToggle::LeftDock, true) => (IconName::ThreadsSidebarLeftOpen, "Toggle Left Dock"),
+            (DockToggle::LeftDock, false) => {
+                (IconName::ThreadsSidebarLeftClosed, "Toggle Left Dock")
+            }
+            (DockToggle::Chat, _) => (IconName::Chat, "Toggle AI Chat"),
+        };
+        let toggle = self.toggle;
+        let hidden_turn = self.hidden_turn(open, cx);
+        let empty = toggle == DockToggle::LeftDock
+            && self
+                .workspace
+                .upgrade()
+                .is_none_or(|workspace| workspace.read(cx).left_dock().read(cx).panels_len() == 0);
+        let workspace = self.workspace.clone();
+        let button = IconButton::new("dock-switch", icon)
+            .icon_size(IconSize::Small)
+            .icon_color(Color::Muted)
+            .toggle_state(open)
+            .disabled(empty)
+            .when(hidden_turn, |button| {
+                button.indicator(Indicator::dot().color(Color::Accent))
+            })
+            .on_click(move |_, window, cx| match toggle {
+                DockToggle::LeftDock => {
+                    window.dispatch_action(Box::new(workspace::ToggleLeftDock), cx);
+                }
+                DockToggle::Chat => {
+                    if let Some(workspace) = workspace.upgrade() {
+                        let click = crate::chat::PANEL.hooks.click;
+                        workspace.update(cx, |workspace, cx| click(workspace, window, cx));
+                    }
+                }
+            });
+        match toggle {
+            DockToggle::LeftDock => button.tooltip(Tooltip::for_action_title(
+                tooltip,
+                &workspace::ToggleLeftDock,
+            )),
+            DockToggle::Chat => button.tooltip(Tooltip::for_action_title(
+                tooltip,
+                crate::chat::PANEL.toggle,
+            )),
+        }
+        .into_any_element()
+    }
+}
+
+impl StatusItemView for DockSwitch {
+    fn set_active_pane_item(
+        &mut self,
+        _active_pane_item: Option<&dyn ItemHandle>,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Self>,
+    ) {
+    }
+
+    fn hide_setting(&self, _cx: &App) -> Option<HideStatusItem> {
+        None
+    }
+}
+
+/// Adds the status items to `workspace`'s status bar.
+///
+/// In the order the bar shows them: the left dock's switch, the facts line, grades and
+/// work on the left, then address, theme, palette and the chat's switch on the right.
 ///
 /// # Arguments
 ///
@@ -761,14 +943,22 @@ pub fn add_items(
     window: &mut Window,
     cx: &mut Context<'_, workspace::Workspace>,
 ) {
+    let left = cx.new(|cx| DockSwitch::new(DockToggle::LeftDock, workspace, cx));
+    let line = cx.new(|cx| StatusLine::new(binary.clone(), cx));
+    workspace.status_bar().update(cx, |bar, cx| {
+        bar.add_left_item(left, window, cx);
+        bar.add_left_item(line, window, cx);
+    });
     let grades = cx.new(|_| Grades::new(binary.clone()));
     let work = cx.new(|cx| Work::new(binary.clone(), cx));
     let address = cx.new(|_| Address::default());
     let theme = cx.new(|_| ThemeSwitch);
     let palette = cx.new(|_| PaletteHint);
+    let chat = cx.new(|cx| DockSwitch::new(DockToggle::Chat, workspace, cx));
     workspace.status_bar().update(cx, |bar, cx| {
         bar.add_left_item(grades, window, cx);
         bar.add_left_item(work, window, cx);
+        bar.add_right_item(chat, window, cx);
         bar.add_right_item(palette, window, cx);
         bar.add_right_item(theme, window, cx);
         bar.add_right_item(address, window, cx);
@@ -791,12 +981,13 @@ mod tests {
     };
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
     use borer_engine::program::{Arch, Program, Section};
+    use borer_engine::progress::{Phase, Snapshot};
     use gpui::{AppContext as _, TestAppContext, VisualTestContext};
     use workspace::Workspace;
 
-    use borer_engine::progress::{Phase, Snapshot};
-
-    use super::{Address, Grades, Work, grade_text, progress_words, shown_for};
+    use super::{
+        Address, DockSwitch, DockToggle, Grades, Work, grade_text, progress_words, shown_for,
+    };
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{
         CALLER, init, load_sample, open, open_caller, open_place, sample, shown,
@@ -1115,6 +1306,53 @@ mod tests {
         let drawn = answer_check(&loaded, 0x1000);
         assert_eq!(got, GradeCounts::of(&drawn));
         assert_eq!(got.disagree, 0);
+    }
+
+    /// The left dock's switch shows whether the left dock is open and the chat's whether the
+    /// chat panel is, each following Zed's docks; before a load the left dock is closed and
+    /// the chat's switch does not show. Zed's key for the left dock and the chat's toggle
+    /// flip what they show.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a switch shows a state Zed's docks do not hold.
+    #[gpui::test]
+    fn the_dock_switches_follow_the_docks(cx: &mut TestAppContext) {
+        the_dock_switches_follow_the_docks_steps(cx);
+    }
+
+    /// Runs the steps of [`the_dock_switches_follow_the_docks`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`the_dock_switches_follow_the_docks`] says.
+    fn the_dock_switches_follow_the_docks_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let switches = app.workspace.update(cx, |workspace, cx| {
+            [DockToggle::LeftDock, DockToggle::Chat]
+                .map(|toggle| cx.new(|cx| DockSwitch::new(toggle, workspace, cx)))
+        });
+        let states = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| switches.each_ref().map(|s| s.read(cx).open(window, cx)))
+        };
+        assert_eq!(states(cx), [Some(false), None]);
+        load_sample(&app, cx);
+        let [left, chat] = states(cx);
+        assert_eq!(left, Some(true));
+        let chat = chat.unwrap();
+        cx.dispatch_action(workspace::ToggleLeftDock);
+        cx.run_until_parked();
+        assert_eq!(states(cx), [Some(false), Some(chat)]);
+        let click = crate::chat::PANEL.hooks.click;
+        app.workspace.update_in(cx, click);
+        cx.run_until_parked();
+        assert_eq!(states(cx)[1], Some(!chat));
+        for want in [chat, !chat] {
+            cx.dispatch_action(crate::chat::ToggleChat);
+            cx.run_until_parked();
+            assert_eq!(states(cx)[1], Some(want));
+        }
     }
 
     /// The work item shows a percent only of the items the engine counts.

@@ -779,6 +779,7 @@ pub const COMMANDS: &[Command] = &[
         )
     },
     Command {
+        keys: &[Keys::all(Ctx::Workspace, &["secondary-shift-c"])],
         serves: &["query", "set_name"],
         ..item(
             "borer::ToggleChat",
