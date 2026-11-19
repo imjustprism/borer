@@ -101,19 +101,9 @@ pub struct Node {
     pub size: (u32, u32),
 }
 
-/// One successor edge of a [`Cfg`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Edge {
-    /// The source node's index in [`Cfg::nodes`].
-    pub from: usize,
-    /// The target node's index in [`Cfg::nodes`].
-    pub to: usize,
-    /// What takes the edge.
-    pub kind: EdgeKind,
-    /// Whether the edge closes a cycle: the depth-first walk of
-    /// [`mark_back_edges`] found its target still on the walk's stack.
-    pub back: bool,
-}
+/// One successor edge of a [`Cfg`]: its source and target node's
+/// index in [`Cfg::nodes`], what takes it, and whether it closes a cycle.
+pub type Edge = Link<EdgeKind>;
 
 /// What takes a successor edge.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -135,23 +125,6 @@ pub enum EdgeKind {
     /// target, in increasing order: each the index the table is read at,
     /// the switched value less any bias the compiler subtracted first.
     Cases(Vec<u32>),
-}
-
-/// What a [`Cfg`] left out of the function: some of its blocks, some of
-/// their edges, or the rows of a block past [`CFG_ROWS_MAX`] or past
-/// what [`CFG_LISTED_MAX`] leaves.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Cut {
-    /// Blocks drawn.
-    pub shown: usize,
-    /// Blocks the function has.
-    pub total: usize,
-    /// Edges held among the drawn blocks.
-    pub edges_shown: usize,
-    /// Edges the drawn blocks have among them.
-    pub edges_total: usize,
-    /// Drawn blocks cut short ([`Node::shortened`]).
-    pub shortened: usize,
 }
 
 /// Returns whether an arm block ends in no branch, so its two successors
@@ -423,28 +396,15 @@ fn build(p: &Program, a: &Analysis, o: &Overlay, entry: u64) -> anyhow::Result<A
         }
     }
     let root = index(entry).unwrap_or(0);
-    mark_back_edges(nodes.len(), root, &mut edges);
-    let drawing = layout(&Graph {
-        sizes: nodes.iter().map(|n| n.size).collect(),
-        edges: edges
-            .iter()
-            .map(|e| GraphEdge {
-                from: e.from,
-                to: e.to,
-                route: if e.back { Route::Up } else { Route::Down },
-            })
-            .collect(),
-        root,
-    });
+    let drawing = draw(nodes.iter().map(|n| n.size).collect(), root, &mut edges);
     let cut = Cut {
         shown: shown.len(),
         total: f.blocks.len(),
         edges_shown: edges.len(),
         edges_total,
         shortened: short.len(),
-    };
-    let cut = (cut.shown < cut.total || cut.edges_shown < cut.edges_total || cut.shortened > 0)
-        .then_some(cut);
+    }
+    .kept();
     Ok(Arc::new(Cfg {
         listing: Arc::new(listing),
         nodes,
@@ -503,71 +463,4 @@ fn block_lines(
         }
     }
     first..last.saturating_add(1).saturating_add(usize::from(cut))
-}
-
-/// Where a node stands in the walk of [`mark_back_edges`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Walk {
-    /// Not reached yet.
-    New,
-    /// On the walk's stack.
-    Open,
-    /// Left, every successor walked.
-    Done,
-}
-
-/// Marks the edges that close a cycle.
-///
-/// A depth-first walk from the root takes each node's successors in their
-/// stored order, then walks again from each node it did not reach, in
-/// address order; an edge to a node on the walk's stack is a back edge.
-/// For a reducible graph, which compiled code almost always is, these are
-/// exactly the edges whose target dominates their source; in an
-/// irreducible one the walk's order picks which edge of a cycle is back.
-/// Without the back edges the graph has no cycle. The walk keeps its own
-/// stack, so it visits each node and edge once at any depth.
-///
-/// # Arguments
-///
-/// * `n` - The node count.
-/// * `root` - The node the walk starts from.
-/// * `edges` - The edges, grouped by source in increasing order; each
-///   `back` is set.
-fn mark_back_edges(n: usize, root: usize, edges: &mut [Edge]) {
-    let mut starts = vec![0usize; n.saturating_add(1)];
-    for e in edges.iter() {
-        if let Some(s) = starts.get_mut(e.from.saturating_add(1)) {
-            *s += 1;
-        }
-    }
-    for i in 1..starts.len() {
-        starts[i] += starts[i - 1];
-    }
-    let mut state = vec![Walk::New; n];
-    let mut stack: Vec<(usize, usize)> = Vec::new();
-    for r in std::iter::once(root).chain(0..n) {
-        if state.get(r) != Some(&Walk::New) {
-            continue;
-        }
-        state[r] = Walk::Open;
-        stack.push((r, starts[r]));
-        while let Some(top) = stack.last_mut() {
-            let (v, k) = *top;
-            if k >= starts[v + 1] {
-                state[v] = Walk::Done;
-                stack.pop();
-                continue;
-            }
-            top.1 += 1;
-            let Some(e) = edges.get_mut(k) else { continue };
-            match state.get(e.to) {
-                Some(Walk::Open) => e.back = true,
-                Some(Walk::New) => {
-                    state[e.to] = Walk::Open;
-                    stack.push((e.to, starts[e.to]));
-                }
-                Some(Walk::Done) | None => {}
-            }
-        }
-    }
 }
