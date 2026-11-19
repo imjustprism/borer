@@ -204,6 +204,7 @@ impl Harness {
         });
         self.keys = 0;
         self.clicks = 0;
+        self.buttons = (0, 0);
         self.before = None;
         self.marks.clear();
         let run = InputRun {
@@ -368,9 +369,17 @@ impl Harness {
                     say(&format!("CALL_TARGET x={x:.2} y={y:.2} clicks={clicks}"))?;
                 }
                 TargetDecision::Wait => {}
-                TargetDecision::Abort => anyhow::bail!(
-                    "input latency benchmark stalled at click {clicks} after 8 retries"
-                ),
+                TargetDecision::Abort => {
+                    let (downs, ups) = self.buttons;
+                    let why = if downs == 0 {
+                        "no click reached the window"
+                    } else {
+                        "clicks reached the window but none opened a function"
+                    };
+                    anyhow::bail!(
+                        "input latency benchmark stalled at click {clicks} after 8 retries:                          {why} ({downs} button presses, {ups} releases)"
+                    )
+                }
             }
             return Ok(InputStep::Continue);
         }

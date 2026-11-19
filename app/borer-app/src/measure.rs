@@ -760,6 +760,9 @@ pub struct Harness {
     keys: u64,
     /// Clicks that opened a function.
     clicks: u64,
+    /// Mouse button presses and releases the window received, armed or not, so a stall
+    /// tells a click that never arrived from one that opened nothing.
+    buttons: (u64, u64),
     /// When the functions panel last changed.
     panel_changed: Option<Instant>,
     /// When the watched decompile tab last changed.
@@ -862,6 +865,7 @@ impl Harness {
             before: None,
             keys: 0,
             clicks: 0,
+            buttons: (0, 0),
             panel_changed: None,
             item_changed: None,
             watched: None,
@@ -1181,8 +1185,14 @@ impl Render for Harness {
         self.check_one_shot(window, cx);
         div()
             .size_full()
-            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.arrive(cx)))
-            .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, _, cx| this.arrive(cx)))
+            .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                this.buttons.0 = this.buttons.0.saturating_add(1);
+                this.arrive(cx);
+            }))
+            .capture_any_mouse_up(cx.listener(|this, _: &MouseUpEvent, _, cx| {
+                this.buttons.1 = this.buttons.1.saturating_add(1);
+                this.arrive(cx);
+            }))
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, _: &MouseUpEvent, _, _| {
