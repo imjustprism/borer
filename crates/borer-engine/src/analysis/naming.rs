@@ -23,6 +23,7 @@ use crate::isa::x86::{InstructionInfoFactory, OpAccess, Register};
 
 use super::classes::class_of;
 use super::functions::decode_block;
+use super::schema::ident_char;
 use super::{Analysis, Function, NameSource, Signature, data_referrers, single};
 use crate::program::{BinaryFormat, Program};
 use crate::strings::cstr_at;
@@ -584,6 +585,7 @@ fn read_signature(text: &str) -> Option<Signature> {
     let (ret_raw, raw) = match conv {
         Some((pre, rest)) => (pre, rest.trim()),
         None => {
+            let head = head.trim_end();
             let name = last_token(head);
             (head.get(..head.len() - name.len()).unwrap_or(""), name)
         }
@@ -806,7 +808,8 @@ fn last_token(head: &str) -> &str {
 /// Removes elaborated-type keywords and collapses whitespace runs.
 ///
 /// A keyword is removed only as a whole word, at the start or after a byte
-/// that is no identifier byte, so `my_class *` keeps its name.
+/// that is no identifier byte (`$` is one, as MSVC, GCC and Clang take it),
+/// so `my_class *` and `my$class *` keep their names.
 ///
 /// # Arguments
 ///
@@ -815,7 +818,7 @@ fn strip_keywords(name: &str) -> String {
     let mut out = String::with_capacity(name.len());
     let mut rest = name;
     while let Some(c) = rest.chars().next() {
-        let word_start = !out.ends_with(|p: char| p.is_ascii_alphanumeric() || p == '_');
+        let word_start = !out.ends_with(|p: char| ident_char(p) || p == '$');
         if let Some(after) = KEYWORDS
             .iter()
             .find_map(|k| rest.strip_prefix(k))
@@ -947,6 +950,34 @@ mod tests {
             .expect("by-value union return");
         assert_eq!(s.ret, "my_union");
         assert_eq!(s.params, vec!["my_enum", "int"]);
+        let s =
+            parse_signature("void __cdecl Kind::Set(enum my_enum *, int)").expect("enum pointer");
+        assert_eq!(s.params, vec!["my_enum *", "int"]);
+        let s = parse_signature(
+            "void __cdecl Text::Put(class std::basic_string<char,struct std::char_traits<char> >)",
+        )
+        .expect("keyword after a comma");
+        assert_eq!(
+            s.params,
+            vec!["std::basic_string<char,std::char_traits<char> >"]
+        );
+        let s = parse_signature("void __cdecl Kind::Use(enum class Foo)").expect("enum class");
+        assert_eq!(s.params, vec!["Foo"]);
+        let s = parse_signature("void __cdecl Kind::Take(class my$class *)").expect("dollar");
+        assert_eq!(s.params, vec!["my$class *"]);
+    }
+
+    /// A space between the name and its parameter list leaves the return
+    /// type whole.
+    ///
+    /// # Panics
+    ///
+    /// When the return type keeps a piece of the name.
+    #[test]
+    fn a_space_before_the_list_keeps_the_return_type() {
+        let s = parse_signature("void Foo::Init (int)").expect("gcc signature");
+        assert_eq!((s.name.as_str(), s.ret.as_str()), ("Foo::Init", "void"));
+        assert_eq!(s.params, vec!["int"]);
     }
 
     /// A chain of functions, each referencing its own name and the one
