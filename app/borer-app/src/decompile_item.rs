@@ -215,6 +215,8 @@ pub struct DecompileItem {
     evidence: Option<(usize, String, CustomBlockId)>,
     /// The background recheck of a block.
     recheck_job: Job,
+    /// The start of the block [`Self::recheck_job`] rechecks, while it runs.
+    rechecking: Option<u64>,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -342,6 +344,7 @@ impl DecompileItem {
             hits: MarkHits::default(),
             evidence: None,
             recheck_job: Job::default(),
+            rechecking: None,
         };
         item.load(build, window, cx);
         item
@@ -451,15 +454,8 @@ impl DecompileItem {
                     for_one_view(&code).map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
-                if self
-                    .marks
-                    .as_ref()
-                    .is_some_and(|m| m.revision() != self.loaded.fingerprint)
-                {
-                    self.marks = None;
-                }
                 self.evidence = None;
-                self.recheck_job.stop();
+                self.drop_recheck("the tab's lines changed", cx);
                 self.grade_lines(code.clone(), cx);
                 self.code = Some(code);
                 self.refresh_search(window, cx);
@@ -614,7 +610,7 @@ impl DecompileItem {
                     map.highlight_text(role_key(role), ranges, style, false, cx);
                 }
             });
-            if let Some(marks) = &self.marks {
+            if let Some(marks) = self.marks() {
                 paint_gutter(editor, (marks, &*code), self.painted.clone(), cx);
             }
             cx.notify();
@@ -678,7 +674,7 @@ impl DecompileItem {
     ) {
         match event {
             BinaryEvent::Revised(loaded) => self.move_to(loaded.clone(), window, cx),
-            BinaryEvent::Rechecked { revision, .. } => self.rechecked(*revision, cx),
+            BinaryEvent::Rechecked { state, .. } => self.rechecked(state, cx),
             BinaryEvent::Opened(_) | BinaryEvent::Closed => {}
         }
     }
@@ -1136,7 +1132,7 @@ impl Revision for DecompileItem {
             return d.value();
         };
         let d = code.digest(d);
-        self.marks.as_ref().map_or(d, |m| m.digest(code, d)).value()
+        self.marks().map_or(d, |m| m.digest(code, d)).value()
     }
 }
 
@@ -1198,7 +1194,7 @@ impl Item for DecompileItem {
     }
 
     fn deactivated(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        self.recheck_job.stop();
+        self.drop_recheck("the tab was left", cx);
         self.editor
             .update(cx, |editor, cx| editor.deactivated(window, cx));
     }

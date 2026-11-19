@@ -34,6 +34,7 @@ use crate::binary::Digest;
 use crate::code_view::CodeLines;
 use crate::decompile_item::{buffer_row, whole_rows};
 use crate::status::grade_color;
+use crate::worker::State;
 
 /// Returns how many grades there are: a grade added to the engine fails this match until
 /// it is counted, and the count then fails every array of [`GRADE_COUNT`] grades.
@@ -132,9 +133,8 @@ pub fn line_block(code: &CodeLines, row: usize) -> Option<LineBlock> {
 pub struct Marks {
     /// The lines the marks were made for, whose rows [`Marks::wrong`] counts.
     code: Arc<CodeLines>,
-    /// [`LoadedBinary::fingerprint`](crate::worker::LoadedBinary::fingerprint) of the
-    /// state the checks are of.
-    revision: u64,
+    /// The program and overlay state the checks are of.
+    state: State,
     /// The check of each function the lines are written from, by entry; `None` inside
     /// when no check ran.
     checks: BTreeMap<u64, Arc<Option<TextCheck>>>,
@@ -148,12 +148,12 @@ impl Marks {
     ///
     /// # Arguments
     ///
-    /// * `revision` - Fingerprint of the state the checks are of.
+    /// * `state` - The program and overlay state the checks are of.
     /// * `code` - The tab's lines.
     /// * `check` - The check of the function at an entry.
     #[must_use]
     pub fn new(
-        revision: u64,
+        state: State,
         code: &Arc<CodeLines>,
         mut check: impl FnMut(u64) -> Arc<Option<TextCheck>>,
     ) -> Self {
@@ -169,7 +169,7 @@ impl Marks {
         }
         let mut marks = Self {
             code: code.clone(),
-            revision,
+            state,
             checks,
             wrong: Vec::new(),
         };
@@ -195,10 +195,10 @@ impl Marks {
         Arc::ptr_eq(&self.code, code)
     }
 
-    /// Returns the fingerprint of the state the checks are of.
+    /// Returns the program and overlay state the checks are of.
     #[must_use]
-    pub const fn revision(&self) -> u64 {
-        self.revision
+    pub const fn state(&self) -> &State {
+        &self.state
     }
 
     /// Returns the checks the marks hold, by function entry.
@@ -301,6 +301,7 @@ impl Marks {
     }
 }
 
+/// The key of the gutter highlight of the lines one grade marks: Zed keys a gutter
 /// highlight by type, so each grade, by [`grade_index`], is a type of its own.
 struct GradeMark<const G: usize>;
 
@@ -501,7 +502,7 @@ pub(crate) mod tests {
     use super::{GRADES, Marks, Toward, glyph, grade_index};
     use crate::app_view::tests::loaded_of;
     use crate::code_view::CodeLines;
-    use crate::worker::{LoadedBinary, listing_blocking};
+    use crate::worker::{LoadedBinary, State, decompile_blocking, listing_blocking};
 
     /// `jmp 0x1001` into its own second byte: blocks `0x1000` (`jmp`) and `0x1001`
     /// (`inc eax; ret`) overlap, and `inc eax` sits under `L_1001:`.
@@ -532,28 +533,52 @@ pub(crate) mod tests {
         one_function(&code)
     }
 
+    /// One block storing `rcx` whole through `rdx`.
+    // ASM: mov [rdx], rcx ; ret
+    pub(crate) const STORE: [u8; 4] = [0x48, 0x89, 0x0a, 0xc3];
+
+    /// Three blocks the check grades proved, unchecked and proved: `test ecx, ecx; je`
+    /// goes to a block with a packed float multiply the replay leaves out, or to a
+    /// `return 1`.
+    pub(crate) const FLOAT_BETWEEN: [u8; 16] = [
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x74, 0x06, // ASM: je 0x100a
+        0x0f, 0x59, 0xc1, // ASM: mulps xmm0, xmm1
+        0x31, 0xc0, // ASM: xor eax, eax
+        0xc3, // ASM: ret
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0xc3, // ASM: ret
+    ];
+
+    /// Returns a record of the block at `start` found wrong from 64 states: its text
+    /// stores zero where the machine stores `0x1234`.
+    pub(crate) fn wrong_at(start: u64) -> BlockCheck {
+        let found = Disagreement {
+            function: 0x1000,
+            block: start,
+            at: start,
+            claim: Claim::Memory,
+            place: "[rdx]".to_owned(),
+            text: 0,
+            machine: 0x1234,
+            bits: 64,
+            lane: false,
+            expr: "0".to_owned(),
+        };
+        BlockCheck::new(start, Ok(Some("differed")), (64, 1), vec![found])
+    }
+
     /// Returns a check of the blocks at `starts`, each wrong when `wrong` holds it, else
     /// proved.
     fn check(starts: &[u64], wrong: &[u64]) -> Arc<Option<TextCheck>> {
         let blocks = starts
             .iter()
             .map(|&start| {
-                if !wrong.contains(&start) {
-                    return BlockCheck::new(start, Ok(None), (3, 1), Vec::new());
+                if wrong.contains(&start) {
+                    wrong_at(start)
+                } else {
+                    BlockCheck::new(start, Ok(None), (3, 1), Vec::new())
                 }
-                let found = Disagreement {
-                    function: 0x1000,
-                    block: start,
-                    at: start,
-                    claim: Claim::Memory,
-                    place: "[rdx]".to_owned(),
-                    text: 0,
-                    machine: 0x1234,
-                    bits: 64,
-                    lane: false,
-                    expr: "0".to_owned(),
-                };
-                BlockCheck::new(start, Ok(Some("differed")), (3, 1), vec![found])
             })
             .collect();
         Arc::new(Some(TextCheck {
@@ -568,7 +593,11 @@ pub(crate) mod tests {
         checks: &[(u64, Arc<Option<TextCheck>>)],
     ) -> (Marks, Arc<CodeLines>) {
         let code = Arc::new(CodeLines::new(vec![view]));
-        let marks = Marks::new(0, &code, |at| {
+        let state = State {
+            identity: String::new(),
+            revision: 0,
+        };
+        let marks = Marks::new(state, &code, |at| {
             let found = checks.iter().find(|(f, _)| *f == at);
             found.map_or_else(|| Arc::new(None), |(_, c)| c.clone())
         });
@@ -681,5 +710,60 @@ pub(crate) mod tests {
         for (ix, grade) in GRADES.into_iter().enumerate() {
             assert_eq!(grade_index(grade), ix);
         }
+    }
+
+    /// Returns the grade of the first line of `code` holding `needle`, and its evidence.
+    fn first(marks: &Marks, code: &CodeLines, needle: &str) -> (Option<Grade>, Option<String>) {
+        let row = (0..code.len()).find(|&row| {
+            let line = code.get(row).and_then(|(v, l)| v.line(l));
+            line.is_some_and(|l| l.contains(needle))
+        });
+        let row = row.unwrap();
+        (marks.grade(code, row), marks.evidence(code, row))
+    }
+
+    /// A check that finds a block wrong marks the listing lines of its instructions and the
+    /// decompile line of its store wrong, and neither header.
+    #[test]
+    fn a_disagreeing_block_marks_its_lines_wrong() {
+        let loaded = one_function(&STORE);
+        let checks = [(0x1000, check(&[0x1000], &[0x1000]))];
+        let listing = listing_blocking(&loaded, 0x1000).unwrap();
+        let (marks, code) = marks_of(listing, &checks);
+        assert_eq!(grades(&marks, &code, "mov"), [Some(Grade::Wrong)]);
+        assert_eq!(grades(&marks, &code, "ret"), [Some(Grade::Wrong)]);
+        assert_eq!(marks.grade(&code, 0), None, "the listing's header");
+        let decompile = decompile_blocking(&loaded, 0x1000).unwrap();
+        let (marks, code) = marks_of(decompile, &checks);
+        assert_eq!(first(&marks, &code, "= a").0, Some(Grade::Wrong));
+        assert_eq!(marks.grade(&code, 0), None, "the decompile's header");
+        assert_eq!(marks.next_wrong(0, Toward::Down).map(|r| r > 0), Some(true));
+    }
+
+    /// The evidence under a marked line is the engine's spelling of its block's record; a
+    /// decompile line adds how its block is known, a listing line does not.
+    #[test]
+    fn the_evidence_is_the_engine_spelling_of_the_line_block() {
+        let loaded = one_function(&STORE);
+        let checks = [(0x1000, check(&[0x1000], &[0x1000]))];
+        let origins = "this line stands for block 0x1000, known from the line origins";
+        let listing = listing_blocking(&loaded, 0x1000).unwrap();
+        let (marks, code) = marks_of(listing, &checks);
+        let said = first(&marks, &code, "mov").1.unwrap();
+        assert!(said.starts_with(
+            "block 0x1000: wrong: the machine does not bear out the text
+"
+        ));
+        assert!(
+            said.contains("memory [rdx] at 0x1000: text 0x0, machine 0x1234"),
+            "{said}"
+        );
+        assert!(!said.contains(origins), "{said}");
+        let decompile = decompile_blocking(&loaded, 0x1000).unwrap();
+        let (marks, code) = marks_of(decompile, &checks);
+        let said = first(&marks, &code, "= a").1.unwrap();
+        assert!(said.starts_with("block 0x1000: wrong:"), "{said}");
+        assert!(said.contains(origins), "{said}");
+        assert_eq!(marks.evidence(&code, 0), None, "the header has none");
     }
 }

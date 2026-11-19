@@ -400,7 +400,36 @@ pub struct LoadedBinary {
     pub fingerprint: u64,
 }
 
+/// One state of one program: the program's identity and its overlay's fingerprint, which
+/// together name what a check was made of.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct State {
+    /// The program's SHA-256 ([`LoadedBinary::identity`]).
+    pub identity: String,
+    /// The overlay's fingerprint ([`LoadedBinary::fingerprint`]).
+    pub revision: u64,
+}
+
 impl LoadedBinary {
+    /// Returns the program and overlay state this is.
+    #[must_use]
+    pub fn state(&self) -> State {
+        State {
+            identity: self.identity.clone(),
+            revision: self.fingerprint,
+        }
+    }
+
+    /// Returns whether `state` is this program and overlay state.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - A state.
+    #[must_use]
+    pub fn is_state(&self, state: &State) -> bool {
+        state.revision == self.fingerprint && state.identity == self.identity
+    }
+
     /// Returns the state with `overlay` in place of this one's, with its rows and its
     /// fingerprint.
     ///
@@ -985,7 +1014,7 @@ pub fn marks_blocking(
     code: &Arc<CodeLines>,
     held: &BTreeMap<u64, Arc<Option<TextCheck>>>,
 ) -> Marks {
-    Marks::new(loaded.fingerprint, code, |at| {
+    Marks::new(loaded.state(), code, |at| {
         held.get(&at)
             .cloned()
             .unwrap_or_else(|| check_blocking(loaded, at))

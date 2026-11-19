@@ -180,10 +180,7 @@ impl Grades {
         let target = self.tab.as_ref().and_then(|(tab, _)| {
             let tab = tab.read(cx);
             let entry = tab.entry()?;
-            let rechecked = self
-                .binary
-                .read(cx)
-                .rechecked(tab.loaded().fingerprint, entry);
+            let rechecked = self.binary.read(cx).rechecked(&tab.loaded().state(), entry);
             Some(Checked {
                 loaded: tab.loaded().clone(),
                 entry,
@@ -621,9 +618,12 @@ mod tests {
         CALLER, init, load_sample, open, open_caller, open_place, sample, shown,
     };
     use crate::binary::{Binary, Loading, StatusLine, kind};
+    use crate::check_marks::tests::wrong_at;
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::places::Place;
-    use crate::worker::{GradeCounts, LoadedBinary, grade_counts_blocking, run_engine};
+    use crate::worker::{
+        GradeCounts, LoadedBinary, check_blocking, grade_counts_blocking, run_engine,
+    };
 
     /// Returns a raw x86-64 image of `code` in `.text` at 0x1000, entered there, analyzed
     /// under the app's names, as a loaded binary.
@@ -1055,5 +1055,47 @@ mod tests {
         redraw_active_tab(&app, cx);
         cx.run_until_parked();
         assert_eq!(grades.read_with(cx, |grades, _| grades.ticket()), settled);
+    }
+
+    /// A recheck that finds a block wrong shows in the bar: one block fewer proved and one
+    /// instruction that disagrees.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the bar does not count the recheck.
+    #[gpui::test]
+    fn a_recheck_shows_in_the_bar(cx: &mut TestAppContext) {
+        a_recheck_shows_in_the_bar_steps(cx);
+    }
+
+    /// Runs the steps of [`a_recheck_shows_in_the_bar`].
+    ///
+    /// # Panics
+    ///
+    /// Panics when a step goes wrong, as [`a_recheck_shows_in_the_bar`] says.
+    fn a_recheck_shows_in_the_bar_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let grades = item::<Grades>(&app.workspace, cx);
+        let loaded = sample();
+        open_place(
+            &app.workspace,
+            &loaded,
+            Place::decompile(CALLER),
+            TabMode::Permanent,
+            cx,
+        );
+        cx.run_until_parked();
+        let before = grades.read_with(cx, |g, _| g.shown()).unwrap().1;
+        assert_eq!(before.disagree, 0);
+        let check = run_engine(|| check_blocking(&loaded, CALLER));
+        let at = (loaded.state(), CALLER);
+        let record = wrong_at(CALLER);
+        app.binary
+            .update(cx, |b, cx| b.put_recheck(at, &check, record, cx));
+        cx.run_until_parked();
+        let after = grades.read_with(cx, |g, _| g.shown()).unwrap().1;
+        assert_eq!(after.disagree, 1);
+        assert_eq!(after.proved, before.proved - 1);
     }
 }

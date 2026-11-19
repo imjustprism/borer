@@ -28,7 +28,7 @@ use crate::places::Place;
 use crate::recent::{self, RecentBinary, file_name};
 use crate::stored::SavedTab;
 use crate::worker::{
-    Job, LoadedBinary, edit_blocking, load_binary_blocking, open_project_blocking,
+    Job, LoadedBinary, State, edit_blocking, load_binary_blocking, open_project_blocking,
     read_project_blocking, save_project_blocking, spawn_engine,
 };
 
@@ -41,6 +41,12 @@ use crate::worker::{
 pub fn reading_label(path: &Path) -> SharedString {
     format!("Reading {}", file_name(path)).into()
 }
+
+/// A function's check as rechecks left it, with the order it was put in.
+type Rechecks = (u64, Arc<Option<TextCheck>>);
+
+/// Most rechecked checks the session holds; past it the oldest is dropped.
+pub const RECHECKED_MAX: usize = 32;
 
 /// The status line while no binary is open.
 pub const NO_BINARY: &str = "No binary loaded";
@@ -79,8 +85,8 @@ pub enum BinaryEvent {
     /// A recheck changed the check of a function of a state: views of it read the check
     /// again ([`Binary::rechecked`]).
     Rechecked {
-        /// [`LoadedBinary::fingerprint`] of the state.
-        revision: u64,
+        /// The program and overlay state.
+        state: State,
         /// The function's entry.
         function: u64,
     },
@@ -217,9 +223,12 @@ pub struct Binary {
     /// The window the binary is shown in, where its questions are asked; `None` until
     /// [`Self::set_window`], and then nothing asks before dropping edits.
     window: Option<AnyWindowHandle>,
-    /// The checks rechecks changed, by state fingerprint and function entry, all of one
-    /// state: the one place every view reads a rechecked block from.
-    rechecked: BTreeMap<(u64, u64), Arc<Option<TextCheck>>>,
+    /// The checks rechecks changed, by program state and function entry, each with the
+    /// order it was put in: the one place every view reads a rechecked block from, at
+    /// most [`RECHECKED_MAX`], dropped when a binary loads or closes.
+    rechecked: BTreeMap<(State, u64), Rechecks>,
+    /// How many rechecks were put, which orders them for dropping the oldest.
+    rechecks_put: u64,
 }
 
 impl EventEmitter<BinaryEvent> for Binary {}
@@ -265,6 +274,7 @@ impl Binary {
             editing: None,
             window: None,
             rechecked: BTreeMap::new(),
+            rechecks_put: 0,
         }
     }
 
@@ -352,42 +362,44 @@ impl Binary {
         format!("{}{mark}{project}", file_name(&loaded.path))
     }
 
-    /// Returns the check of the function at `function` of state `revision` as rechecks
-    /// left it, `None` when no recheck changed it.
+    /// Returns the check of the function at `function` of `state` as rechecks left it,
+    /// `None` when no recheck changed it.
     ///
     /// # Arguments
     ///
-    /// * `revision` - Fingerprint of the state.
+    /// * `state` - The program and overlay state.
     /// * `function` - The function's entry.
     #[must_use]
-    pub fn rechecked(&self, revision: u64, function: u64) -> Option<Arc<Option<TextCheck>>> {
-        self.rechecked.get(&(revision, function)).cloned()
+    pub fn rechecked(&self, state: &State, function: u64) -> Option<Arc<Option<TextCheck>>> {
+        let found = self.rechecked.get(&(state.clone(), function));
+        found.map(|(_, check)| check.clone())
     }
 
-    /// Returns every function of state `revision` a recheck changed, with its check as
-    /// rechecks left it.
+    /// Returns every function of `state` a recheck changed, with its check as rechecks
+    /// left it.
     ///
     /// # Arguments
     ///
-    /// * `revision` - Fingerprint of the state.
-    pub fn rechecks(
-        &self,
-        revision: u64,
-    ) -> impl Iterator<Item = (u64, &Arc<Option<TextCheck>>)> + '_ {
+    /// * `state` - The program and overlay state.
+    pub fn rechecks<'a>(
+        &'a self,
+        state: &'a State,
+    ) -> impl Iterator<Item = (u64, &'a Arc<Option<TextCheck>>)> + 'a {
         self.rechecked
             .iter()
-            .filter(move |((at, _), _)| *at == revision)
-            .map(|((_, function), check)| (*function, check))
+            .filter(move |((at, _), _)| at == state)
+            .map(|((_, function), (_, check))| (*function, check))
     }
 
     /// Puts `record`, a recheck of a block of a function under a state, into that
     /// function's check as the engine merges it ([`TextCheck::put_recheck`]), drops the
-    /// rechecks of every other state, and tells the views.
+    /// oldest rechecked check past [`RECHECKED_MAX`], and tells the views; the rechecks of
+    /// other states of the program stay, so an undo finds them.
     ///
     /// # Arguments
     ///
-    /// * `(revision, function)` - Fingerprint of the state the recheck ran under, and the
-    ///   function's entry.
+    /// * `(state, function)` - The program and overlay state the recheck ran under, and
+    ///   the function's entry.
     /// * `check` - The function's check before any recheck.
     /// * `record` - The recheck's record.
     /// * `cx` - Binary context.
@@ -397,18 +409,25 @@ impl Binary {
     /// What the merge did, `None` when the function has no check to merge into.
     pub fn put_recheck(
         &mut self,
-        (revision, function): (u64, u64),
+        (state, function): (State, u64),
         check: &Arc<Option<TextCheck>>,
         record: BlockCheck,
         cx: &mut Context<'_, Self>,
     ) -> Option<Rechecked> {
-        let held = self.rechecked(revision, function);
+        let held = self.rechecked(&state, function);
         let mut merged = held.as_ref().unwrap_or(check).as_ref().clone()?;
         let done = merged.put_recheck(record);
-        self.rechecked.retain(|(at, _), _| *at == revision);
-        self.rechecked
-            .insert((revision, function), Arc::new(Some(merged)));
-        cx.emit(BinaryEvent::Rechecked { revision, function });
+        self.rechecks_put = self.rechecks_put.saturating_add(1);
+        let put = (self.rechecks_put, Arc::new(Some(merged)));
+        self.rechecked.insert((state.clone(), function), put);
+        while self.rechecked.len() > RECHECKED_MAX {
+            let oldest = self.rechecked.iter().min_by_key(|(_, (at, _))| *at);
+            let Some(key) = oldest.map(|(key, _)| key.clone()) else {
+                break;
+            };
+            self.rechecked.remove(&key);
+        }
+        cx.emit(BinaryEvent::Rechecked { state, function });
         Some(done)
     }
 
@@ -602,6 +621,7 @@ impl Binary {
         }
         self.busy = Some(path.clone());
         self.loaded = None;
+        self.rechecked.clear();
         self.facts.clear();
         self.project = None;
         self.restoring.clear();
@@ -650,6 +670,7 @@ impl Binary {
         self.reading = None;
         self.facts.clear();
         self.loaded = None;
+        self.rechecked.clear();
         self.error = None;
         self.status = NO_BINARY.to_owned();
         cx.emit(BinaryEvent::Closed);
@@ -792,6 +813,7 @@ impl Binary {
         self.saved = loaded.fingerprint;
         self.restore_tabs(&loaded);
         self.loaded = Some(loaded.clone());
+        self.rechecked.clear();
         cx.emit(BinaryEvent::Opened(loaded));
         cx.notify();
     }

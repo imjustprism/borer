@@ -164,10 +164,10 @@ impl GraphItem {
     ) -> Self {
         let revised = cx.subscribe(&binary, |item, binary, event, cx| match event {
             BinaryEvent::Revised(loaded) => item.build(loaded.clone(), cx),
-            BinaryEvent::Rechecked { revision, function }
-                if (*revision, *function) == (item.loaded.fingerprint, item.entry) =>
+            BinaryEvent::Rechecked { state, function }
+                if (state, *function) == (&item.loaded.state(), item.entry) =>
             {
-                item.check = binary.read(cx).rechecked(*revision, *function);
+                item.check = binary.read(cx).rechecked(state, *function);
                 item.regrade();
                 cx.notify();
             }
@@ -240,14 +240,16 @@ impl GraphItem {
                 }
             },
         );
-        let rechecked = self.binary.read(cx).rechecked(loaded.fingerprint, entry);
+        let state = loaded.state();
+        let rechecked = self.binary.read(cx).rechecked(&state, entry);
         let work = move || rechecked.unwrap_or_else(|| check_blocking(&loaded, entry));
         self.check_job.run(
             format!("Checking {entry:#x}"),
             cx,
             work,
-            |item, check, cx| {
-                item.check = Some(check);
+            move |item, check, cx| {
+                let newer = item.binary.read(cx).rechecked(&state, entry);
+                item.check = Some(newer.unwrap_or(check));
                 item.regrade();
                 cx.notify();
             },
@@ -1055,10 +1057,13 @@ mod tests {
 
     use super::{Dir, GraphItem, cut_note, edge_color, grade_color, grid, grid_u, walk};
     use crate::app_view::tests::{CALLER, init, open, open_place, sample};
+    use crate::check_marks::tests::wrong_at;
     use crate::decompile_item::tests::{active, fourth_instruction};
     use crate::decompile_item::{Form, TabMode};
     use crate::places::Place;
-    use crate::worker::{LoadedBinary, Sources, graph_blocking, load_binary_blocking};
+    use crate::worker::{
+        LoadedBinary, Sources, check_blocking, graph_blocking, load_binary_blocking, run_engine,
+    };
 
     /// Most functions of the test executable whose graphs are walked.
     const WALKED: usize = 300;
@@ -1234,5 +1239,33 @@ mod tests {
             Some("showing 2048 of 5000 blocks, 8192 of 9000 edges, 3 blocks shortened")
         );
         assert_eq!(cut_note(None), None);
+    }
+
+    /// A recheck reaches an open graph, and one that lands while the graph's own check
+    /// still runs is not overwritten when that check answers: the newer result wins.
+    #[gpui::test]
+    fn a_recheck_reaches_the_graph_even_while_its_check_runs(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let loaded = sample();
+        let check = run_engine(|| check_blocking(&loaded, CALLER));
+        let place = Place::Graph {
+            entry: CALLER,
+            at: None,
+        };
+        open_place(&app.workspace, &loaded, place, TabMode::Preview, cx);
+        let at = (loaded.state(), CALLER);
+        let record = wrong_at(CALLER);
+        app.binary
+            .update(cx, |b, cx| b.put_recheck(at, &check, record, cx));
+        cx.run_until_parked();
+        let tab = app.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<GraphItem>(cx)
+        });
+        let grade = tab.unwrap().read_with(cx, |item, _| {
+            let node = item.node_of(CALLER).unwrap();
+            item.grades.get(node).copied()
+        });
+        assert_eq!(grade, Some(Grade::Wrong));
     }
 }

@@ -963,13 +963,13 @@ pub(crate) mod tests {
         ));
         Arc::new(LoadedBinary {
             path: PathBuf::from("sample.bin"),
+            identity: borer_engine::analysis::project::program_identity(&program),
             program: Arc::new(program),
             analysis: Arc::new(analysis),
             fingerprint: overlay.fingerprint(),
             overlay: Arc::new(overlay),
             initial_rows,
             notes: Vec::new(),
-            identity: String::new(),
         })
     }
 
