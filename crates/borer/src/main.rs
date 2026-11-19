@@ -831,7 +831,9 @@ impl BorerServer {
 /// Every one of them runs below normal priority
 /// ([`borer_live::run_below_normal`]): an analysis takes every core it is
 /// given, and a machine running several of them at once stays usable
-/// because its desktop goes first. Its allocator commits memory as it is
+/// because its desktop goes first; it still runs at full speed, which
+/// Windows would cut for a windowless process on a busy machine
+/// ([`borer_live::run_at_full_speed`]). Its allocator commits memory as it is
 /// touched and hands freed memory back soon ([`borer_live::tune_allocator`]).
 ///
 /// # Errors
@@ -840,6 +842,7 @@ impl BorerServer {
 /// or the CLI command fails.
 fn main() -> anyhow::Result<()> {
     borer_live::run_below_normal();
+    borer_live::run_at_full_speed();
     borer_live::tune_allocator();
     if let Some(state) = std::env::var_os(relay::WORKER) {
         let resume = std::env::var_os(relay::RESUME).map(PathBuf::from);

@@ -9,7 +9,7 @@
 //! the one crate that holds `unsafe`: each call is a thin wrapper over a
 //! Win32 function with what it requires stated beside it. Every borer
 //! process comes here too, to step behind the desktop
-//! ([`run_below_normal`]), and the server's relay to tie the worker it
+//! ([`run_below_normal`]) at full speed ([`run_at_full_speed`]), and the server's relay to tie the worker it
 //! starts to its own life ([`Tether`]); the allocator's settings and calls
 //! are here too ([`tune_allocator`], [`release_free_memory`]). On another
 //! operating system every live entry point says that live access is not
@@ -19,7 +19,7 @@
     reason = "the process API is foreign; every call is wrapped here with its invariants"
 )]
 
-pub use os::{Process, Tether, processes, run_below_normal};
+pub use os::{Process, Tether, processes, run_at_full_speed, run_below_normal};
 
 use libmimalloc_sys as _;
 
@@ -126,8 +126,10 @@ mod os {
     use windows_sys::Win32::System::Threading::{
         BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetExitCodeProcess, IsWow64Process,
         MEMORY_PRIORITY_BELOW_NORMAL, MEMORY_PRIORITY_INFORMATION, OpenProcess, OpenThread,
-        PROCESS_QUERY_INFORMATION, PROCESS_VM_READ, ProcessMemoryPriority, SetPriorityClass,
-        SetProcessInformation, THREAD_QUERY_INFORMATION,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+        ProcessMemoryPriority, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+        THREAD_QUERY_INFORMATION,
     };
 
     /// What `NtQueryInformationThread(ThreadBasicInformation)` fills: the
@@ -226,6 +228,39 @@ mod os {
                 GetCurrentProcess(),
                 ProcessMemoryPriority,
                 core::ptr::from_ref(&memory).cast::<c_void>(),
+                size,
+            )
+        };
+    }
+
+    /// Keeps this process at full clock speed when Windows would throttle
+    /// it as background work.
+    ///
+    /// On a busy machine Windows slows a windowless process a few seconds
+    /// after it starts (execution-speed power throttling): a cold decompile
+    /// of notepad's largest function went from 1.3 s to 1.9 s from then on,
+    /// beside other work. This opts the process out, so it keeps its below
+    /// normal priority ([`run_below_normal`]) and still runs at the speed
+    /// the processor gives it. It touches this process alone, changes no
+    /// system setting and is not inherited by the processes it starts. A
+    /// refusal leaves the process as it was, which costs speed and never an
+    /// answer, so it is not reported.
+    pub fn run_at_full_speed() {
+        let state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            StateMask: 0,
+        };
+        let Ok(size) = u32::try_from(size_of::<PROCESS_POWER_THROTTLING_STATE>()) else {
+            return;
+        };
+        // SAFETY: the pointer and length describe `state`, which outlives
+        // the call, and the pseudo-handle names this process.
+        unsafe {
+            SetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                core::ptr::from_ref(&state).cast::<c_void>(),
                 size,
             )
         };
@@ -770,6 +805,11 @@ mod os {
     /// Leaves the priority as it is off Windows.
     pub fn run_below_normal() {}
 
+    /// Leaves the speed as it is off Windows: neither Linux nor macOS slows
+    /// a process for having no window (macOS's App Nap is for apps with
+    /// one), and no slowdown was measured there to opt out of.
+    pub fn run_at_full_speed() {}
+
     /// Ties nothing off Windows: a worker there ends when its input closes,
     /// which is when its relay ends unless the worker is mid-request.
     #[derive(Debug)]
@@ -924,12 +964,14 @@ mod tests {
     use borer_engine::memory::Kind;
 
     use windows_sys::Win32::System::Threading::{
-        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetPriorityClass,
+        BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetPriorityClass, GetProcessInformation,
+        PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling,
     };
 
     use super::{
         MIMALLOC_3_3, PAGE_COMMIT_ON_DEMAND, PURGE_DELAY, PURGE_DELAY_MS, Process, Tether,
-        mi_version, release_free_memory, run_below_normal, tune_allocator,
+        mi_version, release_free_memory, run_at_full_speed, run_below_normal, tune_allocator,
     };
 
     unsafe extern "C" {
@@ -1018,6 +1060,37 @@ mod tests {
         // SAFETY: the pseudo-handle names this process and needs no closing.
         let class = unsafe { GetPriorityClass(GetCurrentProcess()) };
         assert_eq!(class, BELOW_NORMAL_PRIORITY_CLASS);
+    }
+
+    /// After opting out of execution-speed throttling, the process reads
+    /// back as controlling that throttling and having it off.
+    #[test]
+    fn a_process_keeps_its_full_speed() {
+        run_at_full_speed();
+        let mut state = PROCESS_POWER_THROTTLING_STATE {
+            Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+            ..PROCESS_POWER_THROTTLING_STATE::default()
+        };
+        let size = u32::try_from(size_of::<PROCESS_POWER_THROTTLING_STATE>()).expect("fits");
+        // SAFETY: the pointer and length describe `state`, which outlives
+        // the call, and the pseudo-handle names this process.
+        let read = unsafe {
+            GetProcessInformation(
+                GetCurrentProcess(),
+                ProcessPowerThrottling,
+                core::ptr::from_mut(&mut state).cast(),
+                size,
+            )
+        };
+        assert_ne!(read, 0, "GetProcessInformation refused");
+        assert_eq!(
+            state.ControlMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            PROCESS_POWER_THROTTLING_EXECUTION_SPEED
+        );
+        assert_eq!(
+            state.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+            0
+        );
     }
 
     /// Attaches to a child just started, waiting out the moments its loader
