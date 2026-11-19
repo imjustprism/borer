@@ -4,12 +4,11 @@
 //! binary (default notepad). The demo walks every state the panel draws: the empty thread,
 //! the picker open, the agreement notice, a turn running, a tool call opened, each card
 //! kind and state, an error, and a long thread. Each state on screen is announced as
-//! `CHAT_STAGE <name>` and held for [`HOLD`], so a caller can capture the window; then
-//! `CHAT_DONE`, and the app quits.
+//! `CHAT_STAGE <name>` and held a while ([`super::stage::stage`]), so a caller can capture
+//! the window; then `CHAT_DONE`, and the app quits.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use futures::channel::oneshot;
 use futures::{FutureExt as _, StreamExt as _, future::BoxFuture};
@@ -21,19 +20,14 @@ use language_model::{
 };
 use serde_json::{Value, json};
 
+use super::stage::{poll, stage};
 use super::{Harness, say};
 use crate::chat::ChatPanel;
 use crate::chat::providers::{Endpoint, Offered, listed};
 use crate::chat::thread::{Chosen, Entry, Thread, Verdict};
 
-/// How long each stage stays on screen for its capture.
-const HOLD: Duration = Duration::from_secs(4);
-
-/// Interval at which the demo polls for the binary and for a turn's end.
-const POLL: Duration = Duration::from_millis(100);
-
-/// Most polls before the demo gives up on a load or a turn (60 s).
-const POLLS: u32 = 600;
+/// The word this demo's stages are said with.
+const CHAT: &str = "CHAT";
 
 /// Turns of the long thread, after the cards.
 const LONG_TURNS: usize = 10;
@@ -142,34 +136,20 @@ impl Harness {
     }
 }
 
-/// Waits `HOLD` after saying the stage `name` is on screen.
-///
-/// # Errors
-///
-/// When stdout fails.
-async fn stage(name: &str, cx: &AsyncApp) -> anyhow::Result<()> {
-    say(&format!("CHAT_STAGE {name}"))?;
-    cx.background_executor().timer(HOLD).await;
-    Ok(())
-}
-
 /// Waits until `done` holds of the thread, polling.
 ///
 /// # Errors
 ///
-/// When it still does not hold after [`POLLS`] polls.
+/// When it still does not hold after a minute of polls ([`poll`]).
 async fn until(
     thread: &Entity<Thread>,
     cx: &mut AsyncApp,
     done: impl Fn(&Thread) -> bool,
 ) -> anyhow::Result<()> {
-    for _ in 0..POLLS {
-        if thread.read_with(cx, |t, _| done(t)) {
-            return Ok(());
-        }
-        cx.background_executor().timer(POLL).await;
-    }
-    anyhow::bail!("the chat never settled")
+    poll("the chat's settling", cx, |cx| {
+        thread.read_with(cx, |t, _| done(t)).then_some(())
+    })
+    .await
 }
 
 /// Sends `text` and waits for the turn to end.
@@ -300,7 +280,7 @@ async fn refuse_second(thread: &Entity<Thread>, cx: &mut AsyncApp) -> anyhow::Re
     until(thread, cx, has(first, |v| *v == Verdict::Accepted)).await?;
     thread.update(cx, |t, cx| t.accept(second, cx));
     until(thread, cx, has(second, |v| *v == Verdict::Stale)).await?;
-    stage("stale", cx).await?;
+    stage(CHAT, "stale", cx).await?;
     thread.update(cx, |t, cx| t.plan_again(second, cx));
     until(
         thread,
@@ -308,7 +288,7 @@ async fn refuse_second(thread: &Entity<Thread>, cx: &mut AsyncApp) -> anyhow::Re
         has(second, |v| matches!(v, Verdict::Refused(_))),
     )
     .await?;
-    stage("refused", cx).await
+    stage(CHAT, "refused", cx).await
 }
 
 /// Waits for the binary and returns its entry and three more functions' addresses.
@@ -320,8 +300,8 @@ async fn addresses(
     this: &WeakEntity<Harness>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<(String, Vec<String>)> {
-    for _ in 0..POLLS {
-        let found = this.update(cx, |h, cx| {
+    let found = poll("the binary", cx, |cx| {
+        this.update(cx, |h, cx| {
             let loaded = h.binary.read(cx).loaded()?;
             let rows = &loaded.initial_rows.rows;
             let entry = loaded.program.entry.or(rows.first().map(|r| r.entry))?;
@@ -332,14 +312,14 @@ async fn addresses(
                 .map(|r| format!("{:#x}", r.entry))
                 .collect();
             Some((format!("{entry:#x}"), others))
-        })?;
-        if let Some((entry, others)) = found {
-            anyhow::ensure!(others.len() == 3, "fewer than four functions");
-            return Ok((entry, others));
-        }
-        cx.background_executor().timer(POLL).await;
-    }
-    anyhow::bail!("nothing opened")
+        })
+        .ok()
+        .flatten()
+    })
+    .await;
+    let (entry, others) = found?;
+    anyhow::ensure!(others.len() == 3, "fewer than four functions");
+    Ok((entry, others))
 }
 
 /// Shows the empty thread, then the picker open over a listed scripted model, which it
@@ -353,7 +333,7 @@ async fn pick(
     replies: Vec<Reply>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
-    stage("empty", cx).await?;
+    stage(CHAT, "empty", cx).await?;
     let scripted = Arc::new(Scripted {
         replies: Mutex::new(replies.into_iter().collect()),
     });
@@ -373,7 +353,7 @@ async fn pick(
         panel.thread().update(cx, |t, cx| t.choose(chosen, cx));
         panel.picker().show(window, cx);
     })?;
-    stage("picker", cx).await?;
+    stage(CHAT, "picker", cx).await?;
     panel.update(cx, |panel, cx| panel.picker().hide(cx));
     Ok(())
 }
@@ -393,14 +373,14 @@ async fn first(
     thread.update(cx, |t, cx| {
         t.send("What does this binary do?".to_owned(), cx);
     });
-    stage("agreement", cx).await?;
+    stage(CHAT, "agreement", cx).await?;
     thread.update(cx, Thread::agree);
     until(&thread, cx, |t| t.entries().len() > 1).await?;
-    stage("running", cx).await?;
+    stage(CHAT, "running", cx).await?;
     word.send(())
         .map_err(|()| anyhow::anyhow!("the turn was gone"))?;
     until(&thread, cx, |t| !t.is_running()).await?;
-    stage("turn", cx).await?;
+    stage(CHAT, "turn", cx).await?;
     panel.update(cx, |panel, cx| {
         let ix = panel
             .thread()
@@ -416,7 +396,7 @@ async fn first(
             panel.toggle_call(ix, cx);
         }
     });
-    stage("tool_open", cx).await
+    stage(CHAT, "tool_open", cx).await
 }
 
 /// Plays the cards: a rename waiting and focused, a batch under the accepted rename, a
@@ -441,24 +421,24 @@ async fn cards(panel: &Entity<ChatPanel>, cx: &mut AsyncWindowContext) -> anyhow
     };
     ask("Name the entry point.", &thread, cx).await?;
     panel.update_in(cx, |panel, window, cx| panel.show_head(window, cx))?;
-    stage("set_name", cx).await?;
+    stage(CHAT, "set_name", cx).await?;
     decide(&thread, true, cx);
     until(&thread, cx, |t| t.head().is_none()).await?;
     ask("Name the helpers it calls.", &thread, cx).await?;
-    stage("batch", cx).await?;
+    stage(CHAT, "batch", cx).await?;
     decide(&thread, false, cx);
     ask("Document the entry and its window state.", &thread, cx).await?;
-    stage("comment_type", cx).await?;
+    stage(CHAT, "comment_type", cx).await?;
     decide(&thread, false, cx);
     ask("Which one is the main loop?", &thread, cx).await?;
     refuse_second(&thread, cx).await?;
     decide(&thread, false, cx);
     ask("What else does it call?", &thread, cx).await?;
-    stage("error", cx).await?;
+    stage(CHAT, "error", cx).await?;
     for n in 0..LONG_TURNS {
         ask(&format!("And step {n}?"), &thread, cx).await?;
     }
-    stage("long", cx).await
+    stage(CHAT, "long", cx).await
 }
 
 /// Plays the canned conversation stage by stage.
