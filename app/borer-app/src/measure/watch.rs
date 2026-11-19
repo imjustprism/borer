@@ -180,14 +180,14 @@ mod tests {
     use gpui::{TestAppContext, VisualTestContext};
 
     use super::{Seen, Stamp, Watch, seen};
-    use crate::actions::CycleSort;
+    use crate::actions::{CycleSort, Xrefs};
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{CALLEE, CALLER, init, load_sample, open, open_place, sample};
     use crate::binary::BinaryEvent;
     use crate::decompile_item::TabMode;
     use crate::measure::now_instant;
     use crate::places::Place;
-    use crate::worker::{LoadedBinary, spawn_engine};
+    use crate::worker::{LoadedBinary, Referent, spawn_engine};
 
     /// Settles the work in flight and draws a frame.
     fn draw(cx: &mut VisualTestContext) {
@@ -280,5 +280,21 @@ mod tests {
         assert_eq!(others, before, "more than the status line changed");
         watch.frame(at(t0, 2), after);
         assert_eq!(watch.ack(), Some(at(t0, 2)));
+    }
+
+    /// Xrefs dispatched on a code tab, as the actions phase dispatches it, changes the xrefs
+    /// part of the stamp to the tab's function.
+    #[gpui::test]
+    fn xrefs_on_a_code_tab_changes_the_xrefs_stamp(cx: &mut TestAppContext) {
+        let (app, cx, _) = with_caller(cx);
+        let before = look(&app, cx).stamp.xrefs;
+        cx.update(|window, cx| window.dispatch_action(Box::new(Xrefs), cx));
+        draw(cx);
+        let after = look(&app, cx).stamp.xrefs;
+        assert_ne!(after, before);
+        assert_eq!(
+            after.and_then(|(at, _)| at),
+            Some(Referent::Address(CALLER))
+        );
     }
 }
