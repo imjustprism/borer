@@ -125,6 +125,10 @@ pub struct BlockCheck {
     pub(crate) disagreements: Vec<Disagreement>,
     /// Disagreements past [`KEPT_MAX`].
     pub(crate) past_cap: usize,
+    /// The instruction of every disagreement its check found, kept or past
+    /// the cap, in address order, each once: what [`TextCheck::disagree`]
+    /// is derived from.
+    pub(crate) ats: Vec<u64>,
     /// The states a recheck asked for, other than those tried when it was
     /// clamped by [`recheck_states`]; `None` for an answer's check,
     /// [`TRIALS`] per block.
@@ -191,6 +195,9 @@ impl BlockCheck {
         if grade == Grade::Proved {
             found.clear();
         }
+        let mut ats: Vec<u64> = found.iter().map(|d| d.at).collect();
+        ats.sort_unstable();
+        ats.dedup();
         let past_cap = found.len().saturating_sub(KEPT_MAX);
         found.truncate(KEPT_MAX);
         Self {
@@ -201,6 +208,7 @@ impl BlockCheck {
             why,
             disagreements: found,
             past_cap,
+            ats,
             asked: None,
         }
     }
@@ -328,6 +336,7 @@ impl BlockCheck {
     /// Returns the bytes the record holds beyond its own size.
     fn heap(&self) -> usize {
         self.disagreements.capacity() * size_of::<Disagreement>()
+            + self.ats.capacity() * size_of::<u64>()
             + self
                 .disagreements
                 .iter()
@@ -530,18 +539,26 @@ impl TextCheck {
     ///
     /// * `r` - One function's replay.
     pub(super) fn of(r: Replayed) -> Self {
-        let mut disagree: Vec<u64> = r
-            .wrong()
+        let mut check = Self {
+            blocks: r.records,
+            disagree: Vec::new(),
+        };
+        check.derive();
+        check
+    }
+
+    /// Derives [`TextCheck::disagree`] from the records, the one place it
+    /// is computed, so a count the header or a reader takes never drifts
+    /// from the blocks' own disagreements.
+    fn derive(&mut self) {
+        let mut disagree: Vec<u64> = self
+            .blocks
             .iter()
-            .map(|d| d.at)
-            .chain(r.refuted.iter().map(|d| d.at))
+            .flat_map(|b| b.ats.iter().copied())
             .collect();
         disagree.sort_unstable();
         disagree.dedup();
-        Self {
-            blocks: r.records,
-            disagree,
-        }
+        self.disagree = disagree;
     }
 
     /// Returns the record of the block starting at `start`, `None` when the
@@ -573,6 +590,7 @@ impl TextCheck {
         let Ok(ix) = at else {
             let ix = at.unwrap_or_else(|ix| ix);
             self.blocks.insert(ix, record);
+            self.derive();
             return Rechecked::Added;
         };
         let Some(prior) = self.blocks.get_mut(ix) else {
@@ -590,6 +608,7 @@ impl TextCheck {
             return Rechecked::KeptWrong(was);
         }
         *prior = record;
+        self.derive();
         Rechecked::Replaced(was)
     }
 

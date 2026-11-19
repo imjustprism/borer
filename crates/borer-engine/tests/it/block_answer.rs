@@ -15,12 +15,16 @@ use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, BinaryFormat, Program, Section};
 
-/// Returns a disagreement found at `0x1000` in block `0x1000`.
-fn found() -> Disagreement {
+/// Returns a disagreement found at `at` in the block starting there.
+///
+/// # Arguments
+///
+/// * `at` - The instruction and the block's start.
+fn found(at: u64) -> Disagreement {
     Disagreement {
         function: 0x1000,
-        block: 0x1000,
-        at: 0x1000,
+        block: at,
+        at,
         claim: Claim::Memory,
         place: "[rdx]".to_owned(),
         text: 0,
@@ -35,7 +39,7 @@ fn found() -> Disagreement {
 fn check() -> TextCheck {
     TextCheck {
         blocks: vec![
-            BlockCheck::new(0x1000, Ok(Some("differed")), (3, 1), vec![found()]),
+            BlockCheck::new(0x1000, Ok(Some("differed")), (3, 1), vec![found(0x1000)]),
             BlockCheck::new(0x1010, Ok(Some("differed")), (3, 1), Vec::new()),
         ],
         disagree: vec![0x1000],
@@ -69,9 +73,11 @@ fn no_check_and_no_record_are_told_apart() {
     assert_eq!(BlockAnswer::of(Some(&c), 0x1010).grade(), Grade::Tested);
 }
 
-/// A recheck from fewer states never clears a wrong found from more; one
-/// from as many replaces it and says what it replaced; one of a block the
-/// check holds no record of is added in address order.
+/// A recheck from fewer states never clears a wrong found from more.
+///
+/// One from as many replaces it and says what it replaced; one of a block
+/// the check holds no record of is added in address order; the disagreeing
+/// instructions follow the records each time.
 #[test]
 fn a_recheck_from_fewer_states_keeps_a_wrong() {
     let mut c = check();
@@ -83,8 +89,13 @@ fn a_recheck_from_fewer_states_keeps_a_wrong() {
     };
     assert_eq!(c.put_recheck(tested(2)), Rechecked::KeptWrong(was));
     assert_eq!(BlockAnswer::of(Some(&c), 0x1000).grade(), Grade::Wrong);
+    assert_eq!(c.disagree, [0x1000]);
     assert_eq!(c.put_recheck(tested(3)), Rechecked::Replaced(was));
     assert_eq!(BlockAnswer::of(Some(&c), 0x1000).grade(), Grade::Tested);
+    assert_eq!(c.disagree, [0u64; 0], "a cleared wrong no longer disagrees");
+    let wrong = BlockCheck::new(0x1010, Ok(Some("differed")), (64, 1), vec![found(0x1010)]);
+    assert!(matches!(c.put_recheck(wrong), Rechecked::Replaced(_)));
+    assert_eq!(c.disagree, [0x1010], "a block found wrong disagrees");
     let new = BlockCheck::new(0x1008, Ok(None), (3, 1), Vec::new());
     assert_eq!(c.put_recheck(new), Rechecked::Added);
     let starts: Vec<u64> = c.blocks.iter().map(BlockCheck::start).collect();
