@@ -344,7 +344,9 @@ const LAYOUT_WORST_MS: u128 = 100;
 ///
 /// Also times reading each text so made as a view, held to
 /// [`VIEW_P95_US`] and [`VIEW_MAX_MS`], and laying out every function's
-/// control-flow graph, held to [`LAYOUT_WORST_MS`] ([`layouts`]).
+/// control-flow graph, held to [`LAYOUT_WORST_MS`] ([`layouts`]), and
+/// building the typed graphs, held to [`TYPED_GRAPH_MAX_MS`]
+/// ([`typed_graphs`]).
 #[test]
 #[ignore = "set BORER_BENCH to a binary path to run this harness"]
 fn timings() {
@@ -419,6 +421,7 @@ fn timings() {
         worst.as_millis() <= LAYOUT_WORST_MS,
         "laying out {at:#x} took {worst:?}"
     );
+    typed_graphs(&program);
 }
 
 /// Returns the slowest graph layout and the entry of its function.
@@ -984,6 +987,92 @@ fn call_tree() {
             percentile(&times, 95).as_secs_f64() * 1e3,
             times.last().copied().unwrap_or_default().as_secs_f64() * 1e3
         );
+    }
+}
+
+/// Slowest cold typed graph allowed in [`typed_graphs`], in milliseconds:
+/// the bar the control-flow graph's layout is held to.
+const TYPED_GRAPH_MAX_MS: f64 = 100.0;
+
+/// Times the typed graphs and holds each to a bar; [`timings`] runs it on
+/// the gate's binary.
+///
+/// For every function, on a fresh analysis per kind so the memo is cold:
+/// its call graph over callees and over callers and its reference graph,
+/// three levels deep and capped at 256 nodes. Then the capped cases: the
+/// entry's callees and the most referenced function's references at the
+/// deepest walk and the largest cap, and the whole class graph. Prints
+/// each kind's p95, slowest and largest graph, and fails past
+/// [`TYPED_GRAPH_MAX_MS`].
+///
+/// # Arguments
+///
+/// * `p` - The program.
+fn typed_graphs(p: &Program) {
+    use borer_engine::analysis::render::{
+        GRAPH_DEPTH_MAX, GRAPH_NODES_MAX, Walk, call_graph, class_graph, xref_graph,
+    };
+    let o = Overlay::default();
+    let ms = |d: Duration| d.as_secs_f64() * 1e3;
+    let timed = |f: &dyn Fn() -> usize| {
+        let t = Instant::now();
+        let nodes = f();
+        (t.elapsed(), nodes)
+    };
+    for kind in 0..3 {
+        let a = Analysis::compute(p);
+        let graph = |entry: u64| match kind {
+            0 => call_graph(p, &a, &o, entry, Walk::Callees, 3, 256)
+                .nodes
+                .len(),
+            1 => call_graph(p, &a, &o, entry, Walk::Callers, 3, 256)
+                .nodes
+                .len(),
+            _ => xref_graph(p, &a, &o, entry, 3, 256).nodes.len(),
+        };
+        let mut runs: Vec<(Duration, usize)> = a
+            .functions
+            .iter()
+            .map(|f| timed(&|| graph(f.entry)))
+            .collect();
+        runs.sort_unstable();
+        let times: Vec<Duration> = runs.iter().map(|r| r.0).collect();
+        let worst = times.last().copied().unwrap_or_default();
+        let largest = runs.iter().map(|r| r.1).max().unwrap_or(0);
+        println!(
+            "typed graph\t{}\t{} functions\tp95 {:.3} ms\tmax {:.3} ms\tlargest {largest} nodes",
+            ["callees", "callers", "xrefs"][kind],
+            times.len(),
+            ms(percentile(&times, 95)),
+            ms(worst)
+        );
+        assert!(ms(worst) < TYPED_GRAPH_MAX_MS, "{kind}: {worst:?}");
+    }
+    let a = Analysis::compute(p);
+    let entry = p.entry.unwrap_or(0);
+    let hot = a
+        .functions
+        .iter()
+        .max_by_key(|f| (f.callers.len(), std::cmp::Reverse(f.entry)))
+        .map_or(entry, |f| f.entry);
+    let (deep, wide) = (GRAPH_DEPTH_MAX, GRAPH_NODES_MAX);
+    let capped: [(&str, &dyn Fn() -> usize); 3] = [
+        ("entry callees", &|| {
+            call_graph(p, &a, &o, entry, Walk::Callees, deep, wide)
+                .nodes
+                .len()
+        }),
+        ("hot xrefs", &|| {
+            xref_graph(p, &a, &o, hot, deep, wide).nodes.len()
+        }),
+        ("classes", &|| {
+            class_graph(p, &a, None, wide).map_or(0, |g| g.nodes.len())
+        }),
+    ];
+    for (name, f) in capped {
+        let (d, nodes) = timed(f);
+        println!("typed graph\t{name}\t{nodes} nodes\t{:.3} ms", ms(d));
+        assert!(ms(d) < TYPED_GRAPH_MAX_MS, "{name}: {d:?}");
     }
 }
 
