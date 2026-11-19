@@ -740,3 +740,28 @@ pub(super) fn read_program_bytes(
         }),
     ))
 }
+
+/// How an answer names the loaded file where it prints the file's path.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum FileShown {
+    /// Its path as it was opened, as the MCP server's agent named it.
+    #[default]
+    Path,
+    /// Its file name alone, for a reader that must not learn the folders it sits in.
+    Name,
+}
+
+impl super::Program {
+    /// Returns the loaded file's path as an answer prints it, as `how` names it.
+    ///
+    /// # Arguments
+    ///
+    /// * `how` - Its path, or its file name alone.
+    #[must_use]
+    pub fn shown_path(&self, how: FileShown) -> String {
+        match (how, self.path.file_name()) {
+            (FileShown::Name, Some(name)) => name.to_string_lossy().into_owned(),
+            (FileShown::Path | FileShown::Name, _) => self.path.display().to_string(),
+        }
+    }
+}

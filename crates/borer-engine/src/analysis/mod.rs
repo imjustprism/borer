@@ -1772,6 +1772,11 @@ pub struct Overlay {
     /// Never saved with a project.
     #[serde(default, skip)]
     pub enum_source: EnumSource,
+    /// How an answer names the loaded file where it prints its path: a front end's
+    /// choice, never a fact a result is derived from, so not in [`Overlay::fingerprint`].
+    /// Never saved with a project.
+    #[serde(default, skip)]
+    pub file_shown: crate::program::FileShown,
     /// The text passes a decompilation leaves out, none by default: a
     /// bisection's way to read a function's text without some of them
     /// ([`decompile::Passes`]). Part of [`Overlay::fingerprint`] when not

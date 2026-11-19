@@ -65,6 +65,76 @@ pub fn one_line(text: &str) -> String {
     escaped(text, OUTSIDE_MAX)
 }
 
+/// Returns `text` with every character that hides itself or reorders what
+/// is printed around it written as `\u{...}`, for a person to read; line
+/// breaks are kept.
+///
+/// It is stricter than [`one_line`], which the agents' answers go through
+/// and which leaves zero-width and other invisible characters as they are:
+/// a name a person is asked to accept must show every character it holds.
+/// It escapes the zero-width characters (U+200B to U+200F, U+2060 to
+/// U+2064, U+FEFF), the soft hyphen, the Hangul fillers, the tag
+/// characters (U+E0000 to U+E007F), the line and paragraph separators, the
+/// bidi controls (U+202A to U+202E, U+2066 to U+2069, U+061C), and every
+/// control character but the line feed.
+///
+/// # Arguments
+///
+/// * `text` - The text, as the file or a model holds it.
+#[must_use]
+pub fn visible(text: &str) -> std::borrow::Cow<'_, str> {
+    let hides = |c: char| {
+        (c.is_control() && c != '\n')
+            || matches!(
+                c,
+                '\u{200b}'..='\u{200f}'
+                    | '\u{2060}'..='\u{2064}'
+                    | '\u{feff}'
+                    | '\u{00ad}'
+                    | '\u{115f}'
+                    | '\u{1160}'
+                    | '\u{3164}'
+                    | '\u{ffa0}'
+                    | '\u{e0000}'..='\u{e007f}'
+                    | '\u{2028}'
+                    | '\u{2029}'
+                    | '\u{202a}'..='\u{202e}'
+                    | '\u{2066}'..='\u{2069}'
+                    | '\u{061c}'
+            )
+    };
+    if !text.chars().any(hides) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len().saturating_add(16));
+    for c in text.chars() {
+        if hides(c) {
+            let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+/// Tells whether a name mixes Latin letters with letters of another script
+/// that look like them (Greek, Cyrillic, full-width Latin), the way a name
+/// is spelled to pass for another.
+///
+/// # Arguments
+///
+/// * `text` - The name.
+#[must_use]
+pub fn mixes_scripts(text: &str) -> bool {
+    text.chars().any(|c| c.is_ascii_alphabetic())
+        && text.chars().any(|c| {
+            matches!(
+                c,
+                '\u{0370}'..='\u{03ff}' | '\u{0400}'..='\u{052f}' | '\u{ff21}'..='\u{ff5a}'
+            )
+        })
+}
+
 /// Returns the head of a name from a file's table: its first
 /// [`OUTSIDE_MAX`] + 1 characters, all a row can show of it and one more.
 ///
@@ -1734,5 +1804,33 @@ mod tests {
         );
         assert_eq!(aimed_lines(&answer), 7, "{answer}");
         assert_eq!(aimed_lines("plain\nSystem::String x\n"), 0);
+    }
+
+    /// A person reads every character that hides or reorders text, written
+    /// out, and a name that mixes Latin with look-alike letters is told;
+    /// plain text and line breaks are left as they are.
+    ///
+    /// # Panics
+    ///
+    /// When a character is let through or plain text changes.
+    #[test]
+    fn visible_writes_out_what_hides() {
+        use super::{mixes_scripts, visible};
+        assert_eq!(visible("log_flush\nnext"), "log_flush\nnext");
+        for (hidden, shown) in [
+            ("main\u{200b}", "main\\u{200b}"),
+            ("a\u{202e}b", "a\\u{202e}b"),
+            ("x\u{e0041}", "x\\u{e0041}"),
+            (
+                "\u{feff}\u{00ad}\u{3164}\u{2028}",
+                "\\u{feff}\\u{ad}\\u{3164}\\u{2028}",
+            ),
+            ("tab\t", "tab\\u{9}"),
+        ] {
+            assert_eq!(visible(hidden), shown);
+        }
+        assert!(mixes_scripts("Is\u{0421}heck"));
+        assert!(!mixes_scripts("IsLicenseValid"));
+        assert!(!mixes_scripts("\u{0438}\u{043c}\u{044f}"));
     }
 }

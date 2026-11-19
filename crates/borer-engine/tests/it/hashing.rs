@@ -18,7 +18,7 @@ use std::path::PathBuf;
 
 use borer_engine::hashing::{authentihash, hashes_tsv, imphash, tlsh};
 use borer_engine::headers::OrdinalName;
-use borer_engine::program::{Program, SymbolKind};
+use borer_engine::program::{FileShown, Program, SymbolKind};
 
 /// Where the headers end and the first section's bytes begin.
 const HEADERS: usize = 0x400;
@@ -599,7 +599,7 @@ fn an_unsigned_pe_hashes_without_the_entry() {
 #[test]
 fn hashes_tsv_names_all_three() {
     let p = load(image());
-    let out = hashes_tsv(&p);
+    let out = hashes_tsv(&p, FileShown::Path);
     assert!(out.contains("imphash       5d2b76cc"), "{out}");
     assert!(out.contains("authentihash  73c57db4"), "{out}");
     assert!(out.starts_with("# content hashes of hashed.exe"), "{out}");
@@ -614,7 +614,7 @@ fn hashes_tsv_names_all_three() {
 fn a_short_file_has_no_tlsh() {
     let p =
         Program::from_bytes(PathBuf::from("short.bin"), b"short".to_vec()).expect("any bytes load");
-    let out = hashes_tsv(&p);
+    let out = hashes_tsv(&p, FileShown::Path);
     assert!(
         out.contains("\ntlsh          - (TLSH needs 50 bytes or more, of enough variety)\n"),
         "{out}"
@@ -779,4 +779,31 @@ fn a_refusal_that_quotes_a_name_cannot_forge_a_warning() {
         !summary.lines().any(|l| l.starts_with("# evidence")),
         "{summary}"
     );
+}
+
+/// A read whose overlay names the file by its name alone prints no folder of its path in
+/// `borer://hashes` or `borer://children`, and a read by path, through the same memo,
+/// still prints the whole path.
+#[test]
+fn a_read_by_name_prints_no_folder_and_shares_no_text_with_one_by_path() {
+    use borer_engine::analysis::{Analysis, Overlay};
+    let path = PathBuf::from("people").join("alice").join("hashed.exe");
+    let mut p = load(image());
+    p.path.clone_from(&path);
+    let a = Analysis::compute(&p);
+    let named = Overlay {
+        file_shown: FileShown::Name,
+        ..Overlay::default()
+    };
+    for uri in ["borer://hashes", "borer://children"] {
+        let by_name = borer_engine::answer::ask(&p, &a, &named, uri)
+            .expect("answered")
+            .expect("read");
+        assert!(!by_name.contains("alice"), "{by_name}");
+        assert!(by_name.contains("hashed.exe"), "{by_name}");
+        let by_path = borer_engine::answer::ask(&p, &a, &Overlay::default(), uri)
+            .expect("answered")
+            .expect("read");
+        assert!(by_path.contains(&path.display().to_string()), "{by_path}");
+    }
 }

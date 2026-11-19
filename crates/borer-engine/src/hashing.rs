@@ -46,7 +46,7 @@
 use std::fmt::Write as _;
 
 use crate::headers::OrdinalName;
-use crate::program::{Program, SymbolKind};
+use crate::program::{FileShown, Program, SymbolKind};
 
 /// MD5's per-step sine-derived constants, RFC 1321's `T` table.
 const MD5_K: [u32; 64] = [
@@ -1196,6 +1196,7 @@ impl BorerLsh {
 /// # Arguments
 ///
 /// * `program` - The loaded image.
+/// * `how` - How the header names it ([`Program::shown_path`]).
 ///
 /// # Returns
 ///
@@ -1203,7 +1204,8 @@ impl BorerLsh {
 /// with why for a file TLSH gives no digest), and one note line saying which
 /// hash matches public feeds and which only borer.
 #[must_use]
-pub fn hashes_tsv(program: &Program) -> String {
+pub fn hashes_tsv(program: &Program, how: FileShown) -> String {
+    let shown = program.shown_path(how);
     let hex = |digest: Option<&[u8]>| {
         digest.map_or_else(
             || "-".to_owned(),
@@ -1224,8 +1226,7 @@ pub fn hashes_tsv(program: &Program) -> String {
         },
     );
     let mut out = format!(
-        "# content hashes of {}\nmd5           {}\nsha256        {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
-        program.path.display(),
+        "# content hashes of {shown}\nmd5           {}\nsha256        {}\nimphash       {}\nauthentihash  {}\ntlsh          {}\nborer-lsh     {}\n",
         hex(Some(md5_sum.as_slice())),
         hex(Some(sha_sum.as_slice())),
         hex(imphash(program).as_ref().map(|d| d.as_slice())),

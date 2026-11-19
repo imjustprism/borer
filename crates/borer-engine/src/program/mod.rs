@@ -23,7 +23,9 @@ pub(crate) mod file;
 pub(crate) mod pe;
 
 pub use arch::{Arch, Feature};
-pub use file::{Parent, TooLarge, checked_metadata, open_regular, read_regular, unusable_path};
+pub use file::{
+    FileShown, Parent, TooLarge, checked_metadata, open_regular, read_regular, unusable_path,
+};
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports, loosen_pe,

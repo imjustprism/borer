@@ -8,7 +8,8 @@
 use anyhow::Context as _;
 use borer_engine::analysis::Overlay;
 use borer_engine::analysis::render;
-use borer_engine::program::Feature;
+use borer_engine::hashing::hashes_tsv;
+use borer_engine::program::{Feature, FileShown};
 use borer_engine::text::{quoted, short_path};
 
 use super::args::{arg, path_arg};
@@ -175,7 +176,7 @@ pub(super) fn run(cmd: Extra, args: &[String], s: &Session) -> anyhow::Result<()
                 None => print!("{text}"),
             }
         }
-        Extra::Hashes => print!("{}", borer_engine::hashing::hashes_tsv(&s.program)),
+        Extra::Hashes => print!("{}", hashes_tsv(&s.program, FileShown::Path)),
         Extra::Sig => {
             let a = s.analysis(Feature::Discover)?;
             let va = s.address(arg(args, 2, "sig needs an address or name")?)?;

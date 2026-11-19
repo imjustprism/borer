@@ -461,12 +461,14 @@ const ANSWERS: &[Answer] = &[
         Ok(render::capability_map_tsv(q.p, a))
     }),
     rows("hashes", Nothing, File, &[], |q| {
-        let made = || crate::hashing::hashes_tsv(q.p);
-        Ok(String::clone(&file_fact(q, "file_hashes", made)))
+        let made = || crate::hashing::hashes_tsv(q.p, q.o.file_shown);
+        let kind = shown_kind(q, "file_hashes", "file_hashes_named");
+        Ok(String::clone(&file_fact(q, kind, made)))
     }),
     rows("children", Nothing, File, &[], |q| {
-        let made = || crate::carve::children_tsv(q.p);
-        Ok(String::clone(&file_fact(q, "file_children", made)))
+        let made = || crate::carve::children_tsv(q.p, q.o.file_shown);
+        let kind = shown_kind(q, "file_children", "file_children_named");
+        Ok(String::clone(&file_fact(q, kind, made)))
     }),
     rows("encoded", Either, File, &[Word(0)], |q| {
         let made = || render::encoded_strings(q.p);
@@ -1083,6 +1085,21 @@ fn file_fact<T: Send + Sync + 'static>(
     match q.memo {
         Some(a) => a.derived.get_or_build(kind, (), make),
         None => std::sync::Arc::new(make()),
+    }
+}
+
+/// Returns the memo kind of a file fact whose text names the loaded file: one per way the
+/// read names it ([`crate::program::FileShown`]), so neither reading gets the other's text.
+///
+/// # Arguments
+///
+/// * `q` - The read.
+/// * `path` - The kind when the read names the file by its path.
+/// * `name` - The kind when the read names it by its file name.
+fn shown_kind(q: &Ask<'_>, path: &'static str, name: &'static str) -> &'static str {
+    match q.o.file_shown {
+        crate::program::FileShown::Path => path,
+        crate::program::FileShown::Name => name,
     }
 }
 

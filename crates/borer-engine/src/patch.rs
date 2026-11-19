@@ -153,7 +153,8 @@ pub fn plan_tsv(
     } else {
         plan_in_place(program, at, &assembled, &mut out)?
     };
-    out.push_str(&patch_file(program, &regions));
+    let shown = program.shown_path(overlay.file_shown);
+    out.push_str(&patch_file(&shown, &regions));
     out.push_str(&verify(program, at, &regions));
     Ok(out)
 }
@@ -763,11 +764,11 @@ fn file_bytes(
 ///
 /// # Arguments
 ///
-/// * `program` - The image, for its path in the header.
+/// * `shown` - The image's path as the answer names it ([`Program::shown_path`]).
 /// * `regions` - The regions to rewrite.
-fn patch_file(program: &Program, regions: &[Region]) -> String {
+fn patch_file(shown: &str, regions: &[Region]) -> String {
     let mut out = String::from("# patchfile borer-patch-v1\n");
-    let _ = writeln!(out, "# file {}", program.path.display());
+    let _ = writeln!(out, "# file {shown}");
     out.push_str("# format: <file-offset-hex> <old-hex> <new-hex>, equal length, verify old before writing new\n");
     for r in regions {
         let _ = writeln!(

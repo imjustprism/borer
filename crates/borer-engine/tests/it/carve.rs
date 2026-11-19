@@ -14,7 +14,7 @@
 use std::path::PathBuf;
 
 use borer_engine::carve::{Kind, Size, at, children_tsv, scan};
-use borer_engine::program::{BinaryFormat, Program};
+use borer_engine::program::{BinaryFormat, FileShown, Program};
 
 /// Where the embedded PE starts in the blob.
 const PE_AT: usize = 0x400;
@@ -257,7 +257,7 @@ fn the_blob_s_children_are_found_and_forgeries_are_not() {
 fn the_listing_flags_the_random_block_and_repeats() {
     let p = Program::from_bytes(PathBuf::from("blob.bin"), blob()).expect("any bytes load");
     assert_eq!(p.format, BinaryFormat::Raw);
-    let out = children_tsv(&p);
+    let out = children_tsv(&p, FileShown::Path);
     assert!(
         out.starts_with(
             "# children of blob.bin: 6 programs or containers by signature, 1 high-entropy run with none\n"
@@ -274,7 +274,7 @@ fn the_listing_flags_the_random_block_and_repeats() {
         assert!(out.contains(row), "{row:?} in\n{out}");
     }
     assert!(!out.contains("\n0x3"), "a forgery is listed:\n{out}");
-    assert_eq!(out, children_tsv(&p));
+    assert_eq!(out, children_tsv(&p, FileShown::Path));
 }
 
 /// `<file>@<offset>` opens the embedded PE as a program with its parent

@@ -23,7 +23,7 @@
 use std::fmt::Write as _;
 
 use crate::num::{from_usize, saturating_usize, u16_le, u32_le, u64_le};
-use crate::program::{BinaryFormat, Program};
+use crate::program::{BinaryFormat, FileShown, Program};
 use crate::text::{plural, quoted};
 
 /// Bytes of a file the signature scan reads; past them nothing is listed.
@@ -1220,6 +1220,7 @@ impl Row {
 /// # Arguments
 ///
 /// * `program` - The loaded file.
+/// * `how` - How the header names it ([`Program::shown_path`]).
 ///
 /// # Returns
 ///
@@ -1228,7 +1229,8 @@ impl Row {
 /// `# showing N of M` line when there are more, then the entries of each
 /// wrapper payload ([`crate::bundle::bundles_tsv`]).
 #[must_use]
-pub fn children_tsv(program: &Program) -> String {
+pub fn children_tsv(program: &Program, how: FileShown) -> String {
+    let shown = program.shown_path(how);
     let bytes = &program.bytes;
     let mut children: Vec<Child> = scan(bytes)
         .into_iter()
@@ -1274,7 +1276,7 @@ pub fn children_tsv(program: &Program) -> String {
     let random = rows.len();
     rows.extend(children.into_iter().map(Row::Child));
     rows.sort_by_key(Row::off);
-    let path = program.path.display();
+    let path = &shown;
     let mut out = format!(
         "# children of {path}: {found} program{} or container{} by signature, {random} high-entropy run{} with none\n# load_binary path={path}@<off> opens a program row as a program of its own; containers are listed, not extracted\n",
         plural(from_usize(found)),

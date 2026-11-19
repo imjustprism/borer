@@ -60,6 +60,31 @@ pub fn must_fit_an_escaped_row(text: &str, what: Annotation) -> Result<(), Strin
     Ok(())
 }
 
+/// Refuses an annotation a person or an agent gives that no row shows as given.
+///
+/// That is one [`must_fit_an_escaped_row`] refuses, or one holding text
+/// [`crate::text::one_line`] would escape: a character that reorders or
+/// hides what is printed around it.
+///
+/// # Arguments
+///
+/// * `text` - The annotation as given.
+/// * `what` - Which annotation it is, for the message.
+///
+/// # Errors
+///
+/// When the text is empty, blank, longer than a row can show, or holds
+/// anything that would end its line or move what is printed around it.
+pub fn must_fit_a_row(text: &str, what: Annotation) -> Result<(), String> {
+    must_fit_an_escaped_row(text, what)?;
+    if crate::text::one_line(text) != text {
+        return Err(format!(
+            "the {what} holds text that reorders what is printed around it"
+        ));
+    }
+    Ok(())
+}
+
 /// Tells whether an annotation at `va` has a place: a section declares
 /// it, with or without file bytes ([`Program::declared_at`]).
 ///
@@ -179,4 +204,26 @@ pub fn keep_settable(o: &mut Overlay, room: usize, said: &mut Vec<String>) -> us
     o.comments
         .retain(|&va, c| held(Annotation::Comment, va, c.as_str()));
     left_out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Annotation, must_be_a_name, must_fit_a_row};
+
+    /// A name that would reorder or hide what is printed around it, or that no row can
+    /// show, is refused before it is planned; a plain one passes both checks.
+    ///
+    /// # Panics
+    ///
+    /// When a name is let through or refused wrongly.
+    #[test]
+    fn a_name_that_hides_or_reorders_text_is_refused() {
+        assert_eq!(must_fit_a_row("check_license", Annotation::Name), Ok(()));
+        assert_eq!(must_be_a_name("check_license"), Ok(()));
+        for name in ["check_\u{202e}esnecil", "main\u{200b}", "a\"b\nc"] {
+            let refused = must_fit_a_row(name, Annotation::Name).and(must_be_a_name(name));
+            assert!(refused.is_err(), "{name:?}");
+        }
+        assert!(must_fit_a_row(&"a".repeat(100_000), Annotation::Name).is_err());
+    }
 }
