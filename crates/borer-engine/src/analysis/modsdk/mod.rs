@@ -411,7 +411,7 @@ pub fn recovered(
     Class {
         name: name.to_owned(),
         size: Size::AtLeast(end),
-        parent: info.and_then(|i| i.parent.clone()),
+        parent: info.and_then(|i| i.parent_name().map(str::to_owned)),
         vtable,
         slots: info.map_or_else(Vec::new, |i| {
             i.slots

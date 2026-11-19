@@ -1733,7 +1733,7 @@ fn class_family(analysis: &Analysis, class: &str) -> BTreeSet<String> {
             .by_name
             .values()
             .filter(|c| {
-                !family.contains(&c.name) && c.parent.as_ref().is_some_and(|p| family.contains(p))
+                !family.contains(&c.name) && c.parent_name().is_some_and(|p| family.contains(p))
             })
             .map(|c| c.name.clone())
             .collect();
@@ -2079,7 +2079,7 @@ pub fn render_layout(layout: &ClassLayout, analysis: &Analysis, overlay: &Overla
         }
     );
     if let Some(info) = analysis.classes.by_name.get(&layout.name) {
-        if let Some(p) = &info.parent {
+        if let Some(p) = info.parent_name() {
             let _ = writeln!(out, "parent:  {p}");
         }
         if let Some(code) = analysis.classes.ids.get(&layout.name) {
@@ -2125,7 +2125,7 @@ pub fn render_layout(layout: &ClassLayout, analysis: &Analysis, overlay: &Overla
         .classes
         .by_name
         .values()
-        .filter(|c| c.parent.as_deref() == Some(layout.name.as_str()))
+        .filter(|c| c.parent_name() == Some(layout.name.as_str()))
         .map(|c| c.name.as_str())
         .collect();
     if !derived.is_empty() {

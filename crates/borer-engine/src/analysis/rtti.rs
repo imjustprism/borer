@@ -10,6 +10,10 @@
 //! read is bounds-checked against the image, and a record whose signature
 //! or self-pointer does not match is not a locator.
 
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+
+use super::vtables::{BaseOffset, Bases, ParentEvidence, ParentLink};
 use super::{pointer_size, read_u32, read_word};
 use crate::program::Program;
 use crate::strings::cstr_at;
@@ -90,7 +94,7 @@ pub(super) fn secondary(program: &Program, vtable: u64) -> Option<(String, Strin
 /// Each base class descriptor in the hierarchy's array carries the member
 /// displacement of its subobject; the first past the class itself whose
 /// displacement is `offset`, and which is not reached through a virtual
-/// base pointer, is the base.
+/// base pointer, is the base. Only that entry's name is decoded.
 ///
 /// # Arguments
 ///
@@ -102,47 +106,150 @@ pub(super) fn secondary(program: &Program, vtable: u64) -> Option<(String, Strin
 ///
 /// The base's demangled name, or `None` when no base sits at that offset.
 fn base_at(program: &Program, hierarchy: u64, offset: u32) -> Option<String> {
-    let bases = read_u32(program, hierarchy.checked_add(8)?)?;
-    if !(2..=BASES_MAX).contains(&bases) {
-        return None;
-    }
-    let array = pointer(program, hierarchy.checked_add(12)?)?;
-    (1..bases).find_map(|k| {
-        let base = pointer(program, array.checked_add(u64::from(k) * 4)?)?;
-        let mdisp = read_u32(program, base.checked_add(8)?)?;
-        let pdisp = read_u32(program, base.checked_add(12)?)?;
-        if mdisp != offset || pdisp != u32::MAX {
-            return None;
-        }
-        type_name(program, pointer(program, base)?)
+    let (count, array) = base_array(program, hierarchy)?;
+    (1..count).find_map(|k| {
+        let (descriptor, _, at) = base_entry(program, array, k)?;
+        (at == BaseOffset::At(u64::from(offset))).then(|| type_name(program, descriptor))?
     })
 }
 
-/// Returns the name of the first base class of the class a vtable belongs to.
-///
-/// The hierarchy descriptor's base array lists the class itself first and
-/// its bases after it in depth-first order, so the second entry is the
-/// direct base a single-inheritance class derives from.
+/// Run-time type information read in one pass, each type descriptor's
+/// name decoded once, by address, and shared by every link naming it.
+#[derive(Debug, Default)]
+pub(super) struct Hierarchies {
+    /// Each type descriptor read, by address, with its name if it decodes.
+    names: BTreeMap<u64, Option<Arc<str>>>,
+}
+
+impl Hierarchies {
+    /// Returns where a vtable's class hierarchy descriptor sits and the
+    /// first direct base it lists: the class's parent.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `vtable` - Address of the vtable's first slot.
+    ///
+    /// # Returns
+    ///
+    /// The descriptor's address and the parent; `None` when the class has
+    /// no base or no locator, or the first entry does not decode.
+    pub(super) fn first(&mut self, program: &Program, vtable: u64) -> Option<(u64, ParentLink)> {
+        let hierarchy = locator(program, vtable)?.hierarchy;
+        let first = self.decode(program, hierarchy).into_iter().next()?;
+        Some((hierarchy, first))
+    }
+
+    /// Returns every direct parent a class's [`Bases`] states, the parent
+    /// first.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `bases` - Where the parents are stated.
+    pub(super) fn listed(&mut self, program: &Program, bases: &Bases) -> Vec<ParentLink> {
+        match bases {
+            Bases::Stated(links) => links.to_vec(),
+            Bases::Rtti { hierarchy, .. } => self.decode(program, *hierarchy),
+        }
+    }
+
+    /// Decodes one hierarchy's direct bases.
+    ///
+    /// The hierarchy descriptor's base array holds one entry for every
+    /// path through the hierarchy in depth-first pre-order, the class
+    /// first, each entry followed by the bases it contains (its
+    /// `numContainedBases`), so a virtual base appears under every base
+    /// inheriting it and nowhere else. The direct bases are the entries
+    /// past the class that skip over what the one before contains,
+    /// virtual or not. A base whose type descriptor is listed again is
+    /// listed once.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The loaded image.
+    /// * `hierarchy` - Address of the class hierarchy descriptor.
+    ///
+    /// # Returns
+    ///
+    /// The bases in declaration order, each with its member displacement
+    /// or [`BaseOffset::Virtual`]; empty when the class has no base, and
+    /// cut at the first entry that does not decode.
+    fn decode(&mut self, program: &Program, hierarchy: u64) -> Vec<ParentLink> {
+        let mut out: Vec<ParentLink> = Vec::new();
+        let Some((count, array)) = base_array(program, hierarchy) else {
+            return out;
+        };
+        let mut listed: BTreeSet<u64> = BTreeSet::new();
+        let mut k = 1u32;
+        while k < count {
+            let Some((descriptor, contained, offset)) = base_entry(program, array, k) else {
+                break;
+            };
+            let named = self
+                .names
+                .entry(descriptor)
+                .or_insert_with(|| type_name(program, descriptor).map(Arc::from));
+            let Some(name) = named.clone() else {
+                break;
+            };
+            if listed.insert(descriptor) {
+                let evidence = ParentEvidence::Rtti;
+                out.push(ParentLink {
+                    name,
+                    evidence,
+                    offset,
+                });
+            }
+            k = k.saturating_add(contained).saturating_add(1);
+        }
+        out
+    }
+}
+
+/// Reads a class hierarchy descriptor's base count and base array.
 ///
 /// # Arguments
 ///
 /// * `program` - The loaded image.
-/// * `vtable` - Address of the vtable's first slot.
+/// * `hierarchy` - Address of the class hierarchy descriptor.
 ///
 /// # Returns
 ///
-/// The base's qualified name, or `None` when the class has no base or the
-/// records do not decode.
-pub(super) fn parent(program: &Program, vtable: u64) -> Option<String> {
-    let col = locator(program, vtable)?;
-    let bases = read_u32(program, col.hierarchy.checked_add(8)?)?;
-    if !(2..=BASES_MAX).contains(&bases) {
+/// The entry count, the class itself included, and the array's address;
+/// `None` when the class has no base, more than [`BASES_MAX`] entries, or
+/// the fields do not read.
+fn base_array(program: &Program, hierarchy: u64) -> Option<(u32, u64)> {
+    let count = read_u32(program, hierarchy.checked_add(8)?)?;
+    if !(2..=BASES_MAX).contains(&count) {
         return None;
     }
-    let array = pointer(program, col.hierarchy.checked_add(12)?)?;
-    let base = pointer(program, array.checked_add(4)?)?;
-    let descriptor = pointer(program, base)?;
-    type_name(program, descriptor)
+    Some((count, pointer(program, hierarchy.checked_add(12)?)?))
+}
+
+/// Reads one entry of a hierarchy's base array, without its name.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `array` - Address of the base array.
+/// * `k` - The entry's index.
+///
+/// # Returns
+///
+/// The base's type descriptor, how many bases it contains, and where its
+/// subobject sits; `None` when the entry does not read.
+fn base_entry(program: &Program, array: u64, k: u32) -> Option<(u64, u32, BaseOffset)> {
+    let base = pointer(program, array.checked_add(u64::from(k) * 4)?)?;
+    let contained = read_u32(program, base.checked_add(4)?)?;
+    let mdisp = read_u32(program, base.checked_add(8)?)?;
+    let pdisp = read_u32(program, base.checked_add(12)?)?;
+    let offset = if pdisp == u32::MAX {
+        BaseOffset::At(u64::from(mdisp))
+    } else {
+        BaseOffset::Virtual
+    };
+    Some((pointer(program, base)?, contained, offset))
 }
 
 /// Reads the complete object locator one word before a vtable.

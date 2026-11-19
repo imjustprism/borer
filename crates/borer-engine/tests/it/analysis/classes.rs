@@ -550,10 +550,10 @@ fn constructors_give_classes_vtables_and_parents() {
     let der = a.classes.by_name.get("Der").expect("Der");
     assert_eq!(der.vtable, Some(0x22a0));
     assert_eq!(der.slots, vec![0x1870, 0x1200]);
-    assert_eq!(der.parent.as_deref(), Some("Base"));
+    assert_eq!(der.parent_name(), Some("Base"));
     assert_eq!(der.ctors, vec![0x16f0, 0x1710, 0x1730]);
     let base = a.classes.by_name.get("Base").expect("Base");
-    assert_eq!((base.vtable, base.parent.as_deref()), (Some(0x2280), None));
+    assert_eq!((base.vtable, base.parent_name()), (Some(0x2280), None));
     assert_eq!(base.slots, vec![0x1200, 0x11e0]);
     assert_eq!(
         a.classes.vtables.get(&0x22a0).map(String::as_str),
@@ -670,7 +670,7 @@ fn an_override_is_named_after_the_class_whose_table_holds_it() {
     let p = hierarchy(&[("Base", None, &[0, 1]), ("Derived", Some(0), &[0, 2])]);
     let a = Analysis::compute(&p);
     let derived = a.classes.by_name.get("Derived").expect("Derived");
-    assert_eq!(derived.parent.as_deref(), Some("Base"));
+    assert_eq!(derived.parent_name(), Some("Base"));
     assert_eq!(derived.slots, [slot_fn(0), slot_fn(2)]);
     let name = |n: usize| a.function(slot_fn(n)).and_then(|f| f.name.clone());
     assert_eq!(name(0).as_deref(), Some("Base::vfunc_0"));
@@ -712,7 +712,7 @@ fn a_body_folded_into_two_tables_keeps_its_address_name() {
         ("Two", None, [5, 6]),
     ] {
         let info = a.classes.by_name.get(class).expect("a class");
-        assert_eq!(info.parent.as_deref(), parent, "{class}");
+        assert_eq!(info.parent_name(), parent, "{class}");
         assert_eq!(info.slots, slots.map(slot_fn), "{class}");
     }
     let name = |n: usize| a.function(slot_fn(n)).and_then(|f| f.name.clone());
@@ -846,7 +846,7 @@ fn slot_siblings_share_the_return_verdict() {
         a.classes
             .by_name
             .get("class_2988")
-            .and_then(|c| c.parent.as_deref()),
+            .and_then(|c| c.parent_name()),
         Some("class_2970")
     );
 }
@@ -926,7 +926,7 @@ fn inlined_base_constructors_store_two_tables() {
         .clone();
     let base = a.classes.vtables.get(&0x2a00).expect("base table").clone();
     let c = a.classes.by_name.get(&own).expect("derived class");
-    assert_eq!(c.parent.as_deref(), Some(base.as_str()));
+    assert_eq!(c.parent_name(), Some(base.as_str()));
     assert_eq!(c.ctors, vec![0x1e50]);
     assert_eq!(
         a.function(0x1e50).and_then(|f| f.name.clone()),
@@ -943,7 +943,7 @@ fn inlined_base_constructors_store_two_tables() {
 fn initializers_name_unregistered_descriptors() {
     let a = Analysis::compute(&fixture());
     let c = a.classes.by_name.get("Ns::T3").expect("Ns::T3");
-    assert_eq!(c.parent.as_deref(), Some("Ns::Thing"));
+    assert_eq!(c.parent_name(), Some("Ns::Thing"));
 }
 
 /// A constructor storing three tables in order names the longest its own
@@ -964,7 +964,7 @@ fn three_inlined_tables_name_the_nearest_base() {
         .expect("middle table")
         .clone();
     let c = a.classes.by_name.get(&own).expect("class");
-    assert_eq!(c.parent.as_deref(), Some(mid.as_str()));
+    assert_eq!(c.parent_name(), Some(mid.as_str()));
     assert_eq!(c.ctors, vec![0x10e1]);
 }
 
@@ -980,7 +980,7 @@ fn creators_constructing_in_place_give_classes_their_vtable() {
     let a = Analysis::compute(&fixture());
     let c = a.classes.by_name.get("Ns::T3").expect("Ns::T3");
     assert_eq!(c.vtable, Some(0x2ad8));
-    assert_eq!(c.parent.as_deref(), Some("Ns::Thing"));
+    assert_eq!(c.parent_name(), Some("Ns::Thing"));
     assert_eq!(c.creators, vec![0x11e4]);
     assert_eq!(
         a.function(0x11e4).and_then(|f| f.name.as_deref()),
@@ -1001,7 +1001,7 @@ fn descriptor_parents_win_over_inlined_tables() {
     let a = Analysis::compute(&fixture());
     let c = a.classes.by_name.get("Ns::T4").expect("Ns::T4");
     assert_eq!(c.vtable, Some(0x2a60));
-    assert_eq!(c.parent.as_deref(), Some("Ns::T2"));
+    assert_eq!(c.parent_name(), Some("Ns::T2"));
 }
 
 /// Slot sharing walks through ancestors without a table.
@@ -1017,7 +1017,7 @@ fn slot_sharing_walks_through_classes_without_a_table() {
         a.classes
             .by_name
             .get("Ns::T2")
-            .and_then(|c| c.parent.as_deref()),
+            .and_then(|c| c.parent_name()),
         Some("Ns::Thing")
     );
     assert_eq!(a.function(0x1bf0).and_then(|f| f.returns_value), Some(true));
@@ -1033,13 +1033,13 @@ fn slot_sharing_walks_through_classes_without_a_table() {
 fn descriptor_initializers_link_parents() {
     let a = Analysis::compute(&fixture());
     let c = a.classes.by_name.get("Ns::T2").expect("Ns::T2");
-    assert_eq!(c.parent.as_deref(), Some("Ns::Thing"));
+    assert_eq!(c.parent_name(), Some("Ns::Thing"));
     assert_eq!(c.vtable, None);
     assert!(
         a.classes
             .by_name
             .get("Ns::Thing")
-            .is_some_and(|t| t.parent.is_none())
+            .is_some_and(|t| t.parent().is_none())
     );
 }
 
@@ -1105,7 +1105,7 @@ fn tables_without_constructors_are_named_by_their_slots() {
     let der2 = a.classes.by_name.get("Der2").expect("Der2");
     assert_eq!(der2.vtable, Some(0x22c0));
     assert_eq!(der2.slots, vec![0x1740, 0x1200]);
-    assert_eq!(der2.parent.as_deref(), Some("Der"));
+    assert_eq!(der2.parent_name(), Some("Der"));
     assert_eq!(der2.ctors, vec![0x1750]);
     assert_eq!(
         a.classes.vtables.get(&0x22c0).map(String::as_str),
@@ -1442,7 +1442,7 @@ fn a_pure_call_handler_links_no_family() {
 /// hint; with no parent known, the anchor stands and so does the hint.
 #[test]
 fn a_known_parent_bounds_the_names_past_its_table() {
-    use borer_engine::analysis::vtables::render_slots;
+    use borer_engine::analysis::vtables::{Bases, ParentEvidence, ParentLink, render_slots};
     let hint = "  [2] sub_320  Texture names this slot Bind\n";
     for parent in [None, Some("Resource")] {
         let (mut a, o) = family_fixture(
@@ -1455,7 +1455,12 @@ fn a_known_parent_bounds_the_names_past_its_table() {
         );
         for child in ["Texture", "Sound"] {
             if let Some(info) = a.classes.by_name.get_mut(child) {
-                info.parent = parent.map(str::to_owned);
+                info.bases = Bases::Stated(
+                    parent
+                        .map(|p| ParentLink::at_start(p.to_owned(), ParentEvidence::Vtable))
+                        .into_iter()
+                        .collect(),
+                );
             }
         }
         let text = render_slots(&a, &o, &a.classes.by_name["Sound"], 48);
@@ -1530,4 +1535,191 @@ fn a_name_the_class_gives_another_slot_is_no_hint() {
     let (a, o) = family_fixture(&tables, &[(0x310, "A::Draw"), (0x600, "Base::Draw")]);
     let text = render_slots(&a, &o, &a.classes.by_name["Base"], 48);
     assert!(!text.contains("names this slot Draw"), "{text}");
+}
+
+/// Every parent says how it is known and where it sits.
+///
+/// In the shared fixture `Der`'s constructor calls `Base`'s, which stores
+/// `Base`'s table, so `Base` sits at 0, and `Ns::T3`'s initializer stores
+/// `Ns::Thing`'s descriptor beside its own, which states no offset. In the
+/// raw image below `Derived::Derived` calls `Base::Base`, which stores no
+/// table, with `this` before storing its own table, so only the callee's
+/// name ties the parent to `Base`.
+#[test]
+fn every_parent_says_how_it_is_known() {
+    use borer_engine::analysis::vtables::{BaseOffset, ParentEvidence};
+    let a = Analysis::compute(&fixture());
+    let link = |a: &Analysis, c: &str| {
+        let p = a.classes.by_name.get(c)?.parent()?;
+        Some((p.name.to_string(), p.evidence, p.offset))
+    };
+    let want = |name: &str, evidence, offset| Some((name.to_owned(), evidence, offset));
+    let at0 = BaseOffset::At(0);
+    assert_eq!(link(&a, "Der"), want("Base", ParentEvidence::Vtable, at0));
+    let unstated = BaseOffset::Unstated;
+    assert_eq!(
+        link(&a, "Ns::T3"),
+        want("Ns::Thing", ParentEvidence::Descriptor, unstated)
+    );
+    assert_eq!(link(&a, "Base"), None);
+    let mut code = vec![0xccu8; 0x820];
+    code[..0x13].copy_from_slice(&[
+        0x48, 0x89, 0xcb, // ASM: mov rbx, rcx
+        0xe8, 0x18, 0x00, 0x00, 0x00, // ASM: call 0x401020
+        0x48, 0x8d, 0x05, 0xf1, 0x0f, 0x00, 0x00, // ASM: lea rax, [rip+0xff1] -> 0x402000
+        0x48, 0x89, 0x03, // ASM: mov [rbx], rax
+        0xc3, // ASM: ret
+    ]);
+    code[0x20] = 0xc3; // ASM: ret
+    code[0x800..0x804].copy_from_slice(&[0x8b, 0x41, 0x08, 0xc3]); // ASM: mov eax, [rcx+8]; ret
+    code[0x810..0x814].copy_from_slice(&[0x8b, 0x41, 0x10, 0xc3]); // ASM: mov eax, [rcx+16]; ret
+    let mut data = 0x401800u64.to_le_bytes().to_vec();
+    data.extend(0x401810u64.to_le_bytes());
+    data.extend([0; 8]);
+    let mut p = crate::raw::image(Arch::X86_64, &code, &data);
+    p.symbols = [("Derived::Derived", 0x401000), ("Base::Base", 0x401020)]
+        .map(|(name, addr)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind: SymbolKind::Export,
+        })
+        .to_vec();
+    let a = Analysis::compute(&p);
+    assert_eq!(link(&a, "Derived"), want("Base", ParentEvidence::Name, at0));
+}
+
+/// Builds a class with three direct bases, one of which has a base of its
+/// own and one of which is virtual, as MSVC's run-time type information
+/// states them.
+///
+/// The constructor at 0x401000 stores `Foo`'s table 0x402018, whose
+/// locator at 0x402000 leads to `.?AVFoo@@` and a hierarchy of five
+/// entries: `Foo`, containing four; `Base` at offset 0, containing one;
+/// `Root` at offset 0, inside `Base`; `Other` at offset 8; `VBase`, reached
+/// through a virtual base pointer. So `Foo`'s direct bases are `Base` at 0,
+/// `Other` at 8 and `VBase` where its pointer says, and `Root` is not one.
+pub(super) fn multiple_bases() -> Program {
+    rtti_image(&[0x4020a0, 0x4020c0, 0x4020e0, 0x402100, 0x402180])
+}
+
+/// Builds the image [`multiple_bases`] describes with another base array.
+///
+/// # Arguments
+///
+/// * `array` - The hierarchy's base array: addresses of the base class
+///   descriptors at 0x4020a0 (`Foo`), 0x4020c0 (`Base`), 0x4020e0
+///   (`Root`), 0x402100 (`Other`), 0x402180 (`VBase`), and as clang
+///   emits them for a diamond, 0x4021c0 (`Other` at 4 containing one base)
+///   and 0x4021e0 (`VBase` through the virtual base table), at most six.
+fn rtti_image(array: &[u32]) -> Program {
+    let mut code = vec![0xc7, 0x01, 0x18, 0x20, 0x40, 0x00, 0xc3]; // ASM: mov dword [ecx],0x402018; ret
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,1; ret
+    code.resize(0x30, 0xcc);
+    code.extend_from_slice(&[0xb8, 0x02, 0x00, 0x00, 0x00, 0xc3]); // ASM: mov eax,2; ret
+    let mut data = vec![0u8; 0x200];
+    let mut words = |at: usize, words: &[u32]| {
+        for (k, w) in words.iter().enumerate() {
+            data[at + 4 * k..at + 4 * k + 4].copy_from_slice(&w.to_le_bytes());
+        }
+    };
+    words(0x00, &[0, 0, 0, 0x402040, 0x402070]);
+    words(0x14, &[0x402000, 0x401020, 0x401030]);
+    words(
+        0x70,
+        &[0, 0, u32::try_from(array.len()).unwrap_or(0), 0x402080],
+    );
+    words(0x80, array);
+    for (at, td, contained, mdisp, pdisp, vdisp, attributes) in [
+        (0xa0, 0x402040, 4, 0, u32::MAX, 0, 0),
+        (0xc0, 0x402120, 1, 0, u32::MAX, 0, 0),
+        (0xe0, 0x402140, 0, 0, u32::MAX, 0, 0),
+        (0x100, 0x402160, 0, 8, u32::MAX, 0, 0),
+        (0x180, 0x4021a0, 0, 0, 4, 0, 0),
+        (0x1c0, 0x402160, 1, 4, u32::MAX, 0, 0x40),
+        (0x1e0, 0x4021a0, 0, 0, 0, 4, 0x50),
+    ] {
+        words(at, &[td, contained, mdisp, pdisp, vdisp, attributes]);
+    }
+    for (at, name) in [
+        (0x48, &b".?AVFoo@@\0"[..]),
+        (0x128, b".?AVBase@@\0"),
+        (0x148, b".?AVRoot@@\0"),
+        (0x168, b".?AVOther@@\0"),
+        (0x1a8, b".?AVVBase@@\0"),
+    ] {
+        data[at..at + name.len()].copy_from_slice(name);
+    }
+    crate::raw::image(Arch::X86, &code, &data)
+}
+
+/// Run-time type information gives a class its parent and its further
+/// direct bases, each where it sits, and leaves out a base's own base.
+#[test]
+fn rtti_states_every_direct_base_and_where_it_sits() {
+    use borer_engine::analysis::vtables::{BaseOffset, Bases, ParentEvidence};
+    let p = multiple_bases();
+    let a = Analysis::compute(&p);
+    let foo = a.classes.by_name.get("Foo").expect("Foo is a class");
+    let bases = foo.direct_bases(&p);
+    let links: Vec<(&str, ParentEvidence, BaseOffset)> = bases
+        .iter()
+        .map(|p| (&*p.name, p.evidence, p.offset))
+        .collect();
+    let rtti = ParentEvidence::Rtti;
+    assert_eq!(
+        links,
+        [
+            ("Base", rtti, BaseOffset::At(0)),
+            ("Other", rtti, BaseOffset::At(8)),
+            ("VBase", rtti, BaseOffset::Virtual),
+        ]
+    );
+    assert_eq!(foo.parent_name(), Some("Base"));
+    assert!(matches!(foo.bases, Bases::Rtti { .. }), "{:?}", foo.bases);
+}
+
+/// A base array naming one base again and again lists it once.
+#[test]
+fn a_base_named_again_is_one_base() {
+    let p = rtti_image(&[0x4020a0, 0x402100, 0x402100, 0x402100]);
+    let a = Analysis::compute(&p);
+    let foo = a.classes.by_name.get("Foo").expect("Foo is a class");
+    let names: Vec<String> = foo
+        .direct_bases(&p)
+        .iter()
+        .map(|l| l.name.to_string())
+        .collect();
+    assert_eq!(names, ["Other"]);
+}
+
+/// In a diamond the virtual base both direct bases share is no direct base
+/// of the class.
+///
+/// clang's `clang/lib/CodeGen/MicrosoftCXXABI.cpp`, which emits MSVC's
+/// layout, builds the base array in `serializeClassHierarchy`: the class,
+/// then the same for each of `RD->bases()`, its direct bases only, so the
+/// array holds one entry for every path, in depth-first pre-order;
+/// `MSRTTIClass::initialize` gives each entry its `numContainedBases`, and
+/// `getBaseClassDescriptor` gives a base reached through a virtual one
+/// the derived class's vbptr offset and its vbtable index times 4. For
+/// `struct A { virtual ~A(); }; struct B : virtual A {}; struct C :
+/// virtual A {}; struct D : B, C {};` on x86 the array for `D` is `D`
+/// (contains 4), `B` (1, at 0), `A` (0, pdisp 0, vdisp 4, virtual), `C`
+/// (1, at 4), `A` again: `A` is never an entry of its own under `D`.
+/// Here `Foo`, `Base`, `VBase` and `Other` stand for `D`, `B`, `A` and
+/// `C`, byte for byte.
+#[test]
+fn a_virtual_base_of_a_diamond_is_no_direct_base() {
+    use borer_engine::analysis::vtables::BaseOffset;
+    let array = [0x4020a0, 0x4020c0, 0x4021e0, 0x4021c0, 0x4021e0];
+    let p = rtti_image(&array);
+    let a = Analysis::compute(&p);
+    let foo = a.classes.by_name.get("Foo").expect("Foo is a class");
+    let bases = foo.direct_bases(&p);
+    let links: Vec<(&str, BaseOffset)> = bases.iter().map(|l| (&*l.name, l.offset)).collect();
+    assert_eq!(
+        links,
+        [("Base", BaseOffset::At(0)), ("Other", BaseOffset::At(4))]
+    );
 }

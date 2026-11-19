@@ -715,7 +715,7 @@ impl Exec<'_, '_> {
                     entries.insert(f);
                     break;
                 }
-                at = classes.get(c).and_then(|i| i.parent.as_deref());
+                at = classes.get(c).and_then(|i| i.parent_name());
             }
             if entries.len() >= OVERRIDES_MAX {
                 break;

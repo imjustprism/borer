@@ -22,7 +22,7 @@ use std::path::PathBuf;
 
 use borer_engine::program::{FileOff, Program, Section, SymbolKind, read_regular};
 use borer_engine::{analysis::Analysis, num::from_usize};
-use heap::{measured, serial};
+use heap::{kept, measured, serial};
 
 #[path = "common/elfgen.rs"]
 #[expect(dead_code, reason = "writer helpers serve integration tests")]
@@ -36,6 +36,8 @@ mod machogen;
 mod a32;
 #[path = "hostile/asserts.rs"]
 mod asserts;
+#[path = "hostile/classes.rs"]
+mod classes;
 #[path = "hostile/heap.rs"]
 mod heap;
 #[path = "hostile/indirect.rs"]

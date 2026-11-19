@@ -33,7 +33,7 @@ fn reaching<'a>(
     let mut out = vec![class];
     let mut at = class;
     for _ in 0..ANCESTORS_MAX {
-        let Some(parent) = classes.get(at).and_then(|c| c.parent.as_deref()) else {
+        let Some(parent) = classes.get(at).and_then(|c| c.parent_name()) else {
             break;
         };
         let Some(p) = classes.get(parent).filter(|_| parent != at) else {
@@ -457,7 +457,9 @@ pub(super) fn unname_foreign_signatures(
             let Some(c) = at.take() else {
                 break;
             };
-            at = classes.get(&c).and_then(|i| i.parent.clone());
+            at = classes
+                .get(&c)
+                .and_then(|i| i.parent_name().map(str::to_owned));
             out.insert(c);
         }
         out
@@ -758,13 +760,13 @@ pub(super) fn propagate_slot_names(
         let mut proposals: BTreeMap<u64, BTreeSet<String>> = BTreeMap::new();
         for info in classes.values() {
             let mut ancestors: Vec<&ClassInfo> = Vec::new();
-            let mut at = info.parent.as_deref();
+            let mut at = info.parent_name();
             for _ in 0..ANCESTORS_MAX {
                 let Some(a) = at.and_then(|p| classes.get(p)) else {
                     break;
                 };
                 ancestors.push(a);
-                at = a.parent.as_deref();
+                at = a.parent_name();
             }
             for (i, &f) in info.slots.iter().enumerate() {
                 let chain: Vec<(&ClassInfo, u64)> = ancestors

@@ -1106,7 +1106,7 @@ mod tests {
                 name: "Game::Player".to_owned(),
                 vtable: Some(0x5000),
                 slots: vec![0x1000, 0],
-                parent: None,
+                bases: borer_engine::analysis::vtables::Bases::default(),
                 ctors: Vec::new(),
                 creators: Vec::new(),
             },

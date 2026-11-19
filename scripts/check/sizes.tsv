@@ -114,7 +114,7 @@ crates/borer-engine/src/analysis/returns.rs::float_results#1	117
 crates/borer-engine/src/analysis/returns.rs::infer#1	176
 crates/borer-engine/src/analysis/snapshot.rs::changes_tsv#1	107
 crates/borer-engine/src/analysis/switch_index.rs::step#1	129
-crates/borer-engine/src/analysis/vtables/mod.rs::infer#1	898
+crates/borer-engine/src/analysis/vtables/mod.rs::infer#1	884
 crates/borer-engine/src/analysis/vtables/scan.rs::step#1	364
 crates/borer-engine/src/carve.rs::elf#1	105
 crates/borer-engine/src/clr.rs::clr_tsv#1	134

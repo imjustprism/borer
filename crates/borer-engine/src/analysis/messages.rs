@@ -309,7 +309,7 @@ fn introducer<'a>(
     single(holders.iter().copied().filter(|h| {
         classes
             .get(*h)
-            .and_then(|c| c.parent.as_ref())
+            .and_then(|c| c.parent_name())
             .and_then(|p| classes.get(p))
             .is_none_or(|p| !p.slots.contains(&accessor))
     }))
@@ -520,7 +520,17 @@ mod tests {
                 name.to_owned(),
                 ClassInfo {
                     name: name.to_owned(),
-                    parent: parent.map(str::to_owned),
+                    bases: crate::analysis::vtables::Bases::Stated(
+                        parent
+                            .map(|p| {
+                                crate::analysis::vtables::ParentLink::at_start(
+                                    p.to_owned(),
+                                    crate::analysis::vtables::ParentEvidence::Vtable,
+                                )
+                            })
+                            .into_iter()
+                            .collect(),
+                    ),
                     slots: slots.to_vec(),
                     ..ClassInfo::default()
                 },

@@ -246,13 +246,17 @@ pub(super) fn member_class<'a>(
 /// * `class` - The class to start from.
 pub(super) fn ancestry(classes: &BTreeMap<String, ClassInfo>, class: &str) -> Vec<String> {
     let mut out = vec![class.to_owned()];
-    let mut at = classes.get(class).and_then(|i| i.parent.clone());
+    let mut at = classes
+        .get(class)
+        .and_then(|i| i.parent_name().map(str::to_owned));
     for _ in 0..ANCESTORS_MAX {
         let Some(p) = at else {
             break;
         };
         out.push(p.clone());
-        at = classes.get(&p).and_then(|i| i.parent.clone());
+        at = classes
+            .get(&p)
+            .and_then(|i| i.parent_name().map(str::to_owned));
     }
     out
 }

@@ -91,7 +91,7 @@ fn class_section(
     let _ = writeln!(
         out,
         "## class {class}: {role}, parent {}, {methods} methods, instance {}",
-        info.parent.as_deref().unwrap_or("-"),
+        info.parent_name().unwrap_or("-"),
         mapped
             .as_ref()
             .and_then(|c| c.instance.as_deref())

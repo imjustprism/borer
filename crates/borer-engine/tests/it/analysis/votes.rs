@@ -50,10 +50,7 @@ fn a_derived_override_does_not_narrow_its_base_method() {
     );
     let a = Analysis::compute(&p);
     assert_eq!(
-        a.classes
-            .by_name
-            .get("Der")
-            .and_then(|c| c.parent.as_deref()),
+        a.classes.by_name.get("Der").and_then(|c| c.parent_name()),
         Some("Base")
     );
     let m = a.function(0x1100).expect("M");

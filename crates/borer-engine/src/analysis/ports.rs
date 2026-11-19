@@ -245,7 +245,7 @@ fn owner_of(analysis: &Analysis, f: u64) -> Option<(String, usize)> {
                 .classes
                 .by_name
                 .get(*name)
-                .and_then(|c| c.parent.as_ref())
+                .and_then(|c| c.parent_name())
                 .and_then(|p| analysis.classes.by_name.get(p))
                 .is_none_or(|p| p.slots.get(*k) != Some(&f))
         })

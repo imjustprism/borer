@@ -86,6 +86,21 @@ pub(crate) fn measured<T>(f: impl FnOnce() -> T) -> (T, usize) {
     (out, PEAK.load(Ordering::Relaxed).saturating_sub(before))
 }
 
+/// Runs `f` and reports the heap it left held.
+///
+/// # Arguments
+///
+/// * `f` - The work to measure.
+///
+/// # Returns
+///
+/// The result and the live bytes after `f` beyond those before.
+pub(crate) fn kept<T>(f: impl FnOnce() -> T) -> (T, usize) {
+    let before = LIVE.load(Ordering::Relaxed);
+    let out = f();
+    (out, LIVE.load(Ordering::Relaxed).saturating_sub(before))
+}
+
 /// Takes the serial lock, poisoned or not.
 pub(crate) fn serial() -> std::sync::MutexGuard<'static, ()> {
     SERIAL

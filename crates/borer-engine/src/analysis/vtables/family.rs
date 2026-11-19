@@ -434,9 +434,8 @@ fn reach(
         .rposition(|(a, b)| a == b && anchor(*a))
         .map_or(0, |k| k + 1);
     let parent = own
-        .parent
-        .as_ref()
-        .filter(|p| member.parent.as_ref() == Some(*p) || **p == member.name)
+        .parent_name()
+        .filter(|p| member.parent_name() == Some(*p) || *p == member.name)
         .and_then(|p| classes.get(p))
         .filter(|p| p.vtable.is_some())
         .map(|p| p.slots.len());

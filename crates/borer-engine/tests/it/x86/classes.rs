@@ -43,7 +43,7 @@ fn a_vtable_with_rtti_names_its_class_and_parent() {
     assert_eq!(name(0x401030).as_deref(), Some("Foo::vfunc_1"));
     let foo = a.classes.by_name.get("Foo").expect("Foo is a class");
     assert_eq!(foo.vtable, Some(0x402018));
-    assert_eq!(foo.parent.as_deref(), Some("Base"));
+    assert_eq!(foo.parent_name(), Some("Base"));
 }
 
 /// Returns the image with an embedded base.

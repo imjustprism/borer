@@ -62,6 +62,7 @@
 //! the same way.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::isa::x86::Register;
 
@@ -180,6 +181,134 @@ struct Conv {
     args: &'static [Register],
 }
 
+/// How a class's parent ([`ClassInfo::parent`]) is known.
+///
+/// The sources are tried in this order and the first that names a parent
+/// gives it: a descriptor, then run-time type information, then the
+/// constructors in address order, the first that names any parent winning
+/// (by the table it stores, else by its base constructor's name), then the
+/// creators.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ParentEvidence {
+    /// An engine's class descriptors: an initializer stores the parent's
+    /// descriptor beside the class's own ([`super::descriptors`]).
+    Descriptor,
+    /// MSVC run-time type information: the class hierarchy descriptor
+    /// behind the class's vtable lists the parent as its first direct base.
+    Rtti,
+    /// A vtable: a constructor or creator stores the parent's table at the
+    /// object's start before the class's own, or a constructor's first call
+    /// with `this` is to a constructor that stores the parent's table.
+    Vtable,
+    /// A name: a constructor's first call with `this` is to a function
+    /// named as the parent's constructor or destructor.
+    Name,
+}
+
+/// Where a parent's subobject sits in the class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum BaseOffset {
+    /// At this many bytes from the object's start, as the evidence states.
+    At(u64),
+    /// Where a virtual base pointer says at run time: run-time type
+    /// information marks the base virtual and states no fixed offset.
+    Virtual,
+    /// The evidence does not say: a descriptor names the parent only.
+    Unstated,
+}
+
+/// A class's direct parent: its name, how it is known and where it sits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParentLink {
+    /// The parent's qualified name, shared by every class naming it from
+    /// one run-time type descriptor.
+    pub name: Arc<str>,
+    /// How it is known.
+    pub evidence: ParentEvidence,
+    /// Where its subobject sits: at 0 when a table stored at the object's
+    /// start or a base constructor called with `this` tells, as run-time
+    /// type information states it, else unstated.
+    pub offset: BaseOffset,
+}
+
+impl ParentLink {
+    /// Returns a parent at the object's start: what a table stored at
+    /// `[this]` or a base constructor called with `this` shows.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The parent's qualified name.
+    /// * `evidence` - How it is known.
+    #[must_use]
+    pub fn at_start(name: impl Into<Arc<str>>, evidence: ParentEvidence) -> Self {
+        Self {
+            name: name.into(),
+            evidence,
+            offset: BaseOffset::At(0),
+        }
+    }
+}
+
+/// Where a class's direct parents are stated.
+///
+/// Run-time type information is not copied: each class keeps where its
+/// hierarchy descriptor sits and its first base, and the rest is read from
+/// the file on request ([`ClassInfo::direct_bases`]), so what the analysis
+/// keeps per class stays small whatever the base arrays hold.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Bases {
+    /// Every direct parent, the parent first: the one a descriptor or a
+    /// scan names, or those a hand-built class states.
+    Stated(Arc<[ParentLink]>),
+    /// Every direct base the class hierarchy descriptor at `hierarchy`
+    /// lists, `first` the parent.
+    Rtti {
+        /// Address of the class hierarchy descriptor.
+        hierarchy: u64,
+        /// The first direct base it lists: the parent.
+        first: ParentLink,
+    },
+}
+
+impl Default for Bases {
+    fn default() -> Self {
+        Bases::Stated(Arc::default())
+    }
+}
+
+impl ClassInfo {
+    /// Returns the class's parent: the first of its direct parents.
+    #[must_use]
+    pub fn parent(&self) -> Option<&ParentLink> {
+        match &self.bases {
+            Bases::Stated(links) => links.first(),
+            Bases::Rtti { first, .. } => Some(first),
+        }
+    }
+
+    /// Returns the name of the class's parent, when it has one.
+    #[must_use]
+    pub fn parent_name(&self) -> Option<&str> {
+        self.parent().map(|p| &*p.name)
+    }
+
+    /// Returns every direct parent of the class, the parent first.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image, which run-time type information is read
+    ///   from.
+    ///
+    /// # Returns
+    ///
+    /// The parents in declaration order; under run-time type information,
+    /// cut at the first entry that no longer decodes.
+    #[must_use]
+    pub fn direct_bases(&self, program: &Program) -> Vec<ParentLink> {
+        super::rtti::Hierarchies::default().listed(program, &self.bases)
+    }
+}
+
 /// What the constructors of one class tell about it.
 #[derive(Debug, Clone, Default)]
 pub struct ClassInfo {
@@ -192,8 +321,12 @@ pub struct ClassInfo {
     /// `0` where the word is data the reading skipped, so a method's
     /// index is the byte offset of its word divided by the word size.
     pub slots: Vec<u64>,
-    /// The class whose constructor a constructor calls first with `this`.
-    pub parent: Option<String>,
+    /// The class's direct parents from the first source that names one
+    /// ([`ParentEvidence`]): every direct base run-time type information
+    /// states, in declaration order, else the one parent another source
+    /// names; none when no source does. The first is the parent
+    /// ([`ClassInfo::parent`]).
+    pub bases: Bases,
     /// Constructors and destructors: every function storing the vtable at
     /// `[this]`, sorted.
     pub ctors: Vec<u64>,
@@ -567,11 +700,18 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         }
     }
     let statics: BTreeSet<u64> = created.keys().copied().collect();
+    for name in descriptors.names.values() {
+        classes.entry(name.clone()).or_insert_with(|| ClassInfo {
+            name: name.clone(),
+            ..ClassInfo::default()
+        });
+    }
+    let mut rtti = super::rtti::Hierarchies::default();
     for info in classes.values_mut() {
         let parent = info.ctors.iter().find_map(|e| {
             let scan = scans.get(e)?;
             if let Some((_, Some(base))) = own_and_base(&scan.stores, &tables) {
-                return vtables.get(&base).cloned();
+                return Some((vtables.get(&base)?.clone(), ParentEvidence::Vtable));
             }
             let callee = scan.first_this_call?;
             let f = analysis.function(callee)?;
@@ -580,39 +720,18 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
                 None => own_and_base(&scan_function(program, f, bitness, &conv).stores, &tables),
             }
             .map(|(o, _)| o);
-            own.and_then(|v| vtables.get(&v).cloned()).or_else(|| {
-                f.name
-                    .as_deref()
-                    .map(super::bare_name)
-                    .and_then(ctor_class)
-                    .map(|(c, _)| c.to_owned())
-            })
+            let by_name = f.name.as_deref().map(super::bare_name).and_then(ctor_class);
+            own.and_then(|v| vtables.get(&v).cloned())
+                .map(|p| (p, ParentEvidence::Vtable))
+                .or_else(|| by_name.map(|(c, _)| (c.to_owned(), ParentEvidence::Name)))
         });
         let creator_parent = info.creators.iter().find_map(|e| {
             let (_, base) = own_and_base(&scans.get(e)?.result_stores, &tables)?;
-            vtables.get(&base?).cloned()
+            Some((vtables.get(&base?)?.clone(), ParentEvidence::Vtable))
         });
-        info.parent = descriptors
-            .parents
-            .get(&info.name)
-            .cloned()
-            .or_else(|| info.vtable.and_then(|v| super::rtti::parent(program, v)))
-            .or_else(|| parent.or(creator_parent).filter(|p| *p != info.name));
-    }
-    for name in descriptors.names.values() {
-        if !classes.contains_key(name) {
-            classes.insert(
-                name.clone(),
-                ClassInfo {
-                    name: name.clone(),
-                    vtable: None,
-                    slots: Vec::new(),
-                    parent: descriptors.parents.get(name).cloned(),
-                    ctors: Vec::new(),
-                    creators: Vec::new(),
-                },
-            );
-        }
+        let scanned = parent.or(creator_parent).filter(|(p, _)| *p != info.name);
+        let stated = descriptors.parents.get(&info.name);
+        info.bases = parent_links(program, &mut rtti, info, stated, scanned);
     }
     unname_foreign_signatures(&classes, &mut analysis.functions);
     unname_inlined_signatures(&mut analysis.functions);
@@ -1225,6 +1344,48 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     analysis.classes.secondary_vtables = secondary;
     analysis.classes.vtables = vtables;
     phases.mark("vtables typing+names");
+}
+
+/// Returns a class's direct parents, from the first source that names a
+/// parent ([`ParentEvidence`]).
+///
+/// # Arguments
+///
+/// * `program` - The image, for run-time type information.
+/// * `rtti` - The hierarchies decoded so far in this pass.
+/// * `info` - The class, for its primary vtable.
+/// * `stated` - The parent a descriptor names.
+/// * `scanned` - The parent its constructors or creators name, and how.
+///
+/// # Returns
+///
+/// The hierarchy descriptor when run-time type information names a base,
+/// else the one parent another source names; none when no source names
+/// one.
+fn parent_links(
+    program: &Program,
+    rtti: &mut super::rtti::Hierarchies,
+    info: &ClassInfo,
+    stated: Option<&String>,
+    scanned: Option<(String, ParentEvidence)>,
+) -> Bases {
+    if let Some(name) = stated {
+        let link = ParentLink {
+            name: name.as_str().into(),
+            evidence: ParentEvidence::Descriptor,
+            offset: BaseOffset::Unstated,
+        };
+        return Bases::Stated(Arc::from([link]));
+    }
+    if let Some((hierarchy, first)) = info.vtable.and_then(|v| rtti.first(program, v)) {
+        return Bases::Rtti { hierarchy, first };
+    }
+    Bases::Stated(
+        scanned
+            .map(|(name, evidence)| ParentLink::at_start(name, evidence))
+            .into_iter()
+            .collect(),
+    )
 }
 
 #[cfg(test)]

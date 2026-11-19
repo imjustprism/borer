@@ -10,7 +10,7 @@ use super::{
 };
 use crate::analysis::classes::{ClassLayout, FieldUse};
 use crate::analysis::utypes::{TypeExpr, UserField, UserStruct, UserType};
-use crate::analysis::vtables::ClassInfo;
+use crate::analysis::vtables::{ClassInfo, ParentEvidence, ParentLink};
 use crate::analysis::{Analysis, Overlay};
 use crate::program::{Arch, Program, Section};
 
@@ -185,7 +185,9 @@ fn a_recovered_layout_keeps_one_field_per_offset_with_its_evidence() {
         name: name.to_owned(),
         vtable: Some(0x5000),
         slots: vec![0x1000],
-        parent: Some("Demo::Actor".to_owned()),
+        bases: crate::analysis::vtables::Bases::Stated(std::sync::Arc::from([
+            ParentLink::at_start("Demo::Actor".to_owned(), ParentEvidence::Vtable),
+        ])),
         ctors: Vec::new(),
         creators: Vec::new(),
     };
@@ -259,7 +261,7 @@ fn a_stated_struct_wins_over_the_recovered_class_of_its_name() {
             name: name.to_owned(),
             vtable: Some(vtable),
             slots: Vec::new(),
-            parent: None,
+            bases: crate::analysis::vtables::Bases::default(),
             ctors: Vec::new(),
             creators: Vec::new(),
         };

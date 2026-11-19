@@ -61,7 +61,7 @@ fn a_slot_every_class_fills_keeps_its_candidates_to_the_cap() {
                 name: format!("C{k:05}"),
                 vtable: None,
                 slots: vec![stub(k)],
-                parent: None,
+                bases: borer_engine::analysis::vtables::Bases::default(),
                 ctors: Vec::new(),
                 creators: Vec::new(),
             },

@@ -131,7 +131,7 @@ fn role_of(analysis: &Analysis, roles: &Roles<'_>, class: &str) -> String {
             .classes
             .by_name
             .get(&c)
-            .and_then(|i| i.parent.clone());
+            .and_then(|i| i.parent_name().map(str::to_owned));
         lineage.push(c);
     }
     if let Some((_, role)) = roles
@@ -246,7 +246,7 @@ pub fn classes(analysis: &Analysis, overlay: &Overlay) -> Vec<MapClass> {
                 .classes
                 .by_name
                 .get(name)
-                .and_then(|c| c.parent.clone()),
+                .and_then(|c| c.parent_name().map(str::to_owned)),
             methods: methods.get(name).copied().unwrap_or(0),
             instance: instance.get(name.as_str()).cloned(),
         })
@@ -367,6 +367,26 @@ mod tests {
     use super::*;
     use crate::analysis::vtables::ClassInfo;
 
+    /// Returns a class with the parent a constructor's table would give it.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The class's name.
+    /// * `parent` - Its parent's name, if any.
+    fn class(name: &str, parent: Option<&str>) -> ClassInfo {
+        use crate::analysis::vtables::{Bases, ParentEvidence, ParentLink};
+        ClassInfo {
+            name: name.to_owned(),
+            bases: Bases::Stated(
+                parent
+                    .map(|p| ParentLink::at_start(p.to_owned(), ParentEvidence::Vtable))
+                    .into_iter()
+                    .collect(),
+            ),
+            ..ClassInfo::default()
+        }
+    }
+
     /// An ancestor's role word outranks the class's own name, and a word
     /// matches only where a word starts.
     ///
@@ -376,11 +396,6 @@ mod tests {
     #[test]
     fn the_lineage_outranks_the_name() {
         let mut a = Analysis::default();
-        let class = |name: &str, parent: Option<&str>| ClassInfo {
-            name: name.to_owned(),
-            parent: parent.map(str::to_owned),
-            ..ClassInfo::default()
-        };
         a.classes
             .by_name
             .insert("Msg::Message".into(), class("Msg::Message", None));
@@ -407,11 +422,6 @@ mod tests {
     #[test]
     fn a_role_follows_the_lineage() {
         let mut a = Analysis::default();
-        let class = |name: &str, parent: Option<&str>| ClassInfo {
-            name: name.to_owned(),
-            parent: parent.map(str::to_owned),
-            ..ClassInfo::default()
-        };
         a.classes
             .by_name
             .insert("Base::Property".into(), class("Base::Property", None));
