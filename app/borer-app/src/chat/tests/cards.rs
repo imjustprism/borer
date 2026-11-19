@@ -4,7 +4,9 @@
 use gpui::{TestAppContext, VisualTestContext};
 use serde_json::json;
 
-use super::{answers, ask_each, call, chatting, first_two, have_proposed, verdicts_of};
+use super::{
+    answers, ask_each, call, chatting, docked, first_two, have_proposed, talking, verdicts_of,
+};
 use crate::chat::thread::Verdict;
 use borer_engine::analysis::edit::Author;
 
@@ -209,16 +211,16 @@ fn accept_commits_the_plan_the_card_showed(cx: &mut TestAppContext) {
     assert_eq!(changes, 2);
 }
 
-/// A proposal card shows the address, the name now and the new name as fields of their
-/// own, each written out: a name the binary wrote, padded with zero-width characters to
-/// spell a rename of its own, cannot stand in for the name Accept commits. A name that
+/// A proposal card shows the address, then the name now and the new name on one row, each
+/// written out: a name the binary wrote, padded with zero-width characters to spell a
+/// rename of its own, cannot stand in for the name Accept commits. A name that
 /// does not show whole is refused; one that mixes Latin with letters that look like it is warned of.
 #[gpui::test]
 fn the_card_shows_the_name_accept_commits(cx: &mut TestAppContext) {
     let (program, analysis, mut overlay) = crate::code_view::tests::sample_program();
     let caller = crate::app_view::tests::CALLER;
     let hostile = format!("x) to 'IsLicenseValid'{}", "\u{200b}".repeat(230));
-    overlay.names = [(caller, hostile)].into_iter().collect();
+    overlay.names = [(caller, hostile.clone())].into_iter().collect();
     let loaded = crate::app_view::tests::loaded_of(program, analysis, overlay);
     let (_app, thread, fake, model, cx) = chatting(Some(loaded), cx);
     thread.update(cx, |t, cx| t.send("Name it".to_owned(), cx));
@@ -245,7 +247,10 @@ fn the_card_shows_the_name_accept_commits(cx: &mut TestAppContext) {
     });
     assert_eq!(cards.len(), 2, "{cards:?}");
     assert!(
-        cards[0].contains(&"becomes: log_flush".to_owned()),
+        cards[0].contains(&format!(
+            "name: {} \u{2192} log_flush",
+            crate::chat::shown(&hostile)
+        )),
         "{:?}",
         cards[0]
     );
@@ -257,7 +262,7 @@ fn the_card_shows_the_name_accept_commits(cx: &mut TestAppContext) {
     assert!(
         cards[0]
             .iter()
-            .any(|l| l.starts_with("now: x) to 'IsLicenseValid'\\u{200b}"))
+            .any(|l| l.starts_with("name: x) to 'IsLicenseValid'\\u{200b}"))
     );
     assert!(
         cards[1].iter().any(|l| l.starts_with("warning:")),
@@ -306,4 +311,30 @@ fn a_refused_card_never_wedges_the_queue(cx: &mut TestAppContext) {
     thread.update(cx, |t, cx| t.accept(2, cx));
     cx.run_until_parked();
     assert_eq!(verdicts_of(&thread, cx)[2], Verdict::Accepted);
+}
+
+/// A long new name wraps inside its card rather than running past the edge, so the card
+/// shows all of the name Accept commits: one of 46 characters at the dock's default width,
+/// and one of 256.
+#[gpui::test]
+fn a_long_new_name_wraps_inside_its_card(cx: &mut TestAppContext) {
+    use crate::chat::card::{BECOMES_SELECTOR, CARD_SELECTOR};
+    let (app, panel, _, cx) = docked(cx);
+    let (thread, fake, model) = talking(&panel, cx);
+    let names = [
+        "register_all_window_classes_and_their_handlers".to_owned(),
+        "a".repeat(256),
+    ];
+    for name in &names {
+        thread.update(cx, |t, cx| t.clear(cx));
+        have_proposed(&app, &thread, &fake, &model, &[name.as_str()], cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let card = cx.debug_bounds(CARD_SELECTOR).unwrap();
+        let becomes = cx.debug_bounds(BECOMES_SELECTOR).unwrap();
+        assert!(
+            becomes.right() <= card.right() && becomes.size.width < card.size.width,
+            "{}: {becomes:?} runs past {card:?}",
+            name.len()
+        );
+    }
 }

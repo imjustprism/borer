@@ -8,9 +8,9 @@
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, Context, Focusable as _, InteractiveElement as _, IntoElement, KeyUpEvent,
-    MouseButton, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Window, div, px,
+    AnyElement, App, Context, Focusable as _, InteractiveElement as _, IntoElement, KeyUpEvent,
+    MouseButton, ParentElement as _, Rems, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, px,
 };
 use ui::{
     ActiveTheme as _, Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color, Icon,
@@ -29,7 +29,16 @@ use super::{AcceptChatProposal, ChatPanel, RejectChatProposal, shown as shown_te
 use borer_engine::analysis::edit::Author;
 
 /// Width of a card's field labels, so the values line up.
-const LABEL_WIDTH: f32 = 60.0;
+const LABEL_WIDTH: f32 = 64.0;
+
+/// Debug selector of the name a rename's row says it becomes, for layout tests.
+pub(crate) const BECOMES_SELECTOR: &str = "chat-card-becomes";
+
+/// Debug selector of a proposal card, for layout tests.
+pub(crate) const CARD_SELECTOR: &str = "chat-card";
+
+/// Size of the key hints on a card's buttons, as Zed sizes a button's key binding.
+const KEY_SIZE: Rems = Rems(0.75);
 
 /// What a field of a proposal card states.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,24 +212,68 @@ fn line_fields(line: &Line, written: &BTreeMap<u64, Option<&str>>, fields: &mut 
     }
 }
 
-/// Returns each field of `proposal`'s card as one line with its color, as the card reads
-/// it: `address 0x...`, then `label: value`.
+/// One row of a card, under one label.
+#[derive(Debug)]
+enum Row {
+    /// A field alone, under its kind's label.
+    One(Field),
+    /// A name now and the name it becomes, read as one `name` row: before, then after.
+    Renamed(Field, Field),
+}
+
+impl Row {
+    /// Returns the row's label; empty for a plan line.
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::One(f) => f.kind.label(),
+            Self::Renamed(..) => "name",
+        }
+    }
+}
+
+/// Returns `fields` as the rows the card draws: a name now followed by the name it
+/// becomes is one row, every other field a row of its own.
+fn rows(fields: Vec<Field>) -> Vec<Row> {
+    let mut rows = Vec::with_capacity(fields.len());
+    let mut fields = fields.into_iter().peekable();
+    while let Some(f) = fields.next() {
+        let becomes = if f.kind == Kind::Now {
+            fields.next_if(|next| next.kind == Kind::Becomes)
+        } else {
+            None
+        };
+        rows.push(match becomes {
+            Some(new) => Row::Renamed(f, new),
+            None => Row::One(f),
+        });
+    }
+    rows
+}
+
+/// Returns each row of `proposal`'s card ([`rows`]) as one line with its color.
+///
+/// The color is that of what the row commits; the text is `address 0x...`, a plan line as
+/// it is, `name: ` then the name now, an arrow (U+2192) and the new name for a rename, else
+/// `label: value`.
 #[cfg(test)]
 pub(crate) fn lines(proposal: &Proposal) -> Vec<(String, Color)> {
-    proposal
-        .shown
-        .fields
-        .iter()
-        .cloned()
-        .map(|f| {
-            let line = match f.kind {
-                Kind::Address(_) => format!("address {}", f.value),
-                Kind::Line => f.value,
-                Kind::Now | Kind::Becomes | Kind::Comment | Kind::Type | Kind::Warning => {
-                    format!("{}: {}", f.kind.label(), f.value)
-                }
-            };
-            (line, color_of(f.kind))
+    rows(proposal.shown.fields.clone())
+        .into_iter()
+        .map(|row| match row {
+            Row::Renamed(now, new) => (
+                format!("name: {} \u{2192} {}", now.value, new.value),
+                color_of(new.kind),
+            ),
+            Row::One(f) => {
+                let line = match f.kind {
+                    Kind::Address(_) => format!("address {}", f.value),
+                    Kind::Line => f.value,
+                    Kind::Now | Kind::Becomes | Kind::Comment | Kind::Type | Kind::Warning => {
+                        format!("{}: {}", f.kind.label(), f.value)
+                    }
+                };
+                (line, color_of(f.kind))
+            }
         })
         .collect()
 }
@@ -231,7 +284,8 @@ const fn color_of(kind: Kind) -> Color {
         Kind::Address(_) => Color::Accent,
         Kind::Warning => Color::Warning,
         Kind::Now => Color::Muted,
-        Kind::Becomes | Kind::Comment | Kind::Type | Kind::Line => Color::Default,
+        Kind::Becomes => Color::Created,
+        Kind::Comment | Kind::Type | Kind::Line => Color::Default,
     }
 }
 
@@ -293,10 +347,10 @@ fn receipt(shown: &Shown, verdict: &Verdict) -> Option<AnyElement> {
     };
     Some(
         h_flex()
-            .px_2()
-            .py_0p5()
+            .px_4()
+            .py_1()
             .gap_1p5()
-            .child(Icon::new(icon).size(IconSize::XSmall).color(color))
+            .child(Icon::new(icon).size(IconSize::Small).color(color))
             .child(
                 div().min_w_0().flex_1().child(
                     Label::new(format!("{} {said}", shown.title))
@@ -326,7 +380,7 @@ fn summary(shown: &Shown) -> Option<AnyElement> {
     }
     Some(
         Label::new(said)
-            .size(LabelSize::XSmall)
+            .size(LabelSize::Small)
             .color(Color::Muted)
             .into_any_element(),
     )
@@ -342,6 +396,22 @@ fn proposed_by(author: &Author) -> String {
         ),
         Author::Person => "proposed by you".to_owned(),
     }
+}
+
+/// Returns a card's title row: its title by kind and its number.
+fn card_title(id: usize, title: String, cx: &App) -> impl IntoElement {
+    h_flex()
+        .px_2()
+        .py_1p5()
+        .gap_1p5()
+        .border_b_1()
+        .border_color(cx.theme().colors().border_variant)
+        .child(div().min_w_0().flex_1().child(Label::new(title).truncate()))
+        .child(
+            Label::new(format!("#{}", id.saturating_add(1)))
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
 }
 
 impl ChatPanel {
@@ -362,13 +432,6 @@ impl ChatPanel {
         if let Some(receipt) = receipt(&shown, &verdict) {
             return receipt;
         }
-        let colors = cx.theme().colors();
-        let border = if head {
-            colors.border_focused
-        } else {
-            colors.border
-        };
-        let surface = colors.elevated_surface_background;
         let summary = summary(&shown);
         let title = shown.title.clone();
         let force = shown.takes.then(|| {
@@ -378,39 +441,37 @@ impl ChatPanel {
         });
         let body = Self::card_fields(id, shown.fields, cx);
         let footer = self.card_footer(id, &verdict, head, cx);
+        let colors = cx.theme().colors();
+        let border = if head {
+            colors.border_focused
+        } else {
+            colors.border
+        };
+        let surface = colors.elevated_surface_background;
         let card = v_flex()
             .id(("chat-card", id))
+            .debug_selector(|| CARD_SELECTOR.to_owned())
             .mx_2()
             .my_1()
-            .p_2()
-            .gap_1p5()
             .rounded_md()
             .border_1()
             .border_color(border)
             .bg(surface)
+            .overflow_hidden()
+            .child(card_title(id, title, cx))
             .child(
-                h_flex()
+                v_flex()
+                    .px_2()
+                    .py_2()
                     .gap_1p5()
+                    .children(summary)
+                    .children(force)
+                    .child(body)
                     .child(
-                        Icon::new(IconName::Pencil)
-                            .size(IconSize::Small)
-                            .color(Color::Muted),
-                    )
-                    .child(Label::new(title).size(LabelSize::Small))
-                    .child(div().flex_1())
-                    .child(
-                        Label::new(format!("#{}", id.saturating_add(1)))
-                            .size(LabelSize::XSmall)
+                        Label::new(author)
+                            .size(LabelSize::Small)
                             .color(Color::Muted),
                     ),
-            )
-            .children(summary)
-            .children(force)
-            .child(body)
-            .child(
-                Label::new(author)
-                    .size(LabelSize::XSmall)
-                    .color(Color::Muted),
             )
             .child(footer);
         if !head {
@@ -478,54 +539,96 @@ impl ChatPanel {
         self.input.focus_handle(cx).focus(window, cx);
     }
 
-    /// Returns the card's fields, each on its own line with its label, values aligned and
-    /// wrapping; the address opens its function; a long plan scrolls inside the card.
+    /// Returns the card's rows ([`rows`]), each on its own line with its label, values
+    /// aligned and wrapping; the address opens its function; a long plan scrolls inside the
+    /// card.
     fn card_fields(id: usize, fields: Vec<Field>, cx: &mut Context<'_, Self>) -> AnyElement {
-        let rows: Vec<_> = fields
-            .into_iter()
-            .enumerate()
-            .map(|(n, f)| {
-                let value = Label::new(f.value)
-                    .size(LabelSize::Small)
-                    .buffer_font(cx)
-                    .color(color_of(f.kind));
-                let value = match f.kind {
-                    Kind::Address(va) => div()
-                        .id(SharedString::from(format!("chat-card-at-{id}-{n}")))
-                        .cursor_pointer()
-                        .hover(|s| s.underline())
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.open_address(va, window, cx);
-                        }))
-                        .child(value)
-                        .into_any_element(),
-                    Kind::Now
-                    | Kind::Becomes
-                    | Kind::Comment
-                    | Kind::Type
-                    | Kind::Warning
-                    | Kind::Line => div().min_w_0().flex_1().child(value).into_any_element(),
-                };
-                let gap = matches!(f.kind, Kind::Address(_)) && n > 0;
-                h_flex()
-                    .items_start()
-                    .gap_2()
-                    .when(gap, |row| row.mt_1())
-                    .child(
-                        div().w(px(LABEL_WIDTH)).flex_none().child(
-                            Label::new(f.kind.label())
-                                .size(LabelSize::XSmall)
-                                .color(Color::Muted),
-                        ),
-                    )
-                    .child(value)
-            })
-            .collect();
+        let rows = rows(fields).into_iter().enumerate().map(|(n, row)| {
+            let gap = n > 0 && matches!(&row, Row::One(f) if matches!(f.kind, Kind::Address(_)));
+            let label = row.label();
+            let value = match row {
+                Row::Renamed(now, new) => Self::renamed(now, new, cx),
+                Row::One(f) => Self::card_value(id, n, f, cx),
+            };
+            h_flex()
+                .items_start()
+                .gap_2()
+                .when(gap, |row| row.mt_1p5())
+                .child(
+                    div()
+                        .w(px(LABEL_WIDTH))
+                        .flex_none()
+                        .child(Label::new(label).size(LabelSize::Small).color(Color::Muted)),
+                )
+                .child(value)
+        });
         v_flex()
             .id(("chat-card-fields", id))
-            .max_h(px(240.0))
+            .max_h_64()
             .overflow_y_scroll()
+            .gap_0p5()
             .children(rows)
+            .into_any_element()
+    }
+
+    /// Returns a field's value in the editor's font, in its kind's color; an address opens
+    /// its function.
+    fn card_value(id: usize, n: usize, f: Field, cx: &mut Context<'_, Self>) -> AnyElement {
+        let value = Label::new(f.value)
+            .size(LabelSize::Small)
+            .buffer_font(cx)
+            .color(color_of(f.kind));
+        match f.kind {
+            Kind::Address(va) => div()
+                .id(SharedString::from(format!("chat-card-at-{id}-{n}")))
+                .cursor_pointer()
+                .hover(|s| s.underline())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.open_address(va, window, cx);
+                }))
+                .child(value)
+                .into_any_element(),
+            Kind::Now | Kind::Becomes | Kind::Comment | Kind::Type | Kind::Warning | Kind::Line => {
+                div().min_w_0().flex_1().child(value).into_any_element()
+            }
+        }
+    }
+
+    /// Returns a rename as it reads on the card: the name now struck through, an arrow, and
+    /// the name it becomes, wrapping under it when the card is narrow; each name wraps
+    /// within the card, so a long one shows whole.
+    fn renamed(now: Field, becomes: Field, cx: &mut Context<'_, Self>) -> AnyElement {
+        h_flex()
+            .min_w_0()
+            .flex_1()
+            .flex_wrap()
+            .gap_x_1p5()
+            .child(
+                div().min_w_0().child(
+                    Label::new(now.value)
+                        .size(LabelSize::Small)
+                        .buffer_font(cx)
+                        .color(color_of(now.kind))
+                        .strikethrough(),
+                ),
+            )
+            .child(
+                Icon::new(IconName::ArrowRight)
+                    .size(IconSize::Small)
+                    .color(Color::Muted),
+            )
+            .child(
+                div()
+                    .min_w_0()
+                    .debug_selector(|| BECOMES_SELECTOR.to_owned())
+                    .child(
+                        Label::new(becomes.value)
+                            .size(LabelSize::Small)
+                            .buffer_font(cx)
+                            .weight(gpui::FontWeight::SEMIBOLD)
+                            .color(color_of(becomes.kind)),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -539,26 +642,34 @@ impl ChatPanel {
     ) -> AnyElement {
         let note = |text: String, color: Color| {
             div()
-                .min_w_0()
+                .min_w_32()
                 .flex_1()
                 .child(Label::new(text).size(LabelSize::Small).color(color))
         };
         let dismiss = |label: &'static str| {
             Button::new(("chat-dismiss", id), label)
-                .style(ButtonStyle::Subtle)
+                .style(ButtonStyle::Outlined)
                 .label_size(LabelSize::Small)
                 .key_binding(
-                    KeyBinding::for_action_in(&menu::Cancel, &self.card, cx).size(px(11.0)),
+                    KeyBinding::for_action_in(&menu::Cancel, &self.card, cx).size(KEY_SIZE),
                 )
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.decide(id, false, window, cx);
                 }))
         };
-        let row = h_flex().gap_1().items_center();
+        let row = h_flex()
+            .flex_wrap()
+            .gap_1()
+            .items_center()
+            .justify_end()
+            .px_2()
+            .py_1p5()
+            .border_t_1()
+            .border_color(cx.theme().colors().border_variant);
         match (verdict, head) {
             (Verdict::Waiting, true) => row
                 .child(note(
-                    "nothing changes until you accept".to_owned(),
+                    "Nothing changes until you accept.".to_owned(),
                     Color::Muted,
                 ))
                 .child(dismiss("Reject"))
@@ -568,7 +679,7 @@ impl ChatPanel {
                         .label_size(LabelSize::Small)
                         .key_binding(
                             KeyBinding::for_action_in(&menu::Confirm, &self.card, cx)
-                                .size(px(11.0)),
+                                .size(KEY_SIZE),
                         )
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.decide(id, true, window, cx);
