@@ -1,7 +1,8 @@
 //! Reads arbitrary text as what a person types into each form of edit a
 //! referent takes, and plans the edit through the catalog row that makes
 //! it over a small image: the path every inline rename, comment, type,
-//! prototype, declaration, enum and typedef takes before its plan is shown.
+//! prototype, declaration, enum and typedef takes before its plan is shown;
+//! and reads each line as a chat reply's C code block is colored.
 
 #![no_main]
 
@@ -10,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use borer_engine::analysis::edit::{Form, VarValue};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::{Arch, Program, Section};
+use borer_engine::view::c_kinds;
 use borer_front::tools::{Loaded, propose};
 use libfuzzer_sys::fuzz_target;
 
@@ -67,5 +69,14 @@ fuzz_target!(|data: &[u8]| {
     ];
     for form in forms {
         _ = propose(face(), &form, &text);
+    }
+    for line in text.lines() {
+        let mut at = 0;
+        for (span, _) in c_kinds(line) {
+            assert!(span.start == at && span.end > at, "{line:?}");
+            assert!(line.is_char_boundary(span.end), "{line:?}");
+            at = span.end;
+        }
+        assert_eq!(at, line.len(), "{line:?}");
     }
 });

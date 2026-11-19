@@ -24,6 +24,8 @@ use crate::analysis::Analysis;
 use crate::analysis::decompile::Origins;
 use crate::analysis::protos::VarKey;
 
+pub use crate::analysis::decompile::lexer::c_kinds;
+
 /// What a token of a view is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {

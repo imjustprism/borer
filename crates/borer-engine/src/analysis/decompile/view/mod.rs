@@ -57,11 +57,10 @@ mod data;
 mod fields;
 pub(crate) mod said;
 
-use super::lexer::{Lex, Piece, scan};
+use super::lexer::{Lex, Piece, Spanned, code_before, directive, scan, spelled, tagged, word};
 use super::line::{header_len, is_global_name, label_address};
 use super::{
-    answer_with_origins, cir, ctext, declarations_end, defs, expr_render, helper, unit,
-    virtual_callees,
+    answer_with_origins, ctext, declarations_end, defs, expr_render, helper, unit, virtual_callees,
 };
 use crate::analysis::attributes::global_addr;
 use crate::analysis::edit::var_key;
@@ -82,9 +81,6 @@ const CHECKED: &str = "// checked vs binary: ";
 /// The most numbers of a checked header line looked at for a link, each
 /// one decoding a block: twice the instructions the line names.
 const CHECKED_WORDS_MAX: usize = 8;
-
-/// One piece of a line and the bytes it spans ([`split`]).
-type Spanned = (Piece, Range<usize>);
 
 /// What a line of a function's text is, which says how its names read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -795,35 +791,6 @@ fn split_signature(line: &str, own: &str, out: &mut Vec<Spanned>) {
     }
     out.push((Piece::Token(Lex::Name), at..end));
     split_into(line, end, out);
-}
-
-/// Returns the text of piece `k` of a line, empty past the last.
-///
-/// # Arguments
-///
-/// * `line` - The line.
-/// * `pieces` - Its pieces.
-/// * `k` - The piece.
-fn word<'t>(line: &'t str, pieces: &[Spanned], k: usize) -> &'t str {
-    pieces
-        .get(k)
-        .and_then(|(_, s)| line.get(s.clone()))
-        .unwrap_or_default()
-}
-
-/// Returns the last piece before `k` that is code: no whitespace and no
-/// comment.
-///
-/// # Arguments
-///
-/// * `pieces` - A line's pieces.
-/// * `k` - The piece to look before.
-fn code_before(pieces: &[Spanned], k: usize) -> Option<usize> {
-    (0..k).rev().find(|&j| {
-        pieces
-            .get(j)
-            .is_some_and(|(p, _)| !matches!(p, Piece::Space | Piece::Comment))
-    })
 }
 
 /// Returns the code pieces of a line, no whitespace and no comment, each
@@ -1558,20 +1525,13 @@ impl<'a> Reader<'a> {
             let link = at.scope.facts.filter(|f| f.starts_block(va));
             return (Kind::Label, link.map(|_| Ref::Address(va)), next == ":");
         }
-        if ctext::named_type(w, self.word).is_some() {
-            return (Kind::Type, None, false);
+        if let Some(kind) = spelled(w, directive(at.line, at.pieces, at.k), self.word) {
+            return (kind, None, false);
         }
-        let directive = code_before(at.pieces, at.k).is_some_and(|j| {
-            word(at.line, at.pieces, j) == "#" && code_before(at.pieces, j).is_none()
-        });
-        if directive
-            || cir::KEYWORDS.contains(&w)
-            || unit::C_WORDS.contains(&w)
-            || (at.role == Role::Inline && w == "inline")
-        {
+        if at.role == Role::Inline && w == "inline" {
             return (Kind::Keyword, None, false);
         }
-        if matches!(prev, Some("struct" | "union" | "enum")) {
+        if tagged(prev) {
             return self.typed(w, at.i);
         }
         if at.scope.vars.contains(w) {

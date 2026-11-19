@@ -27,6 +27,7 @@ use settings::Settings as _;
 use super::picker::ChatPicker;
 use super::thread::{Arg, Call, Chosen, Entry, FENCE_CLOSE, FENCE_OPEN, Fault, HEAD_BYTES, Ran};
 use super::{ChatPanel, NewChatThread, PickChatModel, StopChat};
+use crate::code_view::{CodePalette, Role};
 
 /// Debug selector of the header, for layout tests.
 pub(crate) const HEADER_SELECTOR: &str = "chat-header";
@@ -46,11 +47,17 @@ pub(crate) const DONT_SEND_SELECTOR: &str = "chat-dont-send";
 /// Debug selector of the held message's Send button, for layout tests.
 pub(crate) const SEND_SELECTOR: &str = "chat-send-held";
 
+/// Debug selector of a code block's lines, the part that scrolls sideways, for layout tests.
+pub(crate) const CODE_SELECTOR: &str = "chat-code-lines";
+
 /// Debug selector of an opened tool call's Output heading, for layout tests.
 pub(crate) const OUTPUT_SELECTOR: &str = "chat-call-output";
 
 /// Most lines of a tool call's input an opened call shows; the rest are counted.
 pub(crate) const INPUT_LINES: usize = 6;
+
+/// Most bytes of a code block a reply colors; a longer block is drawn plain.
+pub(crate) const CODE_COLORED: usize = 4096;
 
 /// Three questions a reverse engineer asks first of an open binary.
 pub(crate) const EXAMPLES: [&str; 3] = [
@@ -64,8 +71,9 @@ pub(crate) const EXAMPLES: [&str; 3] = [
 pub(crate) enum Block<'a> {
     /// Running text, which may hold code spans.
     Text(&'a str),
-    /// The lines of a fenced code block, without its fences.
-    Code(Vec<&'a str>),
+    /// A fenced code block: its fence's info string, trimmed, and its lines without the
+    /// fences.
+    Code(&'a str, Vec<&'a str>),
 }
 
 /// Returns `text` split into running text and fenced code blocks; an unclosed fence runs to
@@ -73,7 +81,7 @@ pub(crate) enum Block<'a> {
 #[must_use]
 pub(crate) fn blocks(text: &str) -> Vec<Block<'_>> {
     let mut blocks = Vec::new();
-    let (mut code, mut start, mut at) = (None::<Vec<&str>>, 0, 0);
+    let (mut code, mut start, mut at) = (None::<(&str, Vec<&str>)>, 0, 0);
     for line in text.split_inclusive('\n') {
         let fence = line.trim_start().starts_with("```");
         match (&mut code, fence) {
@@ -82,14 +90,14 @@ pub(crate) fn blocks(text: &str) -> Vec<Block<'_>> {
                 if !before.trim().is_empty() {
                     blocks.push(Block::Text(before));
                 }
-                code = Some(Vec::new());
+                code = Some((line.trim().trim_start_matches('`').trim(), Vec::new()));
             }
-            (Some(lines), true) => {
-                blocks.push(Block::Code(std::mem::take(lines)));
+            (Some((lang, lines)), true) => {
+                blocks.push(Block::Code(lang, std::mem::take(lines)));
                 code = None;
                 start = at.saturating_add(line.len());
             }
-            (Some(lines), false) => lines.push(line.trim_end_matches(['\n', '\r'])),
+            (Some((_, lines)), false) => lines.push(line.trim_end_matches(['\n', '\r'])),
             (None, false) => {}
         }
         at = at.saturating_add(line.len());
@@ -98,7 +106,7 @@ pub(crate) fn blocks(text: &str) -> Vec<Block<'_>> {
         }
     }
     match code {
-        Some(lines) => blocks.push(Block::Code(lines)),
+        Some((lang, lines)) => blocks.push(Block::Code(lang, lines)),
         None => {
             let rest = text.get(start..).unwrap_or_default().trim_matches('\n');
             if !rest.trim().is_empty() {
@@ -161,6 +169,89 @@ fn icon_of(name: &str) -> IconName {
         Some(false) => IconName::ToolPencil,
         None => IconName::ToolHammer,
     }
+}
+
+/// The color runs of each line of one code block: each run's bytes in its line and role.
+pub(crate) type Runs = Vec<Vec<(Range<usize>, Role)>>;
+
+/// The color runs of each code block of a text, by block; `None` for a block drawn plain.
+pub(crate) type Colors = Vec<Option<Runs>>;
+
+#[cfg(test)]
+thread_local! {
+    /// How many code blocks [`code_runs`] read on this thread, for the tests that a finished
+    /// block is read once.
+    pub(crate) static LEXED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Returns the color runs of each line of a code block whose fence says `lang`.
+///
+/// The runs are the engine's reading of C from the text alone
+/// ([`borer_engine::view::c_kinds`]) by the code view's roles, for a block tagged C or C++
+/// of at most [`CODE_COLORED`] bytes.
+///
+/// # Arguments
+///
+/// * `lang` - The fence's info string; its first word names the language.
+/// * `lines` - The block's lines.
+///
+/// # Returns
+///
+/// The runs, or `None` for any other block, which is drawn plain.
+pub(crate) fn code_runs(lang: &str, lines: &[&str]) -> Option<Runs> {
+    let tag = lang.split_whitespace().next().unwrap_or_default();
+    let c = ["c", "cpp", "c++", "cc", "h", "hpp"]
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(tag));
+    let size = lines
+        .iter()
+        .map(|l| l.len().saturating_add(1))
+        .sum::<usize>();
+    if !c || size > CODE_COLORED {
+        return None;
+    }
+    #[cfg(test)]
+    LEXED.with(|n| n.set(n.get().saturating_add(1)));
+    Some(
+        lines
+            .iter()
+            .map(|line| {
+                borer_engine::view::c_kinds(line)
+                    .into_iter()
+                    .filter_map(|(span, kind)| Some((span, Role::of(kind, None)?)))
+                    .collect()
+            })
+            .collect(),
+    )
+}
+
+/// Returns how many of `said`'s code blocks are closed: a reply still streaming may end
+/// inside one, which [`blocks`] runs to the end.
+///
+/// # Arguments
+///
+/// * `said` - The text, written out ([`text::visible`]).
+pub(crate) fn closed_code_blocks(said: &str) -> usize {
+    said.lines()
+        .filter(|line| line.trim_start().starts_with("```"))
+        .count()
+        / 2
+}
+
+/// Returns the color runs of each code block of `said` ([`code_runs`]), as a finished
+/// entry keeps them so they are read once.
+///
+/// # Arguments
+///
+/// * `said` - The entry's text, written out ([`text::visible`]).
+pub(crate) fn text_colors(said: &str) -> Colors {
+    blocks(said)
+        .into_iter()
+        .filter_map(|block| match block {
+            Block::Code(lang, lines) => Some(code_runs(lang, &lines)),
+            Block::Text(_) => None,
+        })
+        .collect()
 }
 
 /// Returns a text button as every one of the chat's is drawn: one size, so one height and
@@ -268,7 +359,10 @@ fn sideways(
     cx: &mut gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     ui::WithScrollbar::custom_scrollbars(
-        div().w_full().child(content),
+        h_flex()
+            .w_full()
+            .items_start()
+            .child(div().flex_none().min_w_full().child(content)),
         ui::Scrollbars::new(ui::ScrollAxes::Horizontal).id(id),
         window,
         cx,
@@ -384,9 +478,23 @@ impl ChatPanel {
             return div().into_any_element();
         };
         let turn_start = ix > 0 && matches!(entry, Entry::Person(_));
+        let kept = self.colors.get(&ix).or_else(|| {
+            self.streamed
+                .as_ref()
+                .filter(|(at, _)| *at == ix)
+                .map(|(_, kept)| kept)
+        });
         let body = match entry {
-            Entry::Person(said) => person(&text::visible(said), cx),
-            Entry::Model(said) => {
+            Entry::Person(_) => {
+                self.thread
+                    .update(cx, |thread, cx| match thread.entries().get(ix) {
+                        Some(Entry::Person(said)) => {
+                            person(ix, &text::visible(said), kept, window, cx)
+                        }
+                        _ => div().into_any_element(),
+                    })
+            }
+            Entry::Model(_) => {
                 let first = !thread
                     .entries()
                     .get(..ix)
@@ -402,7 +510,11 @@ impl ChatPanel {
                         Some(SharedString::from(name))
                     })
                     .flatten();
-                model(ix, said, author, cx)
+                self.thread
+                    .update(cx, |thread, cx| match thread.entries().get(ix) {
+                        Some(Entry::Model(said)) => model(ix, said, author, kept, window, cx),
+                        _ => div().into_any_element(),
+                    })
             }
             Entry::Tool(_) => match thread.call_at(ix).cloned() {
                 Some(call) => self.tool(&call, window, cx),
@@ -794,7 +906,22 @@ fn quiet(said: &str) -> AnyElement {
 }
 
 /// Returns what the person wrote, in a raised block as Zed's agent panel sets a message.
-fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
+///
+/// # Arguments
+///
+/// * `ix` - The entry's index in the thread.
+/// * `said` - What the person wrote, written out ([`text::visible`]).
+/// * `kept` - The color runs kept for its code blocks ([`text_colors`]).
+/// * `window` - Window it is drawn in.
+/// * `cx` - App context.
+fn person(
+    ix: usize,
+    said: &str,
+    kept: Option<&Colors>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
+    let body = prose(ix, said, kept, window, cx);
     let colors = cx.theme().colors();
     div()
         .px_2()
@@ -806,7 +933,7 @@ fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
                 .border_1()
                 .border_color(colors.border)
                 .bg(colors.editor_background)
-                .child(prose(said, cx)),
+                .child(body),
         )
         .into_any_element()
 }
@@ -816,12 +943,24 @@ fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
 /// A reply that opens its turn sits under its model's name. A copy button shows on hover
 /// and copies the text as the model wrote it: on the name's line, or under a reply that
 /// goes on.
+///
+/// # Arguments
+///
+/// * `ix` - The entry's index in the thread.
+/// * `said` - What the model wrote, as it wrote it.
+/// * `opens` - The model's name when the reply opens its turn.
+/// * `kept` - The color runs kept for its code blocks ([`text_colors`]).
+/// * `window` - Window it is drawn in.
+/// * `cx` - App context.
 fn model(
     ix: usize,
     said: &str,
     opens: Option<SharedString>,
-    cx: &Context<'_, ChatPanel>,
+    kept: Option<&Colors>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
 ) -> AnyElement {
+    let body = prose(ix, &text::visible(said), kept, window, cx);
     let group = SharedString::from(format!("chat-model-{ix}"));
     let copy = CopyButton::new(("chat-copy", ix), said.to_owned())
         .icon_size(IconSize::Small)
@@ -850,64 +989,115 @@ fn model(
         .px_4()
         .gap_1p5()
         .children(top)
-        .child(prose(&text::visible(said), cx))
+        .child(body)
         .children(end)
         .into_any_element()
 }
 
 /// Returns `said` as running text and code blocks, code in the editor's font.
-fn prose(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
+///
+/// A small C block ([`code_runs`]) takes the theme's syntax colors, from `kept` once the
+/// entry is finished, else read now; a code line is never wrapped, and its block scrolls
+/// sideways under an id made of the entry and the block's place, the same every frame.
+///
+/// # Arguments
+///
+/// * `ix` - The entry's index in the thread.
+/// * `said` - Its text, written out ([`text::visible`]).
+/// * `kept` - The color runs kept for the entry's closed code blocks ([`text_colors`]).
+/// * `window` - Window it is drawn in.
+/// * `cx` - App context.
+fn prose(
+    ix: usize,
+    said: &str,
+    kept: Option<&Colors>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) -> AnyElement {
     let settings = ThemeSettings::get_global(cx);
     let mono = settings.buffer_font.family.clone();
     let colors = cx.theme().colors();
-    let span_bg = colors.element_background;
+    let (text, span_bg, border, code_bg) = (
+        colors.text,
+        colors.element_background,
+        colors.border_variant,
+        colors.editor_background,
+    );
+    let palette = CodePalette::from_theme(cx.theme());
+    let mut code = 0usize;
+    let mut parts = Vec::new();
+    for block in blocks(said) {
+        parts.push(match block {
+            Block::Text(said) => {
+                let (said, ranges) = spans(said);
+                let highlight = HighlightStyle {
+                    background_color: Some(span_bg),
+                    ..HighlightStyle::default()
+                };
+                let fonts = ranges
+                    .iter()
+                    .map(|r| (r.clone(), mono.clone()))
+                    .collect::<Vec<_>>();
+                div()
+                    .min_w_0()
+                    .child(
+                        StyledText::new(said)
+                            .with_highlights(ranges.into_iter().map(|r| (r, highlight)))
+                            .with_font_family_overrides(fonts),
+                    )
+                    .into_any_element()
+            }
+            Block::Code(lang, lines) => {
+                let read;
+                let runs = match kept.and_then(|k| k.get(code)) {
+                    Some(runs) => runs.as_ref(),
+                    None => {
+                        read = code_runs(lang, &lines);
+                        read.as_ref()
+                    }
+                };
+                let rows = lines.iter().enumerate().map(|(n, line)| {
+                    let styled = StyledText::new((*line).to_owned());
+                    let styled = match runs.and_then(|r| r.get(n)) {
+                        Some(runs) => styled.with_highlights(runs.iter().map(|(span, role)| {
+                            let color = Some(palette.color(*role));
+                            let style = HighlightStyle {
+                                color,
+                                ..HighlightStyle::default()
+                            };
+                            (span.clone(), style)
+                        })),
+                        None => styled,
+                    };
+                    div().child(styled)
+                });
+                let id = SharedString::from(format!("chat-code-{ix}-{code}"));
+                code = code.saturating_add(1);
+                let body = v_flex()
+                    .debug_selector(|| CODE_SELECTOR.to_owned())
+                    .px_2()
+                    .py_1p5()
+                    .font_family(mono.clone())
+                    .text_ui_sm(cx)
+                    .whitespace_nowrap()
+                    .children(rows);
+                div()
+                    .rounded_md()
+                    .border_1()
+                    .border_color(border)
+                    .bg(code_bg)
+                    .overflow_hidden()
+                    .child(sideways(id, body, window, cx))
+                    .into_any_element()
+            }
+        });
+    }
     v_flex()
         .gap_2()
         .text_ui(cx)
         .line_height(gpui::relative(1.5))
-        .text_color(colors.text)
-        .children(blocks(said).into_iter().map(|block| {
-            match block {
-                Block::Text(text) => {
-                    let (text, ranges) = spans(text);
-                    let highlight = HighlightStyle {
-                        background_color: Some(span_bg),
-                        ..HighlightStyle::default()
-                    };
-                    let fonts = ranges
-                        .iter()
-                        .map(|r| (r.clone(), mono.clone()))
-                        .collect::<Vec<_>>();
-                    div()
-                        .min_w_0()
-                        .child(
-                            StyledText::new(text)
-                                .with_highlights(ranges.into_iter().map(|r| (r, highlight)))
-                                .with_font_family_overrides(fonts),
-                        )
-                        .into_any_element()
-                }
-                Block::Code(lines) => v_flex()
-                    .id(SharedString::from(format!(
-                        "chat-code-{:p}",
-                        lines.as_ptr()
-                    )))
-                    .px_2()
-                    .py_1p5()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(colors.border_variant)
-                    .bg(colors.editor_background)
-                    .overflow_x_scroll()
-                    .children(lines.into_iter().map(|line| {
-                        Label::new(line.to_owned())
-                            .size(LabelSize::Small)
-                            .buffer_font(cx)
-                            .single_line()
-                    }))
-                    .into_any_element(),
-            }
-        }))
+        .text_color(text)
+        .children(parts)
         .into_any_element()
 }
 
@@ -1051,7 +1241,7 @@ fn details(
 )]
 mod tests {
     use super::super::thread::{fenced, first_lines};
-    use super::{Block, blocks, spans, unfenced, unshown};
+    use super::{Block, CODE_COLORED, blocks, code_runs, spans, unfenced, unshown};
 
     /// An answer's fence is dropped from what the person reads, whole or cut to its first
     /// lines, and a tag the binary wrote stays written out inside it.
@@ -1117,11 +1307,30 @@ mod tests {
             blocks(said),
             [
                 Block::Text("It calls"),
-                Block::Code(vec!["int main(void);"]),
+                Block::Code("c", vec!["int main(void);"]),
                 Block::Text("then returns."),
-                Block::Code(vec!["open"]),
+                Block::Code("", vec!["open"]),
             ]
         );
+    }
+
+    /// A C block is colored in more than one role over runs that keep its text; a block of
+    /// another or no language, or one past [`CODE_COLORED`], is plain, and any text reads.
+    #[test]
+    fn only_a_small_c_block_is_colored() {
+        let lines = ["int main(void) { return f(\"x\", 0x10); } // ok"];
+        let runs = code_runs("c", &lines).unwrap();
+        let roles: std::collections::BTreeSet<_> = runs[0].iter().map(|(_, r)| r.index()).collect();
+        assert!(roles.len() > 1, "{roles:?}");
+        let spelled: String = runs[0].iter().map(|(s, _)| &lines[0][s.clone()]).collect();
+        assert_eq!(spelled.replace(' ', ""), lines[0].replace(' ', ""));
+        assert!(code_runs("python", &lines).is_none());
+        assert!(code_runs("", &lines).is_none());
+        let long = "x".repeat(CODE_COLORED + 1);
+        assert!(code_runs("c", &[long.as_str()]).is_none());
+        for text in ["\u{0}\u{202e}'\"\\", "/* open", "é`", "<tool_output>"] {
+            assert_eq!(code_runs("cpp", &[text]).map(|r| r.len()), Some(1));
+        }
     }
 
     /// Code spans lose their backticks and are found where they land; a lone backtick stays.

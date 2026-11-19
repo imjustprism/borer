@@ -412,3 +412,87 @@ fn send_waits_for_text_and_a_model(cx: &mut TestAppContext) {
     assert_eq!(entries, 0);
     assert!(shown, "the picker did not open");
 }
+
+/// A finished reply's C block is read once, when the reply finishes, and not again on each
+/// frame the panel draws.
+#[gpui::test]
+fn a_finished_code_block_is_read_once(cx: &mut TestAppContext) {
+    let reply = "Here:\n```c\nint f(void) { return 1; }\n```\n";
+    let (panel, _, cx) = replied(reply, true, cx);
+    redraws_read_nothing(&panel, cx);
+}
+
+/// Docks the chat talking to the fake model, has it reply `reply`, ended when `end`, and
+/// draws the panel; returns the panel, the thread and the window.
+fn replied<'a>(
+    reply: &str,
+    end: bool,
+    cx: &'a mut TestAppContext,
+) -> (
+    gpui::Entity<crate::chat::ChatPanel>,
+    gpui::Entity<crate::chat::thread::Thread>,
+    &'a mut VisualTestContext,
+) {
+    let (_app, panel, _, cx) = docked(cx);
+    let (thread, fake, model) = talking(&panel, cx);
+    thread.update(cx, |t, cx| t.send("Show it".to_owned(), cx));
+    cx.run_until_parked();
+    let text = language_model::LanguageModelCompletionEvent::Text(reply.to_owned());
+    fake.send_last_event(&model, text);
+    if end {
+        fake.end_last(&model);
+    }
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    (panel, thread, cx)
+}
+
+/// Draws `panel` three more times and checks no code block was read again, after at
+/// least one was read.
+fn redraws_read_nothing(panel: &gpui::Entity<crate::chat::ChatPanel>, cx: &mut VisualTestContext) {
+    use crate::chat::view::LEXED;
+    let read = LEXED.with(std::cell::Cell::get);
+    assert!(read >= 1, "{read}");
+    for _ in 0..3 {
+        panel.update(cx, |_, cx| cx.notify());
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+    assert_eq!(LEXED.with(std::cell::Cell::get), read);
+}
+
+/// A streaming reply's closed C block is read once, when its fence closes, and not again
+/// on each frame drawn while the reply goes on.
+#[gpui::test]
+fn a_closed_block_of_a_streaming_reply_is_read_once(cx: &mut TestAppContext) {
+    let chunk = "Here:\n```c\nint f(void) { return 1; }\n```\nand more";
+    let (panel, thread, cx) = replied(chunk, false, cx);
+    assert!(thread.read_with(cx, |t, _| t.is_running()));
+    redraws_read_nothing(&panel, cx);
+}
+
+/// A code block keeps its sideways scroll from one frame to the next: its id is made of
+/// its entry and its place, not of anything a frame makes anew.
+#[gpui::test]
+fn a_code_block_keeps_its_scroll_across_frames(cx: &mut TestAppContext) {
+    use crate::chat::view::CODE_SELECTOR;
+    let long = format!(
+        "```c\nint f(void) {{ return g({}); }}\n```\n",
+        "a + ".repeat(80)
+    );
+    let (panel, _, cx) = replied(&long, true, cx);
+    panel.update(cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let before = cx.debug_bounds(CODE_SELECTOR).unwrap();
+    cx.simulate_event(gpui::ScrollEvent {
+        position: before.origin + gpui::point(gpui::px(20.0), gpui::px(10.0)),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(-120.0), gpui::px(0.0))),
+        ..gpui::ScrollEvent::default()
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let scrolled = cx.debug_bounds(CODE_SELECTOR).unwrap();
+    assert!(scrolled.left() < before.left(), "{scrolled:?} {before:?}");
+    panel.update(cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let after = cx.debug_bounds(CODE_SELECTOR).unwrap();
+    assert_eq!(after.left(), scrolled.left());
+}

@@ -14,7 +14,7 @@ pub mod thread;
 pub mod tools;
 mod view;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable, FollowMode,
@@ -255,6 +255,11 @@ pub struct ChatPanel {
     list: ListState,
     /// The entries of the tool calls the person opened, by index.
     opened: BTreeSet<usize>,
+    /// The code blocks' color runs of each finished message, by entry, read once.
+    colors: BTreeMap<usize, view::Colors>,
+    /// The streaming reply's entry and the color runs of its closed code blocks, read once
+    /// each as its fence closes; only its open block is read while it draws.
+    streamed: Option<(usize, view::Colors)>,
     /// Each card's state as last measured: a card whose state moved is measured again.
     cards: Vec<CardState>,
     /// Opens and closes the model picker's popover.
@@ -343,6 +348,8 @@ impl ChatPanel {
             input,
             list,
             opened: BTreeSet::new(),
+            colors: BTreeMap::new(),
+            streamed: None,
             cards: Vec::new(),
             picker: PopoverMenuHandle::default(),
             armed: None,
@@ -394,6 +401,8 @@ impl ChatPanel {
         if new < old {
             self.list.reset(new);
             self.opened.clear();
+            self.colors.clear();
+            self.streamed = None;
         } else {
             let from = old.saturating_sub(1);
             self.list.splice(from..old, new - from);
@@ -411,6 +420,29 @@ impl ChatPanel {
                 if ix < from {
                     self.list.splice(ix..ix.saturating_add(1), 1);
                 }
+            }
+        }
+        let streaming = thread.is_running().then(|| new.saturating_sub(1));
+        for (ix, entry) in thread.entries().iter().enumerate() {
+            let (Entry::Model(said) | Entry::Person(said)) = entry else {
+                continue;
+            };
+            if streaming != Some(ix) {
+                self.colors
+                    .entry(ix)
+                    .or_insert_with(|| view::text_colors(&text::visible(said)));
+                continue;
+            }
+            let said = text::visible(said);
+            let closed = view::closed_code_blocks(&said);
+            if self
+                .streamed
+                .as_ref()
+                .is_none_or(|(at, kept)| *at != ix || kept.len() < closed)
+            {
+                let mut kept = view::text_colors(&said);
+                kept.truncate(closed);
+                self.streamed = Some((ix, kept));
             }
         }
         self.cards = cards;

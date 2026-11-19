@@ -4,9 +4,13 @@
 //! One scanner reads a line ([`scan`]): every byte lands in one piece, in
 //! order, so the pieces spell the line back. The text passes read the
 //! tokens alone ([`lex`]), the same scanner with the whitespace and the
-//! comments left out.
+//! comments left out. A line of C from anywhere reads as kinds of tokens
+//! ([`c_kinds`]) from the line alone.
 
 use std::ops::Range;
+
+use super::{cir, ctext, unit};
+use crate::view::Kind;
 
 /// The operators and punctuation of more than one character, longest first.
 const PUNCTS: [&str; 22] = [
@@ -38,6 +42,13 @@ pub(crate) enum Piece {
     /// A token.
     Token(Lex),
 }
+
+/// One piece of a line and the bytes it spans ([`scan`]).
+pub(super) type Spanned = (Piece, Range<usize>);
+
+/// Bits of a pointer a line read alone ([`c_kinds`]) sizes the types it
+/// names for: a code block anyone wrote names no target.
+const ALONE_WORD: u8 = 64;
 
 /// One token of a line and the bytes it spans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,9 +318,194 @@ impl Line<'_> {
     }
 }
 
+/// Returns the text of piece `k` of a line, empty past the last.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `pieces` - Its pieces.
+/// * `k` - The piece.
+pub(super) fn word<'t>(line: &'t str, pieces: &[Spanned], k: usize) -> &'t str {
+    pieces
+        .get(k)
+        .and_then(|(_, s)| line.get(s.clone()))
+        .unwrap_or_default()
+}
+
+/// Returns the last piece before `k` that is code: no whitespace and no
+/// comment.
+///
+/// # Arguments
+///
+/// * `pieces` - A line's pieces.
+/// * `k` - The piece to look before.
+pub(super) fn code_before(pieces: &[Spanned], k: usize) -> Option<usize> {
+    (0..k).rev().find(|&j| {
+        pieces
+            .get(j)
+            .is_some_and(|(p, _)| !matches!(p, Piece::Space | Piece::Comment))
+    })
+}
+
+/// Returns whether piece `k` of a line names a preprocessor directive: the
+/// `#` before it is the line's first code piece.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `pieces` - Its pieces.
+/// * `k` - The name's piece.
+pub(super) fn directive(line: &str, pieces: &[Spanned], k: usize) -> bool {
+    code_before(pieces, k)
+        .is_some_and(|j| word(line, pieces, j) == "#" && code_before(pieces, j).is_none())
+}
+
+/// Returns the kind a name has by its spelling alone: a type borer names,
+/// else a keyword when it is a C keyword or word or names a directive;
+/// `None` for any other name, which its place decides.
+///
+/// # Arguments
+///
+/// * `w` - The name.
+/// * `directive` - Whether it names a directive ([`directive`]).
+/// * `word_bits` - Bits of a pointer the types are sized for.
+pub(super) fn spelled(w: &str, directive: bool, word_bits: u8) -> Option<Kind> {
+    if ctext::named_type(w, word_bits).is_some() {
+        Some(Kind::Type)
+    } else if directive || cir::KEYWORDS.contains(&w) || unit::C_WORDS.contains(&w) {
+        Some(Kind::Keyword)
+    } else {
+        None
+    }
+}
+
+/// Returns whether a name after `prev` names a tagged type: `prev` is
+/// `struct`, `union` or `enum`.
+///
+/// # Arguments
+///
+/// * `prev` - The code piece before the name, if any.
+pub(super) fn tagged(prev: Option<&str>) -> bool {
+    matches!(prev, Some("struct" | "union" | "enum"))
+}
+
+/// Returns each piece of one line of C with the kind it reads as from the
+/// line alone, as a code block anyone wrote is colored.
+///
+/// A name reads by its spelling first ([`spelled`]), as the decompile view
+/// reads it; else a name after `struct`, `union` or `enum` is a type, one
+/// before `(` a function and any other text. No name is looked up in a
+/// binary. A block comment the line leaves open runs to its end, and the
+/// next line does not know it is inside one.
+///
+/// # Arguments
+///
+/// * `line` - One line of C, any text.
+///
+/// # Returns
+///
+/// The pieces in order with their kinds, which tile the line.
+#[must_use]
+pub fn c_kinds(line: &str) -> Vec<(Range<usize>, Kind)> {
+    let pieces: Vec<Spanned> = scan(line, 0).collect();
+    let code = |k: &usize| {
+        pieces
+            .get(*k)
+            .is_some_and(|(p, _)| matches!(p, Piece::Token(_)))
+    };
+    pieces
+        .iter()
+        .enumerate()
+        .map(|(k, (piece, span))| {
+            let kind = match piece {
+                Piece::Space => Kind::Space,
+                Piece::Comment => Kind::Comment,
+                Piece::Token(Lex::Number) => Kind::Number,
+                Piece::Token(Lex::Literal) => Kind::String,
+                Piece::Token(Lex::Punct) => Kind::Punct,
+                Piece::Token(Lex::Name) => {
+                    let w = word(line, &pieces, k);
+                    let prev = code_before(&pieces, k).map(|j| word(line, &pieces, j));
+                    let next = (k.saturating_add(1)..pieces.len()).find(code);
+                    spelled(w, directive(line, &pieces, k), ALONE_WORD).unwrap_or(if tagged(prev) {
+                        Kind::Type
+                    } else if next.map(|j| word(line, &pieces, j)) == Some("(") {
+                        Kind::Function
+                    } else {
+                        Kind::Text
+                    })
+                }
+            };
+            (span.clone(), kind)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Lex, Piece, lex, scan};
+    use super::{Lex, Piece, c_kinds, lex, scan};
+    use crate::view::Kind;
+
+    /// A line of C reads as keywords, types, functions, literals and
+    /// comments from the line alone, and its pieces spell it back.
+    ///
+    /// # Panics
+    ///
+    /// When a piece reads as another kind than pinned, or the pieces do not
+    /// spell their line.
+    #[test]
+    fn a_line_of_c_reads_as_kinds_from_itself() {
+        let line = "if (x) return WinMain(\"a\", 0x10); // go";
+        let kinds: Vec<(&str, Kind)> = c_kinds(line)
+            .into_iter()
+            .filter(|(_, k)| *k != Kind::Space)
+            .map(|(s, k)| (&line[s], k))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("if", Kind::Keyword),
+                ("(", Kind::Punct),
+                ("x", Kind::Text),
+                (")", Kind::Punct),
+                ("return", Kind::Keyword),
+                ("WinMain", Kind::Function),
+                ("(", Kind::Punct),
+                ("\"a\"", Kind::String),
+                (",", Kind::Punct),
+                ("0x10", Kind::Number),
+                (")", Kind::Punct),
+                (";", Kind::Punct),
+                ("// go", Kind::Comment),
+            ]
+        );
+        let typed: Vec<Kind> = c_kinds("struct S *p; uint32_t n;")
+            .into_iter()
+            .map(|(_, k)| k)
+            .filter(|k| matches!(k, Kind::Type | Kind::Keyword))
+            .collect();
+        assert_eq!(typed, [Kind::Keyword, Kind::Type, Kind::Type]);
+        let define = "#define S(x) #x";
+        let kinds: Vec<(&str, Kind)> = c_kinds(define)
+            .into_iter()
+            .filter(|(_, k)| matches!(k, Kind::Keyword | Kind::Text | Kind::Function))
+            .map(|(s, k)| (&define[s], k))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("define", Kind::Keyword),
+                ("S", Kind::Function),
+                ("x", Kind::Text),
+                ("x", Kind::Text),
+            ]
+        );
+        for text in ["", "\u{0}\u{ffff}\"\\", "/* open", "é'"] {
+            let spans = c_kinds(text);
+            let spelled: String = spans.iter().map(|(s, _)| &text[s.clone()]).collect();
+            assert_eq!(spelled, text);
+        }
+    }
 
     /// The pieces of a line tile it on character boundaries, whitespace and
     /// comments included, and the tokens are the rest.
