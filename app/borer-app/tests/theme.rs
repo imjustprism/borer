@@ -213,8 +213,11 @@ fn every_token_kind_resolves_to_its_own_key() {
     }
 }
 
-/// Every text role reads at 4.5:1 on the editor and on a panel; the de-emphasized ones
-/// (zero bytes, placeholders, muted icons) at 3:1.
+/// Every text role reads at its floor on every surface it is drawn on.
+///
+/// That is 4.5:1 on the editor and on a panel, and for the chrome's text on the status bar,
+/// the title bar and a popover too; the de-emphasized ones (zero bytes, placeholders, muted
+/// icons) at 3:1.
 #[test]
 fn text_roles_meet_their_contrast_floors() {
     for (content, theme) in themes() {

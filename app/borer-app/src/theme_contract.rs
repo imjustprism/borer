@@ -188,9 +188,12 @@ pub fn check(content: &ThemeContent) -> Vec<Failure> {
 
 /// Returns the contrast rules `theme` breaks.
 ///
-/// Every syntax color but the grades and zero bytes, and the text, muted, accent and
-/// editor foreground colors, are held to [`TEXT_FLOOR`] on the editor and on a panel; zero
-/// bytes, placeholders and muted icons to [`QUIET_FLOOR`].
+/// Every syntax color but the grades and zero bytes, and the editor foreground, are held to
+/// [`TEXT_FLOOR`] on the editor and on a panel. The text, muted and accent colors are held
+/// to it on every surface of the chrome too (the status bar, the title bar and a popover),
+/// and placeholders and muted icons to [`QUIET_FLOOR`] there; zero bytes to
+/// [`QUIET_FLOOR`] on the editor and a panel. A see-through color is measured as drawn,
+/// over the surface.
 ///
 /// The syntax keys are walked once, in the order `content` writes them.
 ///
@@ -202,42 +205,57 @@ pub fn check(content: &ThemeContent) -> Vec<Failure> {
 pub fn text_floors(content: &ThemeContent, theme: &Theme) -> Vec<Failure> {
     let colors = theme.colors();
     let mut failures = Vec::new();
-    let backgrounds: Vec<_> = [
+    let surfaces: Vec<_> = [
         ("editor.background", colors.editor_background),
         ("panel.background", colors.panel_background),
+        ("status_bar.background", colors.status_bar_background),
+        ("title_bar.background", colors.title_bar_background),
+        (
+            "elevated_surface.background",
+            colors.elevated_surface_background,
+        ),
     ]
     .into_iter()
-    .filter_map(|(role, color)| Some((role, opaque(role, color, &mut failures)?)))
+    .filter(|&(role, color)| opaque(role, color, &mut failures).is_some())
     .collect();
+    let code = |background: &str| matches!(background, "editor.background" | "panel.background");
     let syntax = content.style.syntax.keys().filter_map(|key| {
         let text = !GRADES.contains(&key.as_str()) && key != ZERO_BYTE;
         Some((
             key.as_str(),
             syntax_color(theme, key).filter(|_| text)?,
             TEXT_FLOOR,
+            true,
         ))
     });
     let mut roles: Vec<_> = syntax.collect();
     roles.extend([
-        ("text", colors.text, TEXT_FLOOR),
-        ("text.muted", colors.text_muted, TEXT_FLOOR),
-        ("text.accent", colors.text_accent, TEXT_FLOOR),
-        ("editor.foreground", colors.editor_foreground, TEXT_FLOOR),
+        ("text", colors.text, TEXT_FLOOR, false),
+        ("text.muted", colors.text_muted, TEXT_FLOOR, false),
+        ("text.accent", colors.text_accent, TEXT_FLOOR, false),
+        (
+            "editor.foreground",
+            colors.editor_foreground,
+            TEXT_FLOOR,
+            true,
+        ),
     ]);
     match syntax_color(theme, ZERO_BYTE) {
-        Some(color) => roles.push((ZERO_BYTE, color, QUIET_FLOOR)),
+        Some(color) => roles.push((ZERO_BYTE, color, QUIET_FLOOR, true)),
         None => failures.push(unset(ZERO_BYTE)),
     }
     roles.extend([
-        ("text.placeholder", colors.text_placeholder, QUIET_FLOOR),
-        ("icon.muted", colors.icon_muted, QUIET_FLOOR),
+        (
+            "text.placeholder",
+            colors.text_placeholder,
+            QUIET_FLOOR,
+            false,
+        ),
+        ("icon.muted", colors.icon_muted, QUIET_FLOOR, false),
     ]);
-    for (role, color, floor) in roles {
-        let Some(seen) = opaque(role, color, &mut failures) else {
-            continue;
-        };
-        for &(background, behind) in &backgrounds {
-            let ratio = contrast_linear(seen, behind);
+    for (role, color, floor, code_only) in roles {
+        for &(background, behind) in surfaces.iter().filter(|(b, _)| !code_only || code(b)) {
+            let ratio = contrast(color, behind);
             if ratio < floor {
                 failures.push(Failure::Contrast {
                     role: role.to_owned(),
@@ -250,7 +268,6 @@ pub fn text_floors(content: &ThemeContent, theme: &Theme) -> Vec<Failure> {
     }
     failures
 }
-
 /// Returns the grade rules `theme` breaks.
 ///
 /// The unchecked, tested and proved grades contrast more with the editor as evidence
@@ -429,16 +446,27 @@ pub fn linear(color: Hsla) -> Option<[f64; 3]> {
     }))
 }
 
-/// Returns the WCAG 2 contrast ratio of `a` against `b`, both opaque; a translucent color
-/// counts as black.
+/// Returns the WCAG 2 contrast ratio of `a` drawn over `b`: a see-through `a` is blended
+/// over `b` first; a see-through `b` counts as black.
 ///
 /// # Arguments
 ///
-/// * `a` - One color.
-/// * `b` - The other color.
+/// * `a` - The color drawn, such as text.
+/// * `b` - The surface it is drawn on.
 #[must_use]
 pub fn contrast(a: Hsla, b: Hsla) -> f64 {
-    contrast_linear(linear(a).unwrap_or_default(), linear(b).unwrap_or_default())
+    let (fg, bg) = (Rgba::from(a), Rgba::from(b));
+    let blend = |f: f32, b: f32| f.mul_add(fg.a, b * (1.0 - fg.a));
+    let drawn = Rgba {
+        r: blend(fg.r, bg.r),
+        g: blend(fg.g, bg.g),
+        b: blend(fg.b, bg.b),
+        a: 1.0,
+    };
+    contrast_linear(
+        linear(drawn.into()).unwrap_or_default(),
+        linear(b).unwrap_or_default(),
+    )
 }
 
 /// Returns the WCAG 2 contrast ratio of two linear sRGB colors.

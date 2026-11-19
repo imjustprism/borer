@@ -2,7 +2,7 @@
 //! each action's row, keys and menu are in [`crate::commands::COMMANDS`].
 
 use gpui::{Action, App, Div, ParentElement as _, Styled as _};
-use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex};
+use ui::{Color, KeyBinding, Label, LabelCommon as _, LabelSize, h_flex, rems_from_px};
 
 gpui::actions!(
     borer,
@@ -164,6 +164,10 @@ pub const PALETTE_HINT: Hint = (&zed_actions::command_palette::Toggle, "Every co
 /// The hint for going back to where the person was before.
 pub const BACK_HINT: Hint = (&workspace::pane::GoBack, "Go back");
 
+/// Size in logical pixels of a key binding drawn beside small text, as Zed's welcome page
+/// draws its keys.
+pub const KEY_PX: f32 = 12.0;
+
 /// Returns a hint as a row: the binding the keymap holds for its action, as Zed's
 /// [`KeyBinding`] draws it, then what the action does.
 ///
@@ -175,6 +179,6 @@ pub const BACK_HINT: Hint = (&workspace::pane::GoBack, "Go back");
 pub fn hint_row((action, what): Hint, cx: &App) -> Div {
     h_flex()
         .gap_2()
-        .child(KeyBinding::for_action(action, cx))
+        .child(KeyBinding::for_action(action, cx).size(rems_from_px(KEY_PX)))
         .child(Label::new(what).size(LabelSize::Small).color(Color::Muted))
 }

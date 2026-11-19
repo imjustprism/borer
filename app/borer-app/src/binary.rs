@@ -1361,9 +1361,16 @@ impl Render for StatusLine {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let facts = self.binary.read(cx).facts().iter();
         h_flex()
+            .min_w_0()
             .gap_3()
-            .children(facts.map(|(text, color)| status_label(text.clone(), *color)))
-            .child(status_label(self.text(cx), Color::Placeholder))
+            .pr_2()
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_3()
+                    .children(facts.map(|(text, color)| status_label(text.clone(), *color))),
+            )
+            .child(status_label(self.text(cx), Color::Placeholder).truncate())
     }
 }
 

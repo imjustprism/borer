@@ -19,11 +19,11 @@ use gpui::{
 use theme::{ActiveTheme as _, Theme};
 use ui::{
     ButtonCommon as _, Clickable as _, Color, IconButton, IconName, IconSize, KeyBinding,
-    LabelCommon as _, Tooltip, h_flex,
+    LabelCommon as _, Tooltip, h_flex, rems_from_px,
 };
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
-use crate::actions::{PALETTE_HINT, ToggleTheme};
+use crate::actions::{KEY_PX, PALETTE_HINT, ToggleTheme};
 use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::{Binary, Loading, reading_label, status_label};
 use crate::check_marks::GRADE_COUNT;
@@ -250,7 +250,7 @@ impl Render for Grades {
                 Grade::Proved | Grade::Tested | Grade::Unchecked | Grade::Wrong => Color::Muted,
             };
             h_flex()
-                .gap(px(5.0))
+                .gap_1p5()
                 .child(
                     div()
                         .w(px(RAIL_WIDTH_PX))
@@ -259,7 +259,11 @@ impl Render for Grades {
                 )
                 .child(status_label(grade_text(&counts, grade), color))
         });
-        h_flex().gap(px(12.0)).children(cells).into_any_element()
+        h_flex()
+            .flex_none()
+            .gap_3()
+            .children(cells)
+            .into_any_element()
     }
 }
 
@@ -383,7 +387,8 @@ impl Render for Work {
         let label = reading_label(&loading.path);
         let binary = self.binary.clone();
         h_flex()
-            .gap(px(8.0))
+            .flex_none()
+            .gap_2()
             .child(status_label(label, Color::Muted))
             .child(status_label(
                 format!("{} s", elapsed.as_secs()),
@@ -486,11 +491,11 @@ fn action_control(
     let run = action.boxed_clone();
     div()
         .id(id)
-        .px(px(4.0))
-        .rounded(px(4.0))
+        .px_1()
+        .rounded_sm()
         .flex()
         .items_center()
-        .gap(px(6.0))
+        .gap_1p5()
         .cursor_pointer()
         .hover(move |cell| cell.bg(hover))
         .tooltip(Tooltip::for_action_title(title, action))
@@ -541,9 +546,9 @@ impl Render for PaletteHint {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (toggle, _) = PALETTE_HINT;
         let child = h_flex()
-            .gap(px(6.0))
+            .gap_1p5()
             .child(status_label("palette", Color::Muted))
-            .child(KeyBinding::for_action(toggle, cx))
+            .child(KeyBinding::for_action(toggle, cx).size(rems_from_px(KEY_PX)))
             .into_any_element();
         action_control("palette", "Command Palette", toggle, child, cx)
     }
