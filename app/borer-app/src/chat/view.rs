@@ -15,18 +15,18 @@ use gpui::{
 };
 use theme_settings::ThemeSettings;
 use ui::{
-    ActiveTheme as _, Banner, Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color,
-    CommonAnimationExt as _, CopyButton, Disableable as _, Disclosure, Icon, IconButton, IconName,
-    IconSize, Indicator, Label, LabelCommon as _, LabelSize, PopoverMenu, Severity,
-    StyledTypography as _, Tooltip, h_flex, v_flex,
+    ActiveTheme as _, Banner, Button, ButtonCommon as _, ButtonLike, ButtonStyle, Clickable as _,
+    Color, CommonAnimationExt as _, CopyButton, Disableable as _, Disclosure, FixedWidth as _,
+    Icon, IconButton, IconName, IconSize, Indicator, Label, LabelCommon as _, LabelSize,
+    PopoverMenu, Severity, StyledTypography as _, Tooltip, h_flex, v_flex,
 };
 
 use borer_engine::text;
 use settings::Settings as _;
 
 use super::picker::ChatPicker;
-use super::thread::{Arg, Call, Chosen, Entry, Fault, Ran};
-use super::{ChatPanel, NewChatThread, StopChat};
+use super::thread::{Arg, Call, Chosen, Entry, FENCE_CLOSE, FENCE_OPEN, Fault, Ran};
+use super::{ChatPanel, NewChatThread, PickChatModel, StopChat};
 
 /// Three questions a reverse engineer asks first of an open binary.
 pub(crate) const EXAMPLES: [&str; 3] = [
@@ -34,9 +34,6 @@ pub(crate) const EXAMPLES: [&str; 3] = [
     "How does it read its command line and settings?",
     "Is anything packed, encrypted or checking for a debugger?",
 ];
-
-/// Height of the header row and of a tool call's row.
-const ROW: f32 = 28.0;
 
 /// One block of a reply: running text, or a fenced code block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,12 +128,13 @@ pub(crate) fn hint(chosen: &Chosen) -> String {
     }
 }
 
-/// Returns the icon of the tool `name` by its catalog row: one that only reads, one that
-/// proposes edits, or one the catalog does not have.
+/// Returns the icon of the tool `name` by its catalog row, as Zed's agent panel draws a
+/// tool's kind: one that only reads, one that proposes edits, or one the catalog does not
+/// have.
 fn icon_of(name: &str) -> IconName {
     match borer_front::tools::tool(name).map(|t| t.hints.read_only) {
-        Some(true) => IconName::FileCode,
-        Some(false) => IconName::Pencil,
+        Some(true) => IconName::ToolSearch,
+        Some(false) => IconName::ToolPencil,
         None => IconName::ToolHammer,
     }
 }
@@ -149,11 +147,9 @@ impl ChatPanel {
         let chosen = thread.chosen();
         let label = chosen.map_or_else(
             || "Pick a model".to_owned(),
-            |c| {
-                let name = text::visible(&c.model.name.0);
-                format!("{} \u{b7} {name}", c.endpoint.offered.label())
-            },
+            |c| text::visible(&c.model.name.0).into_owned(),
         );
+        let provider = chosen.map_or("No model picked", |c| c.endpoint.offered.label());
         let hint = chosen.map(hint);
         let waits = thread.held().is_some() || thread.head().is_some();
         let (dot, said) = match (thread.is_running(), waits, chosen) {
@@ -165,34 +161,41 @@ impl ChatPanel {
         let panel = cx.entity();
         let picker = PopoverMenu::new("chat-picker")
             .menu(move |_, cx| Some(cx.new(|cx| ChatPicker::new(&panel, cx))))
-            .trigger(
+            .trigger_with_tooltip(
                 Button::new("chat-pick", label)
                     .style(ButtonStyle::Subtle)
                     .label_size(LabelSize::Small)
                     .truncate(true)
-                    .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                    .start_icon(chosen.map(|c| {
+                        Icon::new(c.endpoint.offered.icon())
+                            .size(IconSize::Small)
+                            .color(Color::Muted)
+                    }))
+                    .end_icon(
+                        Icon::new(IconName::ChevronDown)
+                            .size(IconSize::XSmall)
+                            .color(Color::Muted),
+                    ),
+                Tooltip::text(provider),
             )
             .with_handle(self.picker.clone())
             .anchor(gpui::Anchor::TopLeft)
             .offset(gpui::point(px(0.0), px(2.0)));
         h_flex()
-            .h(px(ROW + 4.0))
+            .h_8()
             .flex_none()
             .pl_1()
-            .pr_2()
+            .pr_1()
             .gap_1()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(div().min_w_0().child(picker))
             .children(hint.map(|hint| {
-                div().min_w_0().flex_1().child(
-                    Label::new(hint)
-                        .size(LabelSize::XSmall)
-                        .color(Color::Muted)
-                        .truncate(),
-                )
+                div()
+                    .flex_none()
+                    .child(Label::new(hint).size(LabelSize::Small).color(Color::Muted))
             }))
-            .when(chosen.is_none(), |row| row.child(div().flex_1()))
+            .child(div().flex_1())
             .child(
                 div()
                     .id("chat-status")
@@ -228,15 +231,14 @@ impl ChatPanel {
                     .rev()
                     .take_while(|e| !matches!(e, Entry::Person(_)))
                     .any(|e| matches!(e, Entry::Model(_)));
-                let name = first
+                let author = first
                     .then(|| {
                         let chosen = thread.chosen()?;
-                        Some(SharedString::from(
-                            text::visible(&chosen.model.name.0).into_owned(),
-                        ))
+                        let name = text::visible(&chosen.model.name.0).into_owned();
+                        Some(SharedString::from(name))
                     })
                     .flatten();
-                model(ix, said, name, cx)
+                model(ix, said, author, cx)
             }
             Entry::Tool(_) => match thread.call_at(ix).cloned() {
                 Some(call) => self.tool(&call, cx),
@@ -249,7 +251,7 @@ impl ChatPanel {
                 if held {
                     div().into_any_element()
                 } else {
-                    quiet(IconName::Info, &text::visible(said))
+                    quiet(&text::visible(said))
                 }
             }
             Entry::Error(said) => {
@@ -259,13 +261,8 @@ impl ChatPanel {
             Entry::Proposal(id) => self.card(*id, cx),
         };
         div()
-            .when(turn_start, |d| {
-                d.mt_4()
-                    .pt_4()
-                    .border_t_1()
-                    .border_color(cx.theme().colors().border_variant)
-            })
-            .when(ix == 0, |d| d.pt_2())
+            .when(turn_start, |d| d.pt_6())
+            .when(ix == 0, |d| d.pt_3())
             .child(body)
             .into_any_element()
     }
@@ -306,7 +303,7 @@ impl ChatPanel {
         });
         let state = match &call.ran {
             Ran::Running => Icon::new(IconName::LoadCircle)
-                .size(IconSize::XSmall)
+                .size(IconSize::Small)
                 .color(Color::Muted)
                 .with_keyed_rotate_animation(("chat-call-spin", ix), 2)
                 .into_any_element(),
@@ -317,26 +314,37 @@ impl ChatPanel {
         };
         let row = h_flex()
             .id(("chat-call", ix))
-            .h(px(ROW))
+            .h_7()
             .px_2()
             .gap_1p5()
+            .rounded_md()
             .cursor_pointer()
             .hover(|s| s.bg(cx.theme().colors().ghost_element_hover))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_call(ix, cx)))
             .child(
-                Disclosure::new(("chat-call-open", ix), open)
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_call(ix, cx))),
-            )
-            .child(
                 Icon::new(icon_of(&call.name))
-                    .size(IconSize::XSmall)
+                    .size(IconSize::Small)
                     .color(Color::Muted),
             )
-            .child(Label::new(text::visible(&call.name).into_owned()).size(LabelSize::Small))
+            .child(
+                div().flex_none().child(
+                    Label::new(text::visible(&call.name).into_owned())
+                        .size(LabelSize::Small)
+                        .color(Color::Muted),
+                ),
+            )
             .children(key)
             .child(div().flex_1())
-            .child(state);
+            .child(div().flex_none().child(state))
+            .child(
+                Disclosure::new(("chat-call-open", ix), open)
+                    .opened_icon(IconName::ChevronUp)
+                    .closed_icon(IconName::ChevronDown)
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_call(ix, cx))),
+            );
         v_flex()
+            .px_2()
+            .py_0p5()
             .child(row)
             .when(open, |col| col.child(details(call, cx)))
             .into_any_element()
@@ -348,7 +356,7 @@ impl ChatPanel {
         let thread = self.thread.read(cx);
         let fix = |label: &'static str| Button::new(("chat-fix", ix), label);
         let action = match thread.fault_at(ix) {
-            Some(Fault::Stopped) => return quiet(IconName::Stop, said),
+            Some(Fault::Stopped) => return quiet(said),
             None | Some(Fault::NoBinary | Fault::Model) => None,
             Some(Fault::NoModel) => Some(
                 fix("Pick a model")
@@ -393,35 +401,7 @@ impl ChatPanel {
             .iter()
             .filter(|p| matches!(p.verdict, super::thread::Verdict::Waiting))
             .count();
-        let waits = thread.head().map(|_| {
-            let said = match waiting {
-                0 => "1 proposal needs you".to_owned(),
-                1 => "1 proposal waits".to_owned(),
-                n => format!("{n} proposals wait"),
-            };
-            h_flex()
-                .id("chat-waits")
-                .h(px(ROW))
-                .px_2()
-                .gap_1p5()
-                .border_t_1()
-                .border_color(cx.theme().colors().border_variant)
-                .bg(cx.theme().colors().element_background)
-                .cursor_pointer()
-                .on_click(cx.listener(|this, _, window, cx| this.show_head(window, cx)))
-                .child(
-                    Icon::new(IconName::Pencil)
-                        .size(IconSize::XSmall)
-                        .color(Color::Warning),
-                )
-                .child(Label::new(said).size(LabelSize::Small))
-                .child(div().flex_1())
-                .child(
-                    Label::new("Show")
-                        .size(LabelSize::Small)
-                        .color(Color::Accent),
-                )
-        });
+        let waits = thread.head().map(|_| Self::waits(waiting, cx));
         let notice = thread.held_notice().map(|said| {
             let said = text::visible(said).into_owned();
             div().px_2().pt_2().child(
@@ -481,6 +461,33 @@ impl ChatPanel {
             .children(error)
     }
 
+    /// Returns the bar that says how many proposals wait, with the button that shows the
+    /// oldest one's card; `waiting` counts those still waiting for a verdict.
+    fn waits(waiting: usize, cx: &Context<'_, Self>) -> impl IntoElement {
+        let said = match waiting {
+            0 => "1 proposal needs you".to_owned(),
+            1 => "1 proposal waits for you".to_owned(),
+            n => format!("{n} proposals wait for you"),
+        };
+        h_flex()
+            .h_8()
+            .pl_4()
+            .pr_2()
+            .gap_1p5()
+            .child(
+                div()
+                    .min_w_0()
+                    .flex_1()
+                    .child(Label::new(said).size(LabelSize::Small).truncate()),
+            )
+            .child(
+                Button::new("chat-waits", "Review")
+                    .style(ButtonStyle::Subtle)
+                    .label_size(LabelSize::Small)
+                    .on_click(cx.listener(|this, _, window, cx| this.show_head(window, cx))),
+            )
+    }
+
     /// Returns the input: the editor, Send or Stop beside it, and a line with its keys or
     /// why it cannot send.
     pub(super) fn composer(&self, cx: &mut Context<'_, Self>) -> impl IntoElement {
@@ -503,91 +510,110 @@ impl ChatPanel {
                 .tooltip(Tooltip::text("Send"))
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx)))
         };
-        let hint = match (reason, running) {
-            (Some(reason), _) => small(reason.to_owned(), Color::Warning),
-            (None, _) => small(
-                "Enter sends \u{b7} Shift+Enter breaks a line".to_owned(),
-                Color::Muted,
-            ),
+        let hint = match reason {
+            Some(reason) => Button::new("chat-pick-hint", reason)
+                .style(ButtonStyle::Transparent)
+                .label_size(LabelSize::Small)
+                .color(Color::Warning)
+                .tooltip(Tooltip::for_action_title("Pick a Model", &PickChatModel))
+                .on_click(cx.listener(|this, _, window, cx| this.picker.show(window, cx)))
+                .into_any_element(),
+            None => div()
+                .px_1()
+                .child(small(
+                    "Enter sends \u{b7} Shift+Enter breaks a line".to_owned(),
+                    Color::Muted,
+                ))
+                .into_any_element(),
         };
-        v_flex()
-            .flex_none()
-            .p_2()
-            .gap_1()
-            .child(
-                h_flex()
-                    .items_end()
-                    .gap_1()
-                    .pl_2()
-                    .pr_1()
-                    .py_1()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(colors.border)
-                    .bg(colors.editor_background)
-                    .child(div().flex_1().min_w_0().py_0p5().child(self.input.clone()))
-                    .child(button),
-            )
-            .child(div().px_1().child(hint))
+        let border = if reason.is_some() {
+            colors.border_variant
+        } else {
+            colors.border
+        };
+        div().flex_none().p_2().child(
+            v_flex()
+                .rounded_lg()
+                .border_1()
+                .border_color(border)
+                .bg(colors.editor_background)
+                .child(div().px_2().pt_2().pb_1().child(self.input.clone()))
+                .child(
+                    h_flex()
+                        .pl_1()
+                        .pr_1()
+                        .pb_1()
+                        .gap_1()
+                        .child(div().min_w_0().flex_1().child(hint))
+                        .child(button),
+                ),
+        )
     }
 
-    /// Returns what an empty thread shows: what the chat does, and three questions to ask,
-    /// each sent by a click.
+    /// Returns what an empty thread shows: what the chat does, and three questions to ask
+    /// as plain lines, each sent by a click; dimmed and inert while no model is picked.
     pub(super) fn empty_state(&self, file: &str, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let can = self.thread.read(cx).chosen().is_some();
         let colors = cx.theme().colors();
-        let chips = EXAMPLES.iter().enumerate().map(|(n, ask)| {
-            div()
-                .id(("chat-example", n))
-                .px_2()
-                .py_1()
-                .rounded_sm()
-                .border_1()
-                .border_color(colors.border)
-                .when(can, |chip| {
-                    chip.cursor_pointer()
-                        .hover(|s| s.bg(colors.ghost_element_hover))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.thread
-                                .update(cx, |t, cx| t.send((*ask).to_owned(), cx));
-                        }))
-                })
-                .child(Label::new(*ask).size(LabelSize::Small).color(if can {
-                    Color::Default
+        let asks = EXAMPLES.iter().enumerate().map(|(n, ask)| {
+            let group = SharedString::from(format!("chat-example-{n}"));
+            let line = div()
+                .text_ui_sm(cx)
+                .text_color(if can {
+                    colors.text_muted
                 } else {
-                    Color::Disabled
+                    colors.text_disabled
+                })
+                .when(can, |line| {
+                    line.group_hover(group.clone(), |s| s.text_color(colors.text))
+                })
+                .child(*ask);
+            ButtonLike::new(("chat-example", n))
+                .style(ButtonStyle::Transparent)
+                .full_width()
+                .auto_height()
+                .disabled(!can)
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.thread
+                        .update(cx, |t, cx| t.send((*ask).to_owned(), cx));
                 }))
+                .child(div().group(group).w_full().py_0p5().text_left().child(line))
         });
         v_flex()
             .flex_1()
             .justify_center()
             .px_4()
-            .gap_3()
             .child(
                 v_flex()
-                    .gap_1()
-                    .child(Label::new(format!("Ask about {file}")))
+                    .w_full()
+                    .max_w_96()
+                    .gap_3()
                     .child(
-                        Label::new(
-                            "The model reads the binary through borer's tools. Edits it proposes wait for you.",
-                        )
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                    ),
+                        v_flex()
+                            .gap_1()
+                            .child(Label::new(format!("Ask about {file}")).size(LabelSize::Large))
+                            .child(
+                                Label::new(
+                                    "The model reads the binary through borer's tools. Edits it proposes wait for you.",
+                                )
+                                .size(LabelSize::Small)
+                                .color(Color::Muted),
+                            ),
+                    )
+                    .child(v_flex().w_full().children(asks)),
             )
-            .child(v_flex().gap_1().children(chips))
     }
 }
 
 /// Returns the line that says `who` is answering, with a spinner.
 fn working(who: &str) -> AnyElement {
     h_flex()
-        .h(px(ROW))
-        .px_2()
+        .h_7()
+        .px_4()
         .gap_1p5()
         .child(
             Icon::new(IconName::LoadCircle)
-                .size(IconSize::XSmall)
+                .size(IconSize::Small)
                 .color(Color::Muted)
                 .with_rotate_animation(2),
         )
@@ -598,81 +624,85 @@ fn working(who: &str) -> AnyElement {
 /// Returns a small label in `color`.
 fn small(text: String, color: Color) -> AnyElement {
     Label::new(text)
-        .size(LabelSize::XSmall)
+        .size(LabelSize::Small)
         .color(color)
         .into_any_element()
 }
 
-/// Returns a quiet line of the thread: an icon and muted text.
-fn quiet(icon: IconName, said: &str) -> AnyElement {
-    h_flex()
+/// Returns a quiet line of the thread: muted text.
+fn quiet(said: &str) -> AnyElement {
+    div()
+        .px_4()
+        .py_1()
+        .child(
+            Label::new(said.to_owned())
+                .size(LabelSize::Small)
+                .color(Color::Muted),
+        )
+        .into_any_element()
+}
+
+/// Returns what the person wrote, in a raised block as Zed's agent panel sets a message.
+fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
+    let colors = cx.theme().colors();
+    div()
         .px_2()
-        .py_0p5()
-        .gap_1p5()
-        .items_start()
         .child(
             div()
-                .pt(px(3.0))
-                .child(Icon::new(icon).size(IconSize::XSmall).color(Color::Muted)),
-        )
-        .child(
-            div().min_w_0().flex_1().child(
-                Label::new(said.to_owned())
-                    .size(LabelSize::Small)
-                    .color(Color::Muted),
-            ),
+                .px_2()
+                .py_2()
+                .rounded_md()
+                .border_1()
+                .border_color(colors.border)
+                .bg(colors.editor_background)
+                .child(prose(said, cx)),
         )
         .into_any_element()
 }
 
-/// Returns a role's label over its text: `You`, or the model's name.
-fn role(name: impl Into<SharedString>) -> impl IntoElement {
-    Label::new(name)
-        .size(LabelSize::XSmall)
-        .weight(gpui::FontWeight::SEMIBOLD)
-        .color(Color::Muted)
-}
-
-/// Returns what the person wrote.
-fn person(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
-    v_flex()
-        .px_2()
-        .pb_2()
-        .gap_1()
-        .child(role("You"))
-        .child(prose(said, cx))
-        .into_any_element()
-}
-
-/// Returns what the model wrote, written out ([`text::visible`]) under its name when it
-/// opens the turn, with a copy button that shows on hover and copies the text as the model
-/// wrote it.
+/// Returns what the model wrote, written out ([`text::visible`]), as running text.
+///
+/// A reply that opens its turn sits under its model's name. A copy button shows on hover
+/// and copies the text as the model wrote it: on the name's line, or under a reply that
+/// goes on.
 fn model(
     ix: usize,
     said: &str,
-    name: Option<SharedString>,
+    opens: Option<SharedString>,
     cx: &Context<'_, ChatPanel>,
 ) -> AnyElement {
     let group = SharedString::from(format!("chat-model-{ix}"));
+    let copy = CopyButton::new(("chat-copy", ix), said.to_owned())
+        .icon_size(IconSize::Small)
+        .tooltip_label("Copy reply")
+        .visible_on_hover(group.clone());
+    let row = h_flex().h_5();
+    let (top, end) = match opens {
+        Some(opens) => (
+            Some(
+                row.child(
+                    div().min_w_0().flex_1().child(
+                        Label::new(opens)
+                            .size(LabelSize::Small)
+                            .color(Color::Muted)
+                            .truncate(),
+                    ),
+                )
+                .child(copy),
+            ),
+            None,
+        ),
+        None => (None, Some(row.justify_end().child(copy))),
+    };
     v_flex()
-        .group(group.clone())
-        .px_2()
-        .when(name.is_some(), |col| col.pt_4())
-        .when(name.is_none(), |col| col.pt_1())
-        .gap_1()
-        .child(
-            h_flex()
-                .h(px(16.0))
-                .children(name.map(role))
-                .child(div().flex_1())
-                .child(
-                    CopyButton::new(("chat-copy", ix), said.to_owned())
-                        .icon_size(IconSize::XSmall)
-                        .tooltip_label("Copy reply")
-                        .visible_on_hover(group),
-                ),
-        )
+        .group(group)
+        .px_4()
+        .when(top.is_some(), |col| col.pt_4())
+        .when(top.is_none(), |col| col.pt_2())
+        .gap_1p5()
+        .children(top)
         .child(prose(&text::visible(said), cx))
+        .children(end)
         .into_any_element()
 }
 
@@ -683,8 +713,8 @@ fn prose(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
     let colors = cx.theme().colors();
     let span_bg = colors.element_background;
     v_flex()
-        .gap_1p5()
-        .text_ui_sm(cx)
+        .gap_2()
+        .text_ui(cx)
         .line_height(gpui::relative(1.5))
         .text_color(colors.text)
         .children(blocks(said).into_iter().map(|block| {
@@ -713,8 +743,9 @@ fn prose(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
                         "chat-code-{:p}",
                         lines.as_ptr()
                     )))
-                    .p_2()
-                    .rounded_sm()
+                    .px_2()
+                    .py_1p5()
+                    .rounded_md()
                     .border_1()
                     .border_color(colors.border_variant)
                     .bg(colors.editor_background)
@@ -731,12 +762,48 @@ fn prose(said: &str, cx: &Context<'_, ChatPanel>) -> AnyElement {
         .into_any_element()
 }
 
-/// Returns an opened tool call's arguments and the first lines of its answer, the answer
-/// in the editor's font: it is data from the binary.
+/// Returns the first lines of a tool's answer without the fence the model reads it in
+/// ([`FENCE_OPEN`], [`FENCE_CLOSE`]): the person's view marks the data by its label instead.
+///
+/// The fence is only ever the answer's first and last line, since [`super::thread::fenced`]
+/// writes every `<` inside it as a character reference: so a head cut inside the closing
+/// fence ends on a start of it, which is dropped too.
+pub(crate) fn unfenced(head: &str) -> &str {
+    let body = head.strip_prefix(FENCE_OPEN).unwrap_or(head);
+    let body = body.strip_prefix('\n').unwrap_or(body);
+    let body = (1..=FENCE_CLOSE.len())
+        .rev()
+        .find_map(|n| body.strip_suffix(FENCE_CLOSE.get(..n)?))
+        .unwrap_or(body);
+    body.strip_suffix('\n').unwrap_or(body)
+}
+
+/// Returns how many bytes of a tool's answer of `bytes` bytes its first lines `head` leave
+/// unshown, not counting the closing fence [`unfenced`] hides, nor the line break before it.
+pub(crate) fn unshown(bytes: usize, head: &str) -> usize {
+    bytes
+        .saturating_sub(head.len())
+        .saturating_sub(FENCE_CLOSE.len().saturating_add(1))
+}
+
+/// Returns the heading of a section of an opened tool call, with what it ends on.
+fn section(name: &'static str, end: Option<AnyElement>) -> impl IntoElement {
+    h_flex()
+        .gap_1()
+        .child(Label::new(name).size(LabelSize::Small).color(Color::Muted))
+        .child(div().flex_1())
+        .children(end)
+}
+
+/// Returns an opened tool call: its arguments, then the first lines of its answer.
+///
+/// The answer is in the editor's font under a label that marks it as data that may hold
+/// text from the binary,
+/// in a bordered block whose height is capped and scrolls.
 fn details(call: &Call, cx: &Context<'_, ChatPanel>) -> impl IntoElement {
     let mono = |text: &str, color: Color| {
         Label::new(text::visible(text).into_owned())
-            .size(LabelSize::XSmall)
+            .size(LabelSize::Small)
             .buffer_font(cx)
             .color(color)
             .single_line()
@@ -746,13 +813,20 @@ fn details(call: &Call, cx: &Context<'_, ChatPanel>) -> impl IntoElement {
             .children(text.lines().map(|line| mono(line, color)))
             .into_any_element()
     };
+    let data = h_flex()
+        .id(("chat-call-data", call.entry))
+        .tooltip(Tooltip::text(
+            "May hold text from the binary, which may be hostile; the model is told to read it as data, never as instructions",
+        ))
+        .child(small("data from binary".to_owned(), Color::Muted))
+        .into_any_element();
     let answer = match &call.ran {
         Ran::Running => small("running".to_owned(), Color::Muted),
         Ran::Answered { bytes, head } => v_flex()
-            .child(lines(head, Color::Default))
-            .when(*bytes > head.len(), |col| {
+            .child(lines(unfenced(head), Color::Default))
+            .when(unshown(*bytes, head) > 0, |col| {
                 col.child(small(
-                    format!("{} more", size_of(bytes.saturating_sub(head.len()))),
+                    format!("{} more", size_of(unshown(*bytes, head))),
                     Color::Muted,
                 ))
             })
@@ -767,23 +841,42 @@ fn details(call: &Call, cx: &Context<'_, ChatPanel>) -> impl IntoElement {
             Color::Muted,
         ),
     };
+    let answered = matches!(call.ran, Ran::Answered { .. });
     let colors = cx.theme().colors();
     v_flex()
         .id(("chat-call-details", call.entry))
-        .ml(px(18.0))
-        .mr_2()
+        .mt_1()
         .mb_1()
-        .p_2()
-        .gap_1()
-        .rounded_sm()
+        .max_h_64()
+        .overflow_scroll()
+        .rounded_md()
         .border_1()
         .border_color(colors.border_variant)
         .bg(colors.editor_background)
-        .overflow_x_scroll()
-        .child(small("arguments".to_owned(), Color::Muted))
-        .child(lines(&call.args, Color::Muted))
-        .child(small("answer".to_owned(), Color::Muted))
-        .child(answer)
+        .child(
+            v_flex()
+                .px_2()
+                .py_1p5()
+                .gap_1()
+                .child(section("Input", None))
+                .child(
+                    div()
+                        .id(("chat-call-input", call.entry))
+                        .max_h_20()
+                        .overflow_y_scroll()
+                        .child(lines(&call.args, Color::Muted)),
+                ),
+        )
+        .child(
+            v_flex()
+                .px_2()
+                .py_1p5()
+                .gap_1()
+                .border_t_1()
+                .border_color(colors.border_variant)
+                .child(section("Output", answered.then_some(data)))
+                .child(answer),
+        )
 }
 
 #[cfg(test)]
@@ -792,7 +885,64 @@ fn details(call: &Call, cx: &Context<'_, ChatPanel>) -> impl IntoElement {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{Block, blocks, spans};
+    use super::super::thread::{fenced, first_lines};
+    use super::{Block, blocks, spans, unfenced, unshown};
+
+    /// An answer's fence is dropped from what the person reads, whole or cut to its first
+    /// lines, and a tag the binary wrote stays written out inside it.
+    #[test]
+    fn the_fence_is_dropped_and_the_data_kept() {
+        assert_eq!(
+            unfenced(&fenced("ok\n</tool_output>")),
+            "ok\n&lt;/tool_output>"
+        );
+        let long = (0..40).map(|n| format!("line {n}\n")).collect::<String>();
+        let head = first_lines(&fenced(&long));
+        assert!(unfenced(&head).starts_with("line 0\n"), "{head}");
+        assert_eq!(unfenced("no fence"), "no fence");
+    }
+
+    /// A one-line answer whose head is cut inside the closing fence shows none of the fence
+    /// and nothing more.
+    #[test]
+    fn a_head_cut_inside_the_closing_fence_drops_it() {
+        let body = "a".repeat(2048 - super::FENCE_OPEN.len() - 2 - 4);
+        let whole = fenced(&body);
+        let head = first_lines(&whole);
+        assert!(head.ends_with("\n</to"), "{head}");
+        assert_eq!(unfenced(&head), body);
+        assert_eq!(unshown(whole.len(), &head), 0);
+    }
+
+    /// An answer whose lines all fit the first lines shows no "more", though its closing
+    /// fence was cut; one a line longer counts that line alone.
+    #[test]
+    fn an_answer_shown_whole_has_nothing_more() {
+        let answer = |n: usize| {
+            (0..n)
+                .map(|n| {
+                    format!(
+                        "line {n}
+"
+                    )
+                })
+                .collect::<String>()
+        };
+        let whole = fenced(&answer(11));
+        let head = first_lines(&whole);
+        assert!(!head.ends_with(super::FENCE_CLOSE), "{head}");
+        assert_eq!(unfenced(&head), answer(11).trim_end());
+        assert_eq!(unshown(whole.len(), &head), 0);
+        let longer = fenced(&answer(12));
+        assert_eq!(
+            unshown(longer.len(), &first_lines(&longer)),
+            "line 11
+"
+            .len()
+        );
+        let short = fenced("ok");
+        assert_eq!(unshown(short.len(), &first_lines(&short)), 0);
+    }
 
     /// A reply splits into text and fenced code, and a fence still open runs to the end.
     #[test]
