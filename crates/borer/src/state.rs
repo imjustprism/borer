@@ -669,8 +669,8 @@ impl Held for BorerServer {
         Some(Ok(View { program, analysis }))
     }
 
-    fn user_overlay(&self) -> Overlay {
-        self.overlay_plain()
+    fn user_overlay(&self) -> Arc<Overlay> {
+        Arc::new(self.overlay_plain())
     }
 
     /// The analysis is shared, so a recovered function goes into a copy of

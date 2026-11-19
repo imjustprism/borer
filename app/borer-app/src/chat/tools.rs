@@ -5,11 +5,11 @@
 //!
 //! The face the catalog reads ([`Face`]) is the catalog's plain one ([`Loaded`]) over the
 //! open binary's snapshot, so a tool answers here the bytes it answers an MCP agent and
-//! `query` refuses a resource only the server has by name, with why; its one difference is
-//! the edit seam, which refuses a name a person could not read whole on the card, keeps
-//! the plan for the proposal card and commits nothing.
+//! `query` refuses a resource only the server has by name, with why; its edits go through
+//! the catalog's plan-keeping face ([`Keeping`]), which the person's inline editor plans
+//! through too: it refuses a name a person could not read whole, keeps the plan for the
+//! proposal card and commits nothing.
 
-use std::cell::RefCell;
 use std::sync::{Arc, LazyLock};
 
 use borer_engine::analysis::Overlay;
@@ -17,9 +17,7 @@ use borer_engine::analysis::edit::{Edit, Force, Plan};
 use borer_engine::answer::{Need, catalog};
 use borer_engine::program::FileShown;
 use borer_engine::text::one_line;
-use borer_front::tools::{
-    self, Apply, Edited, Failure, Held, Loaded, Outcome, Snapshot, TOOLS, View,
-};
+use borer_front::tools::{self, Apply, Failure, Held, Keeping, Loaded, TOOLS, View};
 use serde_json::{Map, Value};
 
 use crate::worker::LoadedBinary;
@@ -29,12 +27,10 @@ use crate::worker::LoadedBinary;
 pub type Proposed = (Vec<Edit>, Force, Plan);
 
 /// What the catalog reads through in the chat: the open binary's program, analysis and
-/// names as one snapshot, and the plan an edit tool made.
+/// names as one snapshot, its paths named by the file alone.
 struct Face {
     /// The catalog's plain face over the open binary.
     plain: Loaded,
-    /// The plan the edit seam made this call, for the proposal card.
-    proposed: RefCell<Option<Proposed>>,
 }
 
 impl Held for Face {
@@ -42,33 +38,11 @@ impl Held for Face {
         self.plain.view(need)
     }
 
-    fn user_overlay(&self) -> Overlay {
-        Overlay {
+    fn user_overlay(&self) -> Arc<Overlay> {
+        Arc::new(Overlay {
             file_shown: FileShown::Name,
-            ..self.plain.user_overlay()
-        }
-    }
-
-    fn edit(
-        &self,
-        s: &Snapshot<'_>,
-        edits: &[Edit],
-        force: Force,
-        apply: Apply,
-    ) -> anyhow::Result<Edited> {
-        for edit in edits {
-            if let Edit::Name { name, .. } = edit {
-                shows_whole(name).map_err(anyhow::Error::msg)?;
-            }
-        }
-        let names = tools::tabled(&self.plain.overlay);
-        let plan = crate::worker::plan_over(s.program(), s.analysis(), &names, edits, force)?;
-        let outcome = apply.unwritten();
-        if outcome == Outcome::Proposed {
-            self.proposed
-                .replace(Some((edits.to_vec(), force, plan.clone())));
-        }
-        Ok((plan, outcome))
+            ..Overlay::clone(&self.plain.overlay)
+        })
     }
 
     fn querier(&self) -> borer_engine::script::Query {
@@ -152,24 +126,30 @@ pub fn answer(
         plain: Loaded {
             program: Arc::clone(&loaded.program),
             analysis: Arc::clone(&loaded.analysis),
-            overlay: (*loaded.overlay).clone(),
+            overlay: Arc::clone(&loaded.overlay),
         },
-        proposed: RefCell::default(),
     };
+    let keeping = Keeping::new(&face);
     let args = match args {
         Value::Object(args) => Some(args),
         Value::Null => Some(Map::new()),
         _ => None,
     };
     let answered = match (tools::tool(name), args) {
-        (Some(t), Some(args)) => (t.run)(&face, args).map_err(|f| f.message),
+        (Some(t), Some(args)) => (t.run)(&keeping, args).map_err(|f| f.message),
         (Some(t), None) => Err(format!("the arguments of {} are not a JSON object", t.name)),
         (None, _) => Err(tools::server_only(name).map_or_else(
             || format!("no tool is named {}", one_line(name)),
             |refused| format!("{}{}", refused.message, instead(name)),
         )),
     };
-    (answered, face.proposed.into_inner())
+    let proposed = keeping
+        .into_kept()
+        .and_then(|kept| match (kept.apply, kept.planned) {
+            (Apply::Commit, Ok(plan)) => Some((kept.edits, kept.force, plan)),
+            (Apply::Commit | Apply::Preview, _) => None,
+        });
+    (answered, proposed)
 }
 
 /// Returns what the person can do in borer-app in place of a server-only tool the model
@@ -185,21 +165,5 @@ pub(super) fn instead(name: &str) -> &'static str {
         }
         "save_project" => "; ask the person to save the project in borer-app",
         _ => "",
-    }
-}
-
-/// Refuses a name a person could not read whole on a proposal card: one holding a character
-/// that hides itself or reorders the text around it ([`borer_engine::text::visible`]).
-///
-/// # Errors
-///
-/// When the name holds one; the message shows the name with each written out.
-fn shows_whole(name: &str) -> Result<(), String> {
-    match borer_engine::text::visible(name) {
-        std::borrow::Cow::Borrowed(_) => Ok(()),
-        std::borrow::Cow::Owned(shown) => Err(format!(
-            "{} holds characters that do not show; a name a person accepts must show every one",
-            one_line(&shown)
-        )),
     }
 }

@@ -122,6 +122,20 @@ pub fn tabled(o: &Overlay) -> Overlay {
     }
 }
 
+/// Returns `o` as tools read it ([`tabled`]), shared with no copy when it
+/// already reads the binary's tables.
+///
+/// # Arguments
+///
+/// * `o` - The overlay as the user left it.
+fn tabled_shared(o: Arc<Overlay>) -> Arc<Overlay> {
+    if o.enum_source == EnumSource::Binary {
+        o
+    } else {
+        Arc::new(tabled(&o))
+    }
+}
+
 /// The program a front end holds and its analysis, taken together.
 #[derive(Debug, Clone)]
 pub struct View {
@@ -194,8 +208,8 @@ pub trait Held {
     /// asks for cannot be had, with the reason.
     fn view(&self, need: Need) -> Option<Result<View, String>>;
 
-    /// Returns the names, comments and types as the user left them.
-    fn user_overlay(&self) -> Overlay;
+    /// Returns the names, comments and types as the user left them, shared.
+    fn user_overlay(&self) -> Arc<Overlay>;
 
     /// Finds the function a decompile names in the analysis this face keeps
     /// for `program`, starting one where `find` grows one
@@ -295,7 +309,7 @@ pub struct Snapshot<'h> {
     /// Whether the front end gave an analysis.
     given: bool,
     /// The names as tools read them.
-    overlay: Overlay,
+    overlay: Arc<Overlay>,
 }
 
 impl std::fmt::Debug for Snapshot<'_> {
@@ -391,7 +405,7 @@ impl Snapshot<'_> {
     /// When the text is neither an address nor a known name, naming the
     /// names nearest it.
     pub fn addr(&self, text: &str) -> Result<u64, String> {
-        answer::address(&self.program, text, || (self.names(), &self.overlay))
+        answer::address(&self.program, text, || (self.names(), &*self.overlay))
     }
 
     /// Resolves an argument to the entry of the discovered function
@@ -526,6 +540,6 @@ pub fn snapshot(h: &dyn Held, need: Need) -> Result<Snapshot<'_>, String> {
         given: view.analysis.is_some(),
         analysis: view.analysis.unwrap_or_default(),
         program: view.program,
-        overlay: tabled(&h.user_overlay()),
+        overlay: tabled_shared(h.user_overlay()),
     })
 }

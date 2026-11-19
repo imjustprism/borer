@@ -215,7 +215,7 @@ fn plain(loaded: &crate::worker::LoadedBinary) -> Loaded {
     Loaded {
         program: loaded.program.clone(),
         analysis: loaded.analysis.clone(),
-        overlay: (*loaded.overlay).clone(),
+        overlay: Arc::clone(&loaded.overlay),
     }
 }
 

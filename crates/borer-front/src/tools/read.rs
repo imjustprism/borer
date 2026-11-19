@@ -144,7 +144,7 @@ pub struct Loaded {
     /// Its analysis, an empty one where its architecture has none.
     pub analysis: Arc<Analysis>,
     /// The names, comments and types as the user left them.
-    pub overlay: Overlay,
+    pub overlay: Arc<Overlay>,
 }
 
 impl Held for Loaded {
@@ -163,8 +163,8 @@ impl Held for Loaded {
         }))
     }
 
-    fn user_overlay(&self) -> Overlay {
-        self.overlay.clone()
+    fn user_overlay(&self) -> Arc<Overlay> {
+        Arc::clone(&self.overlay)
     }
 
     fn querier(&self) -> Query {

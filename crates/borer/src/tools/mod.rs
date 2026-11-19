@@ -317,7 +317,7 @@ mod tests {
         let plain = borer_front::tools::Loaded {
             program: server.loaded().expect("loaded"),
             analysis: server.analysis_or_empty(),
-            overlay: server.overlay_plain(),
+            overlay: std::sync::Arc::new(server.overlay_plain()),
         };
         for (name, given) in calls {
             let t = borer_front::tools::tool(name).expect("a catalog tool");
@@ -449,7 +449,7 @@ mod tests {
             let plain = borer_front::tools::Loaded {
                 program: server.loaded().expect("loaded"),
                 analysis: server.analysis_or_empty(),
-                overlay: server.overlay_plain(),
+                overlay: std::sync::Arc::new(server.overlay_plain()),
             };
             let before = format!("{:?}", server.overlay_plain());
             let listed = (annotations.run)(&plain, serde_json::Map::new());

@@ -23,6 +23,7 @@ mod code;
 mod edit;
 mod held;
 pub mod params;
+mod propose;
 mod read;
 
 use schemars::JsonSchema;
@@ -42,6 +43,7 @@ pub use held::{
     guarded, run, snapshot, tabled,
 };
 use params::{DESERIALIZE_PREFIX, misfit};
+pub use propose::{Keeping, Kept, propose};
 pub use read::{Loaded, SERVER_RESOURCES, ask, read_engine};
 
 /// Something a tool touches outside the loaded program and its analysis.
@@ -687,8 +689,8 @@ mod tests {
     fn an_edit_is_planned_through_the_seam() {
         use std::sync::Arc;
 
+        use borer_engine::analysis::Analysis;
         use borer_engine::analysis::edit::{Edit, Force};
-        use borer_engine::analysis::{Analysis, Overlay};
         use borer_engine::answer::Need;
         use borer_engine::program::{Arch, Feature, Program, Section};
 
@@ -699,7 +701,7 @@ mod tests {
         let plain = Loaded {
             program: Arc::new(program),
             analysis,
-            overlay: Overlay::default(),
+            overlay: Arc::default(),
         };
         let s = snapshot(&plain, Need::Code(Feature::Discover)).expect("a snapshot");
         let edits = [Edit::Name {
@@ -746,7 +748,7 @@ mod tests {
             fn view(&self, need: Need) -> Option<Result<View, String>> {
                 self.loaded.view(need)
             }
-            fn user_overlay(&self) -> Overlay {
+            fn user_overlay(&self) -> Arc<Overlay> {
                 self.loaded.user_overlay()
             }
             fn edit(
@@ -778,7 +780,7 @@ mod tests {
             loaded: Loaded {
                 analysis: Arc::new(Analysis::compute(&program)),
                 program: Arc::new(program),
-                overlay,
+                overlay: Arc::new(overlay),
             },
             kept: RefCell::new(Vec::new()),
         };
@@ -843,7 +845,7 @@ mod tests {
     fn query_refuses_the_server_resources_by_name() {
         use std::sync::Arc;
 
-        use borer_engine::analysis::{Analysis, Overlay};
+        use borer_engine::analysis::Analysis;
         use borer_engine::program::{Arch, Program, Section};
 
         use super::{Cause, Loaded, ask};
@@ -852,7 +854,7 @@ mod tests {
         let plain = Loaded {
             analysis: Arc::new(Analysis::compute(&program)),
             program: Arc::new(program),
-            overlay: Overlay::default(),
+            overlay: Arc::default(),
         };
         assert!(ask(&plain, "borer://disasm/0x1000").is_ok());
         for uri in ["borer://help", "borer://grep/main"] {
