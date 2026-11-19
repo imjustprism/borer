@@ -1218,18 +1218,28 @@ pub(super) fn unknown_word(word: &str) -> String {
 ///
 /// # Errors
 ///
-/// For a word beginning `--` the query does not read, or `export`'s
-/// arguments as [`export_args`] refuses them.
+/// For a word beginning `--` the query does not read, one in the binary's
+/// place of a query that reads its own (the binary is missing), or
+/// `export`'s arguments after its binary as [`export_args`] refuses them.
 pub(super) fn refuse_unknown_options(q: Query, args: &[String]) -> anyhow::Result<()> {
-    if let Some(flag) = args
+    if let Some((at, flag)) = args
         .iter()
+        .enumerate()
         .take(q.own_flags_from().unwrap_or(usize::MAX))
         .skip(1)
-        .find(|a| a.starts_with("--"))
+        .find(|(_, a)| a.starts_with("--"))
     {
+        if at == 1 && q.own_flags_from().is_some() {
+            let word = args.first().map_or("", String::as_str);
+            bail!(
+                "{word} needs a binary path before {}\n{}",
+                quoted(flag),
+                command_usage(USAGE, word).unwrap_or_default()
+            );
+        }
         bail!("{}", unknown_word(flag));
     }
-    if q == Query::Export {
+    if q == Query::Export && args.len() > 1 {
         export_args(args)?;
     }
     Ok(())

@@ -30,6 +30,29 @@ fn cli_export_split_writes_the_split_and_its_map() {
     );
 }
 
+/// `export` with no binary, or with a flag in the binary's place, says it
+/// needs the binary, with its own usage, before anything loads.
+///
+/// Reading export's flags early answered a bare `export` with "export needs
+/// --c <out.c>, ...", and following that led to "unknown option '--c'".
+#[test]
+fn cli_export_needs_its_binary_before_its_flags() {
+    for (args, reason) in [
+        (
+            &["export"][..],
+            "export needs a binary path\nusage:\n  export",
+        ),
+        (
+            &["export", "--split", "d"][..],
+            "export needs a binary path before '--split'\nusage:\n  export",
+        ),
+    ] {
+        let (ok, said) = super::run_all(args);
+        assert!(!ok && said.contains(reason), "{args:?}: {said}");
+        assert!(!said.contains("functions <binary>"), "{args:?}: {said}");
+    }
+}
+
 /// A word beginning `--` that `export` does not read is refused before the
 /// binary loads, with the words `export` takes.
 #[test]
