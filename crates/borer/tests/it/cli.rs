@@ -9,6 +9,7 @@ use std::process::{Command, Output};
 use std::sync::{Condvar, Mutex, PoisonError};
 
 mod caches;
+mod export;
 mod layout;
 mod types;
 

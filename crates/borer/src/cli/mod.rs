@@ -55,9 +55,9 @@ mod session;
 mod wire;
 
 use args::{
-    COMMAND_FLAGS, Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page,
-    command_usage, entry_at, filter_limit, num_arg, path_arg, search_args, split_pack_args,
-    unknown_word,
+    Command, Direction, Query, RawFlags, SlotQuery, USAGE, arg, cli_limit, cli_page, command_usage,
+    entry_at, filter_limit, num_arg, path_arg, refuse_unknown_options, search_args,
+    split_pack_args, unknown_word,
 };
 use packs::{pack_report, packs_report, read_spec_arg, read_text, sigmake, writable, write_file};
 use session::{Session, decompiled, needs_a_binary, open, project_overlay};
@@ -128,13 +128,8 @@ pub(crate) fn cli(args: &[String]) -> anyhow::Result<()> {
         );
         return Ok(());
     }
-    if let Command::Query(q) = command
-        && let Some(flag) = args.iter().enumerate().skip(1).find_map(|(i, a)| {
-            let handed_on = q == Query::Script && i > 2;
-            (a.starts_with("--") && !COMMAND_FLAGS.contains(&a.as_str()) && !handed_on).then_some(a)
-        })
-    {
-        bail!("{}", unknown_word(flag));
+    if let Command::Query(q) = command {
+        refuse_unknown_options(q, args)?;
     }
     let (first, after) = match command {
         Command::Query(_) => (2, " after the binary"),

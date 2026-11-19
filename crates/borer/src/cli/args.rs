@@ -1128,16 +1128,47 @@ pub(super) fn unknown_word(word: &str) -> String {
     }
 }
 
-/// The words beginning `--` that queries read themselves, beside the
-/// options [`split_pack_args`] takes off the line; `setup` and `doctor`
-/// refuse any other word with their own message.
-pub(super) const COMMAND_FLAGS: &[&str] = &[
-    "--help",
-    "--save",
-    "--c",
-    "--library",
-    "--only",
-    "--h",
-    "--ct",
-    "--rcnet",
-];
+/// The words beginning `--` a query may hold before the words it reads itself.
+///
+/// The options [`split_pack_args`] takes off the line are not among them;
+/// `setup` and `doctor` refuse any other word with their own message.
+const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
+
+/// Refuses a word beginning `--` that a query does not read, before its
+/// binary loads.
+///
+/// The words after `script`'s file are the script's own, and the words
+/// after `export`'s binary are read by [`export_args`] here, so no second
+/// list of `export`'s flags can miss one: such a list lacked `--split`, and
+/// the usage line `export <binary> --split <dir>` was refused.
+///
+/// # Arguments
+///
+/// * `q` - The query.
+/// * `args` - The command line, the command first and the binary second.
+///
+/// # Errors
+///
+/// For a word beginning `--` the query does not read, or `export`'s
+/// arguments as [`export_args`] refuses them.
+pub(super) fn refuse_unknown_options(q: Query, args: &[String]) -> anyhow::Result<()> {
+    let own_from = if q == Query::Script {
+        3
+    } else if q == Query::Export {
+        2
+    } else {
+        usize::MAX
+    };
+    if let Some(flag) = args
+        .iter()
+        .take(own_from)
+        .skip(1)
+        .find(|a| a.starts_with("--") && !COMMAND_FLAGS.contains(&a.as_str()))
+    {
+        bail!("{}", unknown_word(flag));
+    }
+    if q == Query::Export {
+        export_args(args)?;
+    }
+    Ok(())
+}
