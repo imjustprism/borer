@@ -283,9 +283,9 @@ mod tests {
         }
     }
 
-    /// An edit tool answers the same text on both faces, dry, applied or
-    /// refused; applied, the server commits the plan and the plain face
-    /// changes nothing.
+    /// An edit tool answers the same text on both faces, dry or refused;
+    /// applied, the server commits the plan and the plain face proposes it,
+    /// changing nothing.
     ///
     /// # Panics
     ///
@@ -388,7 +388,8 @@ mod tests {
     ///
     /// # Panics
     ///
-    /// When the faces answer otherwise, the server's names change on a
+    /// When the faces answer otherwise but for an applied call the plain
+    /// face answers as a proposal, the server's names change on a
     /// call that did not apply or stay on one that did, or the plain face's
     /// names change.
     fn lands_alike<const N: usize>(
@@ -410,7 +411,15 @@ mod tests {
             let plainly = (t.run)(&plain, args.clone());
             let served = (t.run)(server, args);
             let landed = format!("{:?}", server.overlay_plain()) != before;
-            assert_eq!(served, plainly, "{name}");
+            if served != plainly {
+                let proposed = plainly.as_ref().is_ok_and(|s| {
+                    s.contains("proposed, not applied: waits for the person to accept:")
+                });
+                assert!(
+                    applies && proposed,
+                    "{name}: {served:?} against {plainly:?}"
+                );
+            }
             let said_nothing = name == "script"
                 && served
                     .as_ref()

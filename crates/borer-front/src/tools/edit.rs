@@ -24,17 +24,22 @@ use super::params::{
     ClassLayoutParams, ScriptParams, SetCommentParams, SetNameParams, SetTypeParams, field_var,
     must_be_a_name, must_fit_a_row, stated_fields, stated_values,
 };
-use super::{Apply, Failure, Held, Snapshot, run};
+use super::{Apply, Failure, Held, Outcome, Snapshot, run};
 
-/// Returns whether a call is a dry run, and what the face is asked to do
-/// with its plan.
+/// What an answer opens with when the face held its plan as a proposal.
+const PROPOSED: &str = "proposed, not applied: waits for the person to accept:";
+
+/// Returns what a call asks the face to do with its plan.
 ///
 /// # Arguments
 ///
 /// * `dry_run` - The call's `dry_run`; absent is a dry run.
-fn asked(dry_run: Option<bool>) -> (bool, Apply) {
-    let dry = dry_run.unwrap_or(true);
-    (dry, if dry { Apply::Preview } else { Apply::Commit })
+fn asked(dry_run: Option<bool>) -> Apply {
+    if dry_run.unwrap_or(true) {
+        Apply::Preview
+    } else {
+        Apply::Commit
+    }
 }
 
 /// Renders a class layout recovered from its methods' field accesses, or
@@ -66,13 +71,13 @@ pub fn class_layout(h: &dyn Held, p: &ClassLayoutParams) -> Result<String, Failu
             let layout = apply::class_named(s.program(), a, o, &name)?;
             return Ok(classes::render_layout(&layout, a, o));
         };
-        let (dry, apply) = asked(p.dry_run);
+        let apply = asked(p.dry_run);
         let edits = [Edit::Layout {
             from: Laid::Class(name),
             name: struct_name.clone(),
         }];
         s.edit(&edits, Force::Refuse, apply)
-            .map(|plan| listed(&plan, dry))
+            .map(|(plan, done)| listed(&plan, done))
             .map_err(|e| e.to_string())
     })
 }
@@ -139,7 +144,7 @@ fn renames(p: &SetNameParams) -> Result<Vec<(String, String)>, Failure> {
 /// resolve, no section holds it, or the session would hold more names than
 /// a project file holds ([`borer_engine::analysis::project::NAMES_MAX`]).
 pub fn set_name(h: &dyn Held, p: &SetNameParams) -> Result<String, Failure> {
-    let (dry, apply) = asked(p.dry_run);
+    let apply = asked(p.dry_run);
     let pairs = renames(p)?;
     for (_, name) in &pairs {
         must_fit_a_row(name, Annotation::Name)?;
@@ -166,24 +171,34 @@ pub fn set_name(h: &dyn Held, p: &SetNameParams) -> Result<String, Failure> {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        let plan =
+        let (plan, done) =
             s.edit(&edits, force, apply)
                 .map_err(|e| match e.downcast_ref::<edit::Refused>() {
                     Some(refused) => item(refused.edit, refused.why.clone()),
                     None => e.to_string(),
                 })?;
-        let lines: Vec<(String, String)> = plan.lines().iter().map(|l| l.said(dry)).collect();
-        Ok(match lines.as_slice() {
-            [_] => answered(&plan, dry),
-            more if dry => format!(
+        let lines: Vec<(String, String)> = plan
+            .lines()
+            .iter()
+            .map(|l| l.said(done != Outcome::Committed))
+            .collect();
+        let would = |more: &[(String, String)]| {
+            more.iter()
+                .map(|(line, numeric)| format!("would {line}{numeric}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        Ok(match (lines.as_slice(), done) {
+            ([_], _) => answered(&plan, done),
+            (more, Outcome::Planned) => format!(
                 "dry-run: {} names\n{}\npass dry_run=false to apply.",
                 more.len(),
-                more.iter()
-                    .map(|(line, numeric)| format!("would {line}{numeric}"))
-                    .collect::<Vec<_>>()
-                    .join("\n")
+                would(more)
             ),
-            more => more
+            (more, Outcome::Proposed) => {
+                format!("{PROPOSED} {} names\n{}", more.len(), would(more))
+            }
+            (more, Outcome::Committed) => more
                 .iter()
                 .map(|(line, numeric)| format!("{line}{numeric}"))
                 .collect::<Vec<_>>()
@@ -206,7 +221,7 @@ pub fn set_name(h: &dyn Held, p: &SetNameParams) -> Result<String, Failure> {
 /// comments than a project file holds
 /// ([`borer_engine::analysis::project::COMMENTS_MAX`]).
 pub fn set_comment(h: &dyn Held, p: &SetCommentParams) -> Result<String, Failure> {
-    let (dry, apply) = asked(p.dry_run);
+    let apply = asked(p.dry_run);
     must_fit_a_row(&p.comment, Annotation::Comment)?;
     run(h, Need::File, |s| {
         let edits = [Edit::Comment {
@@ -214,7 +229,7 @@ pub fn set_comment(h: &dyn Held, p: &SetCommentParams) -> Result<String, Failure
             text: p.comment.clone(),
         }];
         s.edit(&edits, Force::Refuse, apply)
-            .map(|plan| answered(&plan, dry))
+            .map(|(plan, done)| answered(&plan, done))
             .map_err(|e| e.to_string())
     })
 }
@@ -273,7 +288,7 @@ pub fn set_type(h: &dyn Held, p: &SetTypeParams) -> Result<String, Failure> {
         var,
         dry_run,
     } = p;
-    let (dry, apply) = asked(*dry_run);
+    let apply = asked(*dry_run);
     if *replace == Some(true) && (name.is_none() || fields.is_none() || var.is_some()) {
         return Err(Failure::asked(
             "`replace` drops the fields `fields` does not restate, so it goes with `name` and `fields`",
@@ -285,7 +300,7 @@ pub fn set_type(h: &dyn Held, p: &SetTypeParams) -> Result<String, Failure> {
         let edits = [Edit::Declare { text: decl.clone() }];
         return run(h, Need::Best(Feature::Discover), |s| {
             s.edit(&edits, Force::Refuse, apply)
-                .map(|plan| listed(&plan, dry))
+                .map(|(plan, done)| listed(&plan, done))
                 .map_err(|e| e.to_string())
         });
     }
@@ -329,7 +344,7 @@ pub fn set_type(h: &dyn Held, p: &SetTypeParams) -> Result<String, Failure> {
             None => type_edits(p, (a, o), at, function)?,
         };
         s.edit(&edits, Force::Refuse, apply)
-            .map(|plan| answered(&plan, dry))
+            .map(|(plan, done)| answered(&plan, done))
             .map_err(|e| e.to_string())
     })
 }
@@ -554,52 +569,59 @@ fn proposed(s: &Snapshot<'_>, ran: &borer_engine::script::ScriptRun) -> String {
             skipped += 1;
         }
     }
+    let counted = format!(
+        "names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, no name set_name sets, or in no section)",
+        named.len(),
+        commented.len()
+    );
     match s.edit(&edits, Force::Take, Apply::Commit) {
         Err(why) => format!("# nothing applied: {why}\n"),
-        Ok(_) => format!(
-            "# applied names at {} addresses and comments at {}, the last proposal for an address winning; {skipped} skipped (empty, unprintable, no name set_name sets, or in no section)\n",
-            named.len(),
-            commented.len()
-        ),
+        Ok((_, Outcome::Committed)) => format!("# applied {counted}\n"),
+        Ok((_, Outcome::Planned | Outcome::Proposed)) => format!("# {PROPOSED} {counted}\n"),
     }
 }
 
 /// Answers a plan whose lines are blocks of their own (types from C, a
-/// layout): the blocks, then, for a dry run, how to apply them.
+/// layout): the blocks, then, for a dry run, how to apply them; a proposal
+/// says first that nothing was applied.
 ///
 /// # Arguments
 ///
 /// * `plan` - The plan.
-/// * `dry` - Whether the plan is a dry run's.
-fn listed(plan: &Plan, dry: bool) -> String {
-    let mut out: String = plan.lines().iter().map(|l| l.said(dry).0).collect();
-    if dry {
-        out.push_str("pass dry_run=false to apply.\n");
+/// * `done` - What the face did with it.
+fn listed(plan: &Plan, done: Outcome) -> String {
+    let said = |dry: bool| -> String { plan.lines().iter().map(|l| l.said(dry).0).collect() };
+    match done {
+        Outcome::Planned => format!("{}pass dry_run=false to apply.\n", said(true)),
+        Outcome::Committed => said(false),
+        Outcome::Proposed => format!("{PROPOSED}\n{}", said(true)),
     }
-    out
 }
 
 /// Answers a plan of one line or of lines joined by `; `: a dry run says
-/// what it would do and how to apply it, then the notes.
+/// what it would do and how to apply it, a proposal that it was not
+/// applied and what it would do, then the notes.
 ///
 /// # Arguments
 ///
 /// * `plan` - The plan.
-/// * `dry` - Whether the plan is a dry run's.
-fn answered(plan: &Plan, dry: bool) -> String {
-    let lines: Vec<(String, String)> = plan.lines().iter().map(|l| l.said(dry)).collect();
+/// * `done` - What the face did with it.
+fn answered(plan: &Plan, done: Outcome) -> String {
+    let lines: Vec<(String, String)> = plan
+        .lines()
+        .iter()
+        .map(|l| l.said(done != Outcome::Committed))
+        .collect();
     let words: Vec<&str> = lines
         .iter()
         .map(|(line, _)| line.as_str())
         .filter(|line| !line.is_empty())
         .collect();
+    let words = words.join("; ");
     let notes: String = lines.iter().map(|(_, note)| note.as_str()).collect();
-    if dry {
-        format!(
-            "dry-run: would {}. pass dry_run=false to apply.{notes}",
-            words.join("; ")
-        )
-    } else {
-        format!("{}{notes}", words.join("; "))
+    match done {
+        Outcome::Planned => format!("dry-run: would {words}. pass dry_run=false to apply.{notes}"),
+        Outcome::Committed => format!("{words}{notes}"),
+        Outcome::Proposed => format!("{PROPOSED} would {words}.{notes}"),
     }
 }

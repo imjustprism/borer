@@ -38,8 +38,8 @@ pub use code::{
 };
 pub use edit::{class_layout, script, set_comment, set_name, set_type};
 pub use held::{
-    Apply, Cause, Failure, Find, Held, NO_BINARY, Snapshot, View, fault_text, guarded, run,
-    snapshot, tabled,
+    Apply, Cause, Edited, Failure, Find, Held, NO_BINARY, Outcome, Snapshot, View, fault_text,
+    guarded, run, snapshot, tabled,
 };
 use params::{DESERIALIZE_PREFIX, misfit};
 pub use read::{Loaded, SERVER_RESOURCES, ask, read_engine};
@@ -674,31 +674,34 @@ mod tests {
             at: 0x1000,
             name: "start".to_owned(),
         }];
-        let plan = s
+        let (plan, _) = s
             .edit(&edits, Force::Refuse, Apply::Commit)
             .expect("planned");
         assert!(!plan.lines().is_empty());
         assert!(plain.overlay.names.is_empty());
     }
 
-    /// An applied edit through a face that holds proposals answers as the
-    /// dry run's words say it would, hands the face the plan, and changes
-    /// none of the names the face reads.
+    /// Every edit tool, applied on a face that holds proposals, says the
+    /// edit was proposed and not applied.
+    ///
+    /// It never says it was applied, it hands the face the plan, and it
+    /// changes none of the names the face reads.
     ///
     /// # Panics
     ///
-    /// When the face keeps no plan, the plan says otherwise, or a name lands.
+    /// When an answer reads as committed, the face keeps no plan, or a name
+    /// lands.
     #[test]
     fn an_applied_edit_is_a_proposal_on_a_face_that_keeps_plans() {
         use std::cell::RefCell;
         use std::sync::Arc;
 
-        use borer_engine::analysis::edit::{self, Edit, Force, Plan};
+        use borer_engine::analysis::edit::{Edit, Force, Plan};
         use borer_engine::analysis::{Analysis, Overlay};
         use borer_engine::answer::Need;
         use borer_engine::program::{Arch, Program, Section};
 
-        use super::{Apply, Failure, Held, Loaded, Snapshot, View, tool};
+        use super::{Apply, Edited, Failure, Held, Loaded, Snapshot, View, tool};
 
         /// The plain face, keeping each plan an edit tool hands it.
         struct Proposing {
@@ -719,11 +722,11 @@ mod tests {
                 s: &Snapshot<'_>,
                 edits: &[Edit],
                 force: Force,
-                _apply: Apply,
-            ) -> anyhow::Result<Plan> {
-                let plan = edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)?;
-                self.kept.borrow_mut().push(plan.clone());
-                Ok(plan)
+                apply: Apply,
+            ) -> anyhow::Result<Edited> {
+                let edited = self.loaded.edit(s, edits, force, apply)?;
+                self.kept.borrow_mut().push(edited.0.clone());
+                Ok(edited)
             }
             fn querier(&self) -> borer_engine::script::Query {
                 self.loaded.querier()
@@ -732,35 +735,69 @@ mod tests {
                 self.loaded.read(uri)
             }
         }
+        let mut code = vec![0xc3; 0x10];
+        // ASM: mov dword [rcx+0x24], 5; ret
+        code[..8].copy_from_slice(&[0xc7, 0x41, 0x24, 0x05, 0x00, 0x00, 0x00, 0xc3]);
         let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
-        let program = Program::raw(vec![0xc3; 0x10], Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        let mut overlay = Overlay::default();
+        overlay.names.insert(0x1000, "Foo::Set".to_owned());
         let face = Proposing {
             loaded: Loaded {
                 analysis: Arc::new(Analysis::compute(&program)),
                 program: Arc::new(program),
-                overlay: Overlay::default(),
+                overlay,
             },
             kept: RefCell::new(Vec::new()),
         };
-        let set_name = tool("set_name").expect("a catalog tool");
-        let asked = |dry_run: bool| {
-            serde_json::json!({"address": "0x1000", "name": "start", "dry_run": dry_run})
-                .as_object()
-                .cloned()
-                .unwrap_or_default()
-        };
-        let dry = (set_name.run)(&face, asked(true)).expect("planned");
-        let applied = (set_name.run)(&face, asked(false)).expect("proposed");
-        assert!(dry.starts_with("dry-run: would "), "{dry}");
-        assert!(!applied.starts_with("dry-run"), "{applied}");
-        let kept = face.kept.borrow();
-        assert_eq!(kept.len(), 2);
-        assert_eq!(kept[0].lines(), kept[1].lines());
-        assert!(face.loaded.overlay.names.is_empty());
+        let calls = [
+            (
+                "set_name",
+                serde_json::json!({"address": "0x1000", "name": "start"}),
+            ),
+            (
+                "set_name",
+                serde_json::json!({"names": ["0x1000=a", "0x1008=b"]}),
+            ),
+            (
+                "set_comment",
+                serde_json::json!({"address": "0x1000", "comment": "entry"}),
+            ),
+            (
+                "set_type",
+                serde_json::json!({"name": "S", "fields": ["0:a:u32"]}),
+            ),
+            (
+                "set_type",
+                serde_json::json!({"type": "struct D { int x; };"}),
+            ),
+            (
+                "class_layout",
+                serde_json::json!({"class": "Foo", "apply": "FooS"}),
+            ),
+            (
+                "script",
+                serde_json::json!({"code": "rename(0x1000, \"s\");"}),
+            ),
+        ];
+        for (name, args) in calls {
+            let t = tool(name).expect("a catalog tool");
+            let mut args = args.as_object().cloned().unwrap_or_default();
+            let dry = (t.run)(&face, args.clone()).expect("planned");
+            args.insert("dry_run".to_owned(), false.into());
+            let kept = face.kept.borrow().len();
+            let applied = (t.run)(&face, args).expect("proposed");
+            assert!(dry.contains("dry-run"), "{name}: {dry}");
+            assert!(
+                applied.contains("proposed, not applied: waits for the person to accept:"),
+                "{name}: {applied}"
+            );
+            assert!(!applied.contains("# applied"), "{name}: {applied}");
+            assert_eq!(face.kept.borrow().len(), kept + 1, "{name}");
+        }
         let names =
-            (tool("annotations").expect("a catalog tool").run)(&face, serde_json::Map::new())
-                .expect("lists");
-        assert!(!names.contains("start"), "{names}");
+            (tool("annotations").expect("a catalog tool").run)(&face, serde_json::Map::new());
+        assert!(names.is_ok_and(|n| !n.contains("start")));
     }
 
     /// A face without the server's session answers what the engine

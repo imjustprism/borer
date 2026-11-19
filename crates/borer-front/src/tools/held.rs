@@ -148,6 +148,32 @@ pub enum Apply {
     Commit,
 }
 
+impl Apply {
+    /// Returns what became of a plan the face did not write: planned for a
+    /// dry run, a proposal where a commit was asked.
+    #[must_use]
+    pub const fn unwritten(self) -> Outcome {
+        match self {
+            Self::Preview => Outcome::Planned,
+            Self::Commit => Outcome::Proposed,
+        }
+    }
+}
+
+/// What a face did with an edit tool's plan, which the tool's answer says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Outcome {
+    /// Planned only, as a dry run asked.
+    Planned,
+    /// Written to the names in force.
+    Committed,
+    /// Held as a proposal for a person to accept; nothing was written.
+    Proposed,
+}
+
+/// A plan and what the face did with it.
+pub type Edited = (Plan, Outcome);
+
 /// What a front end holds for its tools: one program, its analysis and the
 /// names in force.
 ///
@@ -203,21 +229,20 @@ pub trait Held {
     /// through, so a face decides whether a plan lands or waits as a
     /// proposal.
     ///
-    /// This default only plans, whatever `apply` asks: a face that holds
-    /// proposals for a person overrides it to keep the plan, which the
-    /// tool's answer words as applied when `apply` asked, so the face shows
-    /// it as a proposal and never commits it from the handler.
+    /// This default never commits: asked to, it answers
+    /// [`Outcome::Proposed`], and a face that holds proposals for a person
+    /// overrides it to keep the plan for that person to accept.
     ///
     /// # Arguments
     ///
     /// * `s` - The snapshot the tool read.
     /// * `edits` - The edits.
     /// * `force` - Whether a name another address answers to is taken.
-    /// * `_apply` - Whether to commit where the face commits.
+    /// * `apply` - Whether to commit where the face commits.
     ///
     /// # Returns
     ///
-    /// The plan, committed when the face committed it.
+    /// The plan, and what the face did with it.
     ///
     /// # Errors
     ///
@@ -228,9 +253,10 @@ pub trait Held {
         s: &Snapshot<'_>,
         edits: &[Edit],
         force: Force,
-        _apply: Apply,
-    ) -> anyhow::Result<Plan> {
-        edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)
+        apply: Apply,
+    ) -> anyhow::Result<Edited> {
+        let plan = edit::plan(s.program(), s.analysis(), s.overlay(), edits, force)?;
+        Ok((plan, apply.unwritten()))
     }
 
     /// Returns how a script's `query(uri)` reads a resource on this face:
@@ -447,7 +473,7 @@ impl Snapshot<'_> {
     ///
     /// An [`edit::Refused`] naming the edit refused, the cap the edits
     /// would pass, or why the face did not commit.
-    pub fn edit(&self, edits: &[Edit], force: Force, apply: Apply) -> anyhow::Result<Plan> {
+    pub fn edit(&self, edits: &[Edit], force: Force, apply: Apply) -> anyhow::Result<Edited> {
         self.held.edit(self, edits, force, apply)
     }
 }

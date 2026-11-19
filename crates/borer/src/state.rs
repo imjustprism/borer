@@ -9,7 +9,7 @@ use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::answer::Need;
 use borer_engine::pack::{Pack, Packs};
 use borer_engine::program::{Feature, Program};
-use borer_front::tools::{Apply, Cause, Failure, Held, Snapshot, View};
+use borer_front::tools::{Apply, Cause, Edited, Failure, Held, Outcome, Snapshot, View};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::InitializeRequestParams;
@@ -712,15 +712,16 @@ impl Held for BorerServer {
         edits: &[Edit],
         force: Force,
         apply: Apply,
-    ) -> anyhow::Result<Plan> {
+    ) -> anyhow::Result<Edited> {
         let (p, a, o) = (s.program(), s.analysis(), s.overlay());
         let made = edit::plan(p, a, o, edits, force)?;
         if apply == Apply::Preview {
-            return Ok(made);
+            return Ok((made, Outcome::Planned));
         }
-        self.commit((p, Some(s.program_arc())), made, |now| {
+        let committed = self.commit((p, Some(s.program_arc())), made, |now| {
             edit::plan(p, a, &tabled(now), edits, force)
-        })
+        })?;
+        Ok((committed, Outcome::Committed))
     }
 
     /// A script reads what [`BorerServer::listing`] answers: every resource
