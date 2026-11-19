@@ -654,6 +654,10 @@ impl View {
     /// address: the line showing it, else the first line written from a
     /// block holding it, by the bounds of that line's own function's block.
     ///
+    /// One pass over the lines; a run of lines from one block asks once,
+    /// and each block is found among its function's sorted blocks by
+    /// binary search.
+    ///
     /// # Arguments
     ///
     /// * `a` - The analysis, for the blocks' bounds.
@@ -664,13 +668,28 @@ impl View {
     /// The line, from 0, or `None` when no line stands for it.
     #[must_use]
     pub fn line_for(&self, a: &Analysis, va: u64) -> Option<usize> {
+        let holds = |b: LineBlock| {
+            let blocks = a
+                .function(b.function)
+                .map_or(&[][..], |f| f.blocks.as_slice());
+            let k = blocks.binary_search_by_key(&b.start, |x| x.start).ok();
+            k.and_then(|k| blocks.get(k))
+                .is_some_and(|x| x.start <= va && va < x.end)
+        };
         self.line_of(va).or_else(|| {
+            let mut last: Option<(LineBlock, bool)> = None;
             (0..self.lines()).find(|&i| {
-                self.block(i).is_some_and(|b| {
-                    a.function(b.function)
-                        .and_then(|f| f.blocks.iter().find(|x| x.start == b.start))
-                        .is_some_and(|x| x.start <= va && va < x.end)
-                })
+                let Some(b) = self.block(i) else {
+                    return false;
+                };
+                match last {
+                    Some((seen, hit)) if seen == b => hit,
+                    _ => {
+                        let hit = holds(b);
+                        last = Some((b, hit));
+                        hit
+                    }
+                }
             })
         })
     }
