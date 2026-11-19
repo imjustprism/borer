@@ -43,7 +43,7 @@ fn only_an_apply_makes_a_card_and_it_shows_force(cx: &mut TestAppContext) {
         text.join("\n")
     };
     assert!(
-        shown(&cards[0]).contains("chat_two"),
+        shown(&cards[0]).contains(&crate::chat::card::breakable("chat_two")),
         "{}",
         shown(&cards[0])
     );
@@ -248,17 +248,20 @@ fn the_card_shows_the_name_accept_commits(cx: &mut TestAppContext) {
     assert_eq!(cards.len(), 2, "{cards:?}");
     assert!(
         cards[0].contains(&format!(
-            "name: {} \u{2192} log_flush",
-            crate::chat::shown(&hostile)
+            "name: {} \u{2192} {}",
+            crate::chat::shown(&hostile),
+            crate::chat::card::breakable("log_flush")
         )),
         "{:?}",
         cards[0]
     );
-    assert!(
-        cards[0].iter().all(|l| !l.contains('\u{200b}')),
-        "{:?}",
-        cards[0]
-    );
+    let ours = |l: &str| {
+        l.match_indices('\u{200b}')
+            .all(|(at, _)| l.get(..at).is_some_and(|before| before.ends_with('_')))
+    };
+    assert!(cards[0].iter().all(|l| ours(l)), "{:?}", cards[0]);
+    let drawn = crate::chat::card::breakable(&crate::chat::shown("a_b\u{200b}c"));
+    assert!(drawn.contains("\\u{200b}") && ours(&drawn), "{drawn:?}");
     assert!(
         cards[0]
             .iter()
@@ -315,10 +318,11 @@ fn a_refused_card_never_wedges_the_queue(cx: &mut TestAppContext) {
 
 /// A long new name wraps inside its card rather than running past the edge, so the card
 /// shows all of the name Accept commits: one of 46 characters at the dock's default width,
-/// and one of 256.
+/// and one of 256. Renamed again, the 256-character name it has now keeps to one line
+/// inside the card, and the new name stays inside the fields' area, seen without scrolling.
 #[gpui::test]
 fn a_long_new_name_wraps_inside_its_card(cx: &mut TestAppContext) {
-    use crate::chat::card::{BECOMES_SELECTOR, CARD_SELECTOR};
+    use crate::chat::card::{BECOMES_SELECTOR, CARD_SELECTOR, FIELDS_SELECTOR, NOW_SELECTOR};
     let (app, panel, _, cx) = docked(cx);
     let (thread, fake, model) = talking(&panel, cx);
     let names = [
@@ -337,4 +341,22 @@ fn a_long_new_name_wraps_inside_its_card(cx: &mut TestAppContext) {
             name.len()
         );
     }
+    let head = thread.read_with(cx, |t, _| t.head()).unwrap();
+    thread.update(cx, |t, cx| t.accept(head, cx));
+    cx.run_until_parked();
+    have_proposed(&app, &thread, &fake, &model, &["short_name"], cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let card = cx.debug_bounds(CARD_SELECTOR).unwrap();
+    let now = cx.debug_bounds(NOW_SELECTOR).unwrap();
+    let fields = cx.debug_bounds(FIELDS_SELECTOR).unwrap();
+    let becomes = cx.debug_bounds(BECOMES_SELECTOR).unwrap();
+    assert!(now.right() <= card.right(), "{now:?} runs past {card:?}");
+    assert!(
+        now.size.height <= becomes.size.height + gpui::px(0.5),
+        "{now:?} takes more lines than {becomes:?}"
+    );
+    assert!(
+        becomes.top() >= fields.top() && becomes.bottom() <= fields.bottom(),
+        "{becomes:?} is outside {fields:?}"
+    );
 }

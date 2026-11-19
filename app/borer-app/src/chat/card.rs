@@ -13,8 +13,8 @@ use gpui::{
     Styled as _, Window, div, px,
 };
 use ui::{
-    ActiveTheme as _, Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color, Icon,
-    IconName, IconSize, KeyBinding, Label, LabelCommon as _, LabelSize, TintColor, h_flex, v_flex,
+    ActiveTheme as _, ButtonStyle, Clickable as _, Color, Icon, IconName, IconSize, KeyBinding,
+    Label, LabelCommon as _, LabelSize, TintColor, Tooltip, h_flex, v_flex,
 };
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -25,6 +25,7 @@ use borer_engine::text;
 #[cfg(test)]
 use super::thread::Proposal;
 use super::thread::Verdict;
+use super::view::text_button;
 use super::{AcceptChatProposal, ChatPanel, RejectChatProposal, shown as shown_text};
 use borer_engine::analysis::edit::Author;
 
@@ -33,6 +34,18 @@ const LABEL_WIDTH: f32 = 64.0;
 
 /// Debug selector of the name a rename's row says it becomes, for layout tests.
 pub(crate) const BECOMES_SELECTOR: &str = "chat-card-becomes";
+
+/// Debug selector of the name a rename's row says it has now, for layout tests.
+pub(crate) const NOW_SELECTOR: &str = "chat-card-now";
+
+/// Debug selector of a card's fields, the area they scroll in, for layout tests.
+pub(crate) const FIELDS_SELECTOR: &str = "chat-card-fields";
+
+/// Debug selector of the head card's Reject button, for layout tests.
+pub(crate) const REJECT_SELECTOR: &str = "chat-card-reject";
+
+/// Debug selector of the head card's Accept button, for layout tests.
+pub(crate) const ACCEPT_SELECTOR: &str = "chat-card-accept";
 
 /// Debug selector of a proposal card, for layout tests.
 pub(crate) const CARD_SELECTOR: &str = "chat-card";
@@ -252,16 +265,16 @@ fn rows(fields: Vec<Field>) -> Vec<Row> {
 
 /// Returns each row of `proposal`'s card ([`rows`]) as one line with its color.
 ///
-/// The color is that of what the row commits; the text is `address 0x...`, a plan line as
-/// it is, `name: ` then the name now, an arrow (U+2192) and the new name for a rename, else
-/// `label: value`.
+/// The color is that of what the row commits; the text is what the card draws:
+/// `address 0x...`, a plan line as it is, `name: ` then the name now, an arrow (U+2192)
+/// and the new name ([`breakable`]) for a rename, else `label: value`.
 #[cfg(test)]
 pub(crate) fn lines(proposal: &Proposal) -> Vec<(String, Color)> {
     rows(proposal.shown.fields.clone())
         .into_iter()
         .map(|row| match row {
             Row::Renamed(now, new) => (
-                format!("name: {} \u{2192} {}", now.value, new.value),
+                format!("name: {} \u{2192} {}", now.value, breakable(&new.value)),
                 color_of(new.kind),
             ),
             Row::One(f) => {
@@ -276,6 +289,18 @@ pub(crate) fn lines(proposal: &Proposal) -> Vec<(String, Color)> {
             }
         })
         .collect()
+}
+
+/// Returns a name as a card draws the name it becomes, able to wrap after each `_`.
+///
+/// It puts a zero-width space after each `_`; the name is written out first
+/// ([`text::visible`]), so the only raw zero-width spaces in what is drawn are these.
+///
+/// # Arguments
+///
+/// * `name` - The name, written out.
+pub(crate) fn breakable(name: &str) -> String {
+    name.replace('_', "_\u{200b}")
 }
 
 /// Returns the color a field of `kind` is drawn in.
@@ -348,7 +373,6 @@ fn receipt(shown: &Shown, verdict: &Verdict) -> Option<AnyElement> {
     Some(
         h_flex()
             .px_4()
-            .py_1()
             .gap_1p5()
             .child(Icon::new(icon).size(IconSize::Small).color(color))
             .child(
@@ -402,8 +426,8 @@ fn proposed_by(author: &Author) -> String {
 fn card_title(id: usize, title: String, cx: &App) -> impl IntoElement {
     h_flex()
         .px_2()
-        .py_1p5()
-        .gap_1p5()
+        .py_2()
+        .gap_2()
         .border_b_1()
         .border_color(cx.theme().colors().border_variant)
         .child(div().min_w_0().flex_1().child(Label::new(title).truncate()))
@@ -452,7 +476,6 @@ impl ChatPanel {
             .id(("chat-card", id))
             .debug_selector(|| CARD_SELECTOR.to_owned())
             .mx_2()
-            .my_1()
             .rounded_md()
             .border_1()
             .border_color(border)
@@ -463,7 +486,7 @@ impl ChatPanel {
                 v_flex()
                     .px_2()
                     .py_2()
-                    .gap_1p5()
+                    .gap_2()
                     .children(summary)
                     .children(force)
                     .child(body)
@@ -547,7 +570,7 @@ impl ChatPanel {
             let gap = n > 0 && matches!(&row, Row::One(f) if matches!(f.kind, Kind::Address(_)));
             let label = row.label();
             let value = match row {
-                Row::Renamed(now, new) => Self::renamed(now, new, cx),
+                Row::Renamed(now, new) => Self::renamed(id, n, now, &new, cx),
                 Row::One(f) => Self::card_value(id, n, f, cx),
             };
             h_flex()
@@ -564,6 +587,7 @@ impl ChatPanel {
         });
         v_flex()
             .id(("chat-card-fields", id))
+            .debug_selector(|| FIELDS_SELECTOR.to_owned())
             .max_h_64()
             .overflow_y_scroll()
             .gap_0p5()
@@ -595,22 +619,45 @@ impl ChatPanel {
     }
 
     /// Returns a rename as it reads on the card: the name now struck through, an arrow, and
-    /// the name it becomes, wrapping under it when the card is narrow; each name wraps
-    /// within the card, so a long one shows whole.
-    fn renamed(now: Field, becomes: Field, cx: &mut Context<'_, Self>) -> AnyElement {
+    /// the name it becomes, wrapping under it when the card is narrow.
+    ///
+    /// The name now, which Accept does not write, keeps to one line and ends in an ellipsis
+    /// when cut, its whole spelling in its tooltip; the name it becomes shows whole,
+    /// wrapping within the card after a `_` where it can ([`breakable`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - The proposal.
+    /// * `n` - The row's place among the card's rows.
+    /// * `now` - The name it has now.
+    /// * `becomes` - The name Accept writes.
+    /// * `cx` - Panel context.
+    fn renamed(
+        id: usize,
+        n: usize,
+        now: Field,
+        becomes: &Field,
+        cx: &mut Context<'_, Self>,
+    ) -> AnyElement {
         h_flex()
             .min_w_0()
             .flex_1()
             .flex_wrap()
             .gap_x_1p5()
             .child(
-                div().min_w_0().child(
-                    Label::new(now.value)
-                        .size(LabelSize::Small)
-                        .buffer_font(cx)
-                        .color(color_of(now.kind))
-                        .strikethrough(),
-                ),
+                div()
+                    .id(SharedString::from(format!("chat-card-now-{id}-{n}")))
+                    .min_w_0()
+                    .debug_selector(|| NOW_SELECTOR.to_owned())
+                    .tooltip(Tooltip::text(now.value.clone()))
+                    .child(
+                        Label::new(now.value)
+                            .size(LabelSize::Small)
+                            .buffer_font(cx)
+                            .color(color_of(now.kind))
+                            .strikethrough()
+                            .truncate(),
+                    ),
             )
             .child(
                 Icon::new(IconName::ArrowRight)
@@ -622,7 +669,7 @@ impl ChatPanel {
                     .min_w_0()
                     .debug_selector(|| BECOMES_SELECTOR.to_owned())
                     .child(
-                        Label::new(becomes.value)
+                        Label::new(breakable(&becomes.value))
                             .size(LabelSize::Small)
                             .buffer_font(cx)
                             .weight(gpui::FontWeight::SEMIBOLD)
@@ -647,9 +694,7 @@ impl ChatPanel {
                 .child(Label::new(text).size(LabelSize::Small).color(color))
         };
         let dismiss = |label: &'static str| {
-            Button::new(("chat-dismiss", id), label)
-                .style(ButtonStyle::Outlined)
-                .label_size(LabelSize::Small)
+            text_button(("chat-dismiss", id), label, ButtonStyle::Outlined)
                 .key_binding(
                     KeyBinding::for_action_in(&menu::Cancel, &self.card, cx).size(KEY_SIZE),
                 )
@@ -663,7 +708,7 @@ impl ChatPanel {
             .items_center()
             .justify_end()
             .px_2()
-            .py_1p5()
+            .py_2()
             .border_t_1()
             .border_color(cx.theme().colors().border_variant);
         match (verdict, head) {
@@ -672,18 +717,32 @@ impl ChatPanel {
                     "Nothing changes until you accept.".to_owned(),
                     Color::Muted,
                 ))
-                .child(dismiss("Reject"))
                 .child(
-                    Button::new(("chat-accept", id), "Accept")
-                        .style(ButtonStyle::Tinted(TintColor::Accent))
-                        .label_size(LabelSize::Small)
-                        .key_binding(
-                            KeyBinding::for_action_in(&menu::Confirm, &self.card, cx)
-                                .size(KEY_SIZE),
+                    h_flex()
+                        .gap_1()
+                        .child(
+                            div()
+                                .debug_selector(|| REJECT_SELECTOR.to_owned())
+                                .child(dismiss("Reject")),
                         )
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.decide(id, true, window, cx);
-                        })),
+                        .child(
+                            div().debug_selector(|| ACCEPT_SELECTOR.to_owned()).child(
+                                text_button(
+                                    ("chat-accept", id),
+                                    "Accept",
+                                    ButtonStyle::Tinted(TintColor::Accent),
+                                )
+                                .key_binding(
+                                    KeyBinding::for_action_in(&menu::Confirm, &self.card, cx)
+                                        .size(KEY_SIZE),
+                                )
+                                .on_click(cx.listener(
+                                    move |this, _, window, cx| {
+                                        this.decide(id, true, window, cx);
+                                    },
+                                )),
+                            ),
+                        ),
                 )
                 .into_any_element(),
             (Verdict::Waiting | Verdict::Refused(_) | Verdict::Stale, false) => row
@@ -707,14 +766,17 @@ impl ChatPanel {
                     "the binary changed since it was planned".to_owned(),
                     Color::Warning,
                 ))
-                .child(dismiss("Dismiss"))
                 .child(
-                    Button::new(("chat-again", id), "Plan Again")
-                        .style(ButtonStyle::Filled)
-                        .label_size(LabelSize::Small)
+                    h_flex().gap_1().child(dismiss("Dismiss")).child(
+                        text_button(
+                            ("chat-again", id),
+                            "Plan Again",
+                            ButtonStyle::Tinted(TintColor::Accent),
+                        )
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.thread.update(cx, |t, cx| t.plan_again(id, cx));
                         })),
+                    ),
                 )
                 .into_any_element(),
             (Verdict::Accepted | Verdict::Rejected, _) => row.into_any_element(),

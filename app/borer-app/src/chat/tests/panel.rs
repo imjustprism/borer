@@ -7,7 +7,7 @@ use gpui::{
 };
 use serde_json::json;
 
-use super::{ask_each, chatting, docked, have_proposed, remote, talking, verdicts_of};
+use super::{ask_each, behind, chatting, docked, have_proposed, remote, talking, verdicts_of};
 use crate::chat::card::{CHANGES_SHOWN, Kind, shown};
 use crate::chat::providers::{Endpoint, KEY_ENTRY, Offered, key_entry};
 use crate::chat::thread::{Arg, Entry, FENCE_OPEN, Fault, Ran, Verdict, first_lines, key_of};
@@ -276,4 +276,139 @@ fn errors_carry_their_kind_and_retry_only_the_newest(cx: &mut TestAppContext) {
         thread.read_with(cx, |t, _| t.retry_at(failed).map(str::to_owned)),
         None
     );
+}
+
+/// Where the header says requests go is laid out whole beside or under a long model's
+/// name, inside the header, at the dock's default width: as wide as beside a short name.
+#[gpui::test]
+fn the_header_never_cuts_where_requests_go(cx: &mut TestAppContext) {
+    use crate::chat::view::{HEADER_SELECTOR, HINT_SELECTOR};
+    let (_app, panel, _, cx) = docked(cx);
+    let (thread, fake, model) = talking(&panel, cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let short = cx.debug_bounds(HINT_SELECTOR).unwrap();
+    let mut long = behind(
+        &fake,
+        &model,
+        (Offered::OpenRouter, "https://openrouter.ai/api/v1"),
+        "google/gemini-2.5-flash-preview-05-20:thinking",
+    );
+    long.model.name = language_model::LanguageModelName(
+        "Google: Gemini 2.5 Flash Preview 05-20 (thinking)".into(),
+    );
+    let want = behind(
+        &fake,
+        &model,
+        (Offered::OpenRouter, "https://openrouter.ai/api/v1"),
+        "short",
+    );
+    thread.update(cx, |t, cx| t.choose(want, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let beside = cx.debug_bounds(HINT_SELECTOR).unwrap();
+    thread.update(cx, |t, cx| t.choose(long, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let hint = cx.debug_bounds(HINT_SELECTOR).unwrap();
+    let header = cx.debug_bounds(HEADER_SELECTOR).unwrap();
+    assert!(short.size.width > gpui::px(0.0), "{short:?}");
+    assert!(
+        (hint.size.width - beside.size.width).abs() < gpui::px(0.5),
+        "{hint:?} is narrower than {beside:?}"
+    );
+    assert!(
+        hint.right() <= header.right() && hint.bottom() <= header.bottom(),
+        "{hint:?} is outside {header:?}"
+    );
+}
+
+/// An opened call shows the first lines of a long input and counts the rest, so its
+/// Output heading sits just under them, never pushed away.
+#[gpui::test]
+fn an_opened_call_caps_its_input(cx: &mut TestAppContext) {
+    use crate::chat::view::{INPUT_LINES, INPUT_SELECTOR, OUTPUT_SELECTOR};
+    let (_app, panel, _, cx) = docked(cx);
+    let (thread, fake, model) = talking(&panel, cx);
+    let mut args = serde_json::Map::new();
+    args.insert("uri".to_owned(), json!("borer://triage"));
+    for n in 0..11 {
+        args.insert(format!("k{n:02}"), json!(n));
+    }
+    ask_each(&thread, &fake, &model, &[("query", args.into())], cx);
+    let ix = thread.read_with(cx, |t, _| {
+        let ix = t
+            .entries()
+            .iter()
+            .position(|e| matches!(e, Entry::Tool(_)))
+            .unwrap();
+        assert_eq!(t.call_at(ix).unwrap().args.lines().count(), 14);
+        assert_eq!(t.call_at(ix).unwrap().arg_lines, 14);
+        ix
+    });
+    panel.update(cx, |panel, cx| panel.toggle_call(ix, cx));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let input = cx.debug_bounds(INPUT_SELECTOR).unwrap();
+    let heading = cx.debug_bounds(OUTPUT_SELECTOR).unwrap();
+    let rows = f32::from(u16::try_from(INPUT_LINES + 2).unwrap());
+    assert!(
+        input.size.height <= heading.size.height * rows,
+        "{input:?} is taller than {rows} rows of {heading:?}"
+    );
+    assert!(heading.top() >= input.bottom(), "{heading:?} {input:?}");
+}
+
+/// A held message's Don't Send sits left of its Send, and a card's Reject left of its
+/// Accept: the safe action first, the committing one last.
+#[gpui::test]
+fn the_safe_button_sits_left_of_the_committing_one(cx: &mut TestAppContext) {
+    use crate::chat::card::{ACCEPT_SELECTOR, REJECT_SELECTOR};
+    use crate::chat::view::{DONT_SEND_SELECTOR, SEND_SELECTOR};
+    let (app, panel, _, cx) = docked(cx);
+    let fake = cx.update(|_, cx| language_model::LanguageModelRegistry::test(cx));
+    let model = fake.model("fake");
+    let thread = panel.read_with(cx, |p, _| p.thread().clone());
+    thread.update(cx, |t, cx| t.choose(remote(&fake, &model), cx));
+    thread.update(cx, |t, cx| t.send("Name it".to_owned(), cx));
+    cx.run_until_parked();
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let dont = cx.debug_bounds(DONT_SEND_SELECTOR).unwrap();
+    let send = cx.debug_bounds(SEND_SELECTOR).unwrap();
+    assert!(dont.right() <= send.left(), "{dont:?} {send:?}");
+    thread.update(cx, |t, cx| t.agree(cx));
+    cx.run_until_parked();
+    fake.end_last(&model);
+    cx.run_until_parked();
+    have_proposed(&app, &thread, &fake, &model, &["chat_a"], cx);
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let reject = cx.debug_bounds(REJECT_SELECTOR).unwrap();
+    let accept = cx.debug_bounds(ACCEPT_SELECTOR).unwrap();
+    assert!(reject.right() <= accept.left(), "{reject:?} {accept:?}");
+}
+
+/// The Send button is enabled only while the input holds something but whitespace, and
+/// Enter with no model picked keeps what was typed and opens the picker instead of
+/// sending it into an error.
+#[gpui::test]
+fn send_waits_for_text_and_a_model(cx: &mut TestAppContext) {
+    let (_app, panel, _, cx) = docked(cx);
+    let type_in = |text: &'static str, cx: &mut VisualTestContext| {
+        panel.update_in(cx, |panel, window, cx| {
+            panel.input.update(cx, |i, cx| i.set_text(text, window, cx));
+        });
+        cx.run_until_parked();
+        panel.read_with(cx, |panel, _| panel.sendable)
+    };
+    assert!(!type_in("", cx));
+    assert!(!type_in("  \n", cx));
+    assert!(type_in("keep me", cx));
+    panel.update_in(cx, |panel, window, cx| panel.send(window, cx));
+    cx.run_until_parked();
+    let (kept, entries, shown) = panel.read_with(cx, |panel, cx| {
+        (
+            panel.input.read(cx).text(cx),
+            panel.thread().read(cx).entries().len(),
+            panel.picker.is_deployed(),
+        )
+    });
+    assert_eq!(kept, "keep me");
+    assert_eq!(entries, 0);
+    assert!(shown, "the picker did not open");
 }

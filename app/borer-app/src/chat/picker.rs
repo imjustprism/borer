@@ -8,14 +8,15 @@ use gpui::{
     StatefulInteractiveElement as _, Styled as _, Subscription, WeakEntity, Window, div, px,
 };
 use ui::{
-    ActiveTheme as _, Button, ButtonCommon as _, ButtonStyle, Clickable as _, Color, Icon,
-    IconButton, IconName, IconSize, Label, LabelCommon as _, LabelSize, ListItem, ListItemSpacing,
-    ListSubHeader, StyledExt as _, Tooltip, h_flex, v_flex,
+    ActiveTheme as _, ButtonCommon as _, ButtonStyle, Clickable as _, Color, Icon, IconButton,
+    IconName, IconSize, Label, LabelCommon as _, LabelSize, ListItem, ListItemSpacing,
+    ListSubHeader, StyledExt as _, TintColor, Tooltip, h_flex, v_flex,
 };
 
 use borer_engine::text;
 
 use super::providers::{Endpoint, Offered};
+use super::view::text_button;
 use super::{ChatPanel, ForgetChatKey};
 
 /// Width of the picker's popover.
@@ -98,16 +99,23 @@ impl ChatPicker {
                 ),
             )
             .child(
-                Button::new("chat-keep-key", "Keep").on_click(move |_, _, cx| {
-                    no.update(cx, |panel, cx| {
-                        panel.forgetting = false;
-                        cx.notify();
-                    })
-                    .unwrap_or(());
-                }),
+                text_button("chat-keep-key", "Keep", ButtonStyle::Outlined).on_click(
+                    move |_, _, cx| {
+                        no.update(cx, |panel, cx| {
+                            panel.forgetting = false;
+                            cx.notify();
+                        })
+                        .unwrap_or(());
+                    },
+                ),
             )
             .child(
-                Button::new("chat-forget-key", "Forget").on_click(move |_, _, cx| {
+                text_button(
+                    "chat-forget-key",
+                    "Forget",
+                    ButtonStyle::Tinted(TintColor::Error),
+                )
+                .on_click(move |_, _, cx| {
                     yes.update(cx, |panel, cx| panel.forget_key(cx))
                         .unwrap_or(());
                 }),
@@ -149,12 +157,15 @@ impl ChatPicker {
                             .child(div().w_full().child(key.clone())),
                     )
                     .child(
-                        Button::new("chat-save-key", "Save")
-                            .style(ButtonStyle::Filled)
-                            .on_click(move |_, window, cx| {
-                                weak.update(cx, |panel, cx| panel.save_key(window, cx))
-                                    .unwrap_or(());
-                            }),
+                        text_button(
+                            "chat-save-key",
+                            "Save",
+                            ButtonStyle::Tinted(TintColor::Accent),
+                        )
+                        .on_click(move |_, window, cx| {
+                            weak.update(cx, |panel, cx| panel.save_key(window, cx))
+                                .unwrap_or(());
+                        }),
                     )
                     .child(
                         IconButton::new("chat-ask-forget", IconName::Trash)

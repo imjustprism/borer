@@ -93,8 +93,8 @@ pub enum Entry {
 /// Most lines of a tool's answer a call keeps for the person to read.
 const HEAD_LINES: usize = 12;
 
-/// Most bytes of a tool's answer a call keeps for the person to read.
-const HEAD_BYTES: usize = 2048;
+/// Most bytes of a tool's answer, or of its arguments, a call keeps for the person to read.
+pub(crate) const HEAD_BYTES: usize = 2048;
 
 /// A tool call the thread shows, and what became of it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -105,6 +105,11 @@ pub struct Call {
     pub name: String,
     /// Its arguments as indented JSON, cut to [`HEAD_BYTES`].
     pub args: String,
+    /// How many lines its arguments' indented JSON has before the cut.
+    pub arg_lines: usize,
+    /// How many bytes its arguments' indented JSON has before the cut: more than
+    /// [`Call::args`] holds when it was cut.
+    pub arg_bytes: usize,
     /// The argument that says what it reads, on one line, and whether it is the tool's
     /// `address` parameter, which names a place in the binary.
     pub key: Option<(String, Arg)>,
@@ -157,6 +162,19 @@ pub enum Ran {
     TimedOut,
     /// The turn stopped before it answered.
     Cancelled,
+}
+
+/// Returns a call's arguments as the person reads them: indented JSON cut to
+/// [`HEAD_BYTES`], with how many lines and bytes it has before the cut.
+///
+/// # Arguments
+///
+/// * `args` - The call's arguments.
+pub(crate) fn shown_args(args: &serde_json::Value) -> (String, usize, usize) {
+    let mut pretty = serde_json::to_string_pretty(args).unwrap_or_default();
+    let (lines, bytes) = (pretty.lines().count(), pretty.len());
+    pretty.truncate(pretty.floor_char_boundary(HEAD_BYTES));
+    (pretty, lines, bytes)
 }
 
 /// Returns the first lines of `text`, at most [`HEAD_LINES`] lines and [`HEAD_BYTES`] bytes.
@@ -477,7 +495,8 @@ impl Thread {
     /// # Arguments
     ///
     /// * `sent` - What the model was sent, cut and fenced, or why it was refused or failed.
-    pub(crate) fn settle_call(&mut self, sent: Result<&str, &str>) {
+    /// * `cx` - Thread context, notified so the call's row is drawn settled.
+    pub(crate) fn settle_call(&mut self, sent: Result<&str, &str>, cx: &mut Context<'_, Self>) {
         let Some(call) = self.calls.iter_mut().rfind(|c| c.ran == Ran::Running) else {
             return;
         };
@@ -488,6 +507,7 @@ impl Thread {
             },
             Err(why) => Ran::Failed(one_line(why)),
         };
+        cx.notify();
     }
 
     /// Marks the newest running call as past its deadline.
@@ -930,6 +950,7 @@ impl Thread {
                 let (tool, why) = (one_line(&call.name), one_line(why));
                 let said = format!("the arguments of {tool} did not parse as JSON: {why}");
                 self.fail(Fault::Model, format!("the model's {said}"));
+                cx.notify();
                 return Task::ready(Err(format!(
                     "{said}; call {tool} again with JSON arguments"
                 )));
@@ -938,15 +959,17 @@ impl Thread {
         let name = call.name.to_string();
         let shown = one_line(&format!("{name} {args}"));
         self.entries.push(Entry::Tool(shown));
-        let mut pretty = serde_json::to_string_pretty(&args).unwrap_or_default();
-        pretty.truncate(pretty.floor_char_boundary(HEAD_BYTES));
+        let (pretty, arg_lines, arg_bytes) = shown_args(&args);
         self.calls.push(Call {
             entry: self.entries.len().saturating_sub(1),
             name: one_line(&name),
             args: pretty,
+            arg_lines,
+            arg_bytes,
             key: key_of(&args),
             ran: Ran::Running,
         });
+        cx.notify();
         let file = crate::recent::file_name(&loaded.program.path);
         if !self.files.contains(&file) {
             self.files.push(file);
@@ -961,9 +984,10 @@ impl Thread {
         cx.spawn(
             async move |this, cx| match within_deadline(ran, timer).await {
                 Err(()) => {
-                    this.update(cx, |thread, _| {
+                    this.update(cx, |thread, cx| {
                         if thread.generation == generation {
                             thread.time_out_call();
+                            cx.notify();
                         }
                     })
                     .unwrap_or(());
@@ -1044,8 +1068,9 @@ async fn run_turn(
         let provider = chosen.model.provider_name.0.clone();
         let asked = chosen.client.stream_completion(&chosen.model, request, cx);
         let mut events = within(cx, &provider, asked).await??;
-        step(this, generation, cx, |thread, _| {
+        step(this, generation, cx, |thread, cx| {
             thread.entries.push(Entry::Model(String::new()));
+            cx.notify();
         })?;
         let (mut text, mut uses) = (String::new(), Vec::new());
         while let Some(event) = within(cx, &provider, events.next()).await? {
@@ -1111,8 +1136,8 @@ async fn run_turn(
                 };
                 let text = cut(text, &mut room, narrow);
                 let sent = fenced(&text);
-                step(this, generation, cx, |t, _| {
-                    t.settle_call(if is_error { Err(&text) } else { Ok(&sent) });
+                step(this, generation, cx, |t, cx| {
+                    t.settle_call(if is_error { Err(&text) } else { Ok(&sent) }, cx);
                 })?;
                 (is_error, text)
             };

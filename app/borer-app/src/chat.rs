@@ -264,6 +264,9 @@ pub struct ChatPanel {
     armed: Option<usize>,
     /// Whether the picker asks to confirm forgetting the picked provider's saved key.
     forgetting: bool,
+    /// Whether the input holds a message that can be sent ([`view::sendable`]), kept as the
+    /// input is edited so the Send button reads it without reading the input each frame.
+    sendable: bool,
     /// What the last action that changed nothing found, as an address in no function.
     note: Option<SharedString>,
     /// Where the person types the picked provider's API key.
@@ -327,6 +330,12 @@ impl ChatPanel {
             _subscriptions: vec![
                 cx.observe(&thread, |this, _, cx| this.follow(cx)),
                 cx.observe(binary, |_, _, cx| cx.notify()),
+                cx.subscribe(&input, |this, input, event: &editor::EditorEvent, cx| {
+                    if matches!(event, editor::EditorEvent::BufferEdited) {
+                        this.sendable = view::sendable(&input.read(cx).text(cx));
+                        cx.notify();
+                    }
+                }),
             ],
             binary: binary.clone(),
             thread,
@@ -338,6 +347,7 @@ impl ChatPanel {
             picker: PopoverMenuHandle::default(),
             armed: None,
             forgetting: false,
+            sendable: false,
             note: None,
             key,
             picked: None,
@@ -665,7 +675,11 @@ impl ChatPanel {
             return;
         }
         let text = self.input.read(cx).text(cx);
-        if text.trim().is_empty() {
+        if !view::sendable(&text) {
+            return;
+        }
+        if self.thread.read(cx).chosen().is_none() {
+            self.picker.show(window, cx);
             return;
         }
         self.input
@@ -699,7 +713,7 @@ impl Render for ChatPanel {
         } else {
             list(
                 self.list.clone(),
-                cx.processor(|this, ix: usize, _, cx| this.entry(ix, cx)),
+                cx.processor(|this, ix: usize, window, cx| this.entry(ix, window, cx)),
             )
             .flex_1()
             .into_any_element()
