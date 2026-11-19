@@ -335,7 +335,7 @@ pub const SERVER_ONLY: &[(&str, &str)] = &[
     ("binary_info", "it lists the resources the MCP server holds"),
     (
         "decompile_batch",
-        "it decompiles on the MCP server's rayon pool, and with out writes files under its output root",
+        "with out it writes the C file or mod SDK through the MCP server's output root and exporters, and one tool takes both forms",
     ),
     ("fetch_pdb", "it reaches a symbol server over the network"),
     (
