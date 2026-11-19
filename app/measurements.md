@@ -193,3 +193,14 @@ bar on that run: notepad overview 18.7, large goto 20.9, xrefs 85.7, listing 30.
 19.6, filter 20.4, overview 256.9; large listing settle p95 28.3 (bar 16). Every notepad
 action but overview held its bars; the large-DLL misses fall in the run where the other
 build was compiling and need a run on a quiet machine before they are read as regressions.
+Quiet rerun, 2026-11-19 (no rustc or cargo running from start to end), release build of
+add/app-check-gutter on dev 910979af: first frame median 170.5 ms (bar 300), notepad open
+median 210.1 ms (bar 1000), memory delta 145.8 MB (bar 150), list scroll draw p99 3.1 ms
+and code scroll draw p99 3.2 ms (bar 8.3), input-to-paint p95/p99 9.1/14.7 ms (bar 16),
+call tree expand p95 7.2 ms (bar 50), kept level p95 7.2 ms (bar 16), graph pan and zoom
+draw p99 2.0 and 5.0 ms (bar 8.3), UI-thread engine calls 0. Every action ack held its 16
+ms bar at p95; two missed at p99, each one sample of 50 (p99 is the max at n=50): large
+xrefs 78.9 ms (p95 10.0) and large overview 36.4 ms (p95 9.2). The call tree timed 157
+expansions, not 200, because notepad's tree has no closed node left that asks the engine
+after 157 (the phase stops when none is left), which the bar's count of 200 does not
+allow for.
