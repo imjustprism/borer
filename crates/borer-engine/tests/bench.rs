@@ -52,7 +52,7 @@ use borer_engine::analysis::render::{
     check_generated_iso, repair_iso,
 };
 use borer_engine::analysis::{Analysis, EnumSource, Overlay, name_of};
-use borer_engine::num::usize_f64;
+use borer_engine::num::{as_f64, usize_f64};
 use borer_engine::program::Program;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
@@ -133,8 +133,8 @@ const ANALYSIS_ROUNDS: usize = 24;
 /// runs a side as the five passes timed before the rounds were paired.
 const DECOMPILE_ROUNDS: usize = 5;
 
-/// Most the best time under a progress may be of the best time without one
-/// ([`progress_ratio`]).
+/// Most the least processor time under a progress may be of the least
+/// without one ([`progress_ratio`]).
 ///
 /// The counting is a thread-local read a sweep and an add every 64 items a
 /// worker, so anything past the passes' spread is a regression.
@@ -143,21 +143,43 @@ const REPORTED_RATIO: f64 = 1.10;
 /// Functions decompiled per pass, from the start of the program.
 const SLICE: usize = 2000;
 
-/// Returns how long one run of `f` took, its output dropped after the
-/// clock stops.
+/// What one run cost.
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    /// Its wall-clock time.
+    wall: Duration,
+    /// The processor time every thread of the process spent on it, in the
+    /// ticks of [`borer_live::process_cpu_ticks`].
+    cpu: u64,
+}
+
+/// Returns the processor ticks this process has spent so far.
+#[expect(
+    clippy::expect_used,
+    reason = "a bench that cannot read processor time cannot hold its bar"
+)]
+fn cpu_ticks() -> u64 {
+    borer_live::process_cpu_ticks().expect("the processor time this process spent")
+}
+
+/// Returns what one run of `f` cost, its output dropped after the clocks
+/// stop.
 ///
 /// # Arguments
 ///
 /// * `f` - The work to time.
-fn timed<T>(f: &mut impl FnMut() -> T) -> Duration {
-    let t = Instant::now();
+fn timed<T>(f: &mut impl FnMut() -> T) -> Run {
+    let (t, cpu) = (Instant::now(), cpu_ticks());
     let out = f();
-    let d = t.elapsed();
+    let run = Run {
+        wall: t.elapsed(),
+        cpu: cpu_ticks().saturating_sub(cpu),
+    };
     drop(out);
-    d
+    run
 }
 
-/// Returns the times of `rounds` rounds of `plain` and `under`, after one
+/// Returns the costs of `rounds` rounds of `plain` and `under`, after one
 /// untimed round of each.
 ///
 /// The untimed round builds what the first run would build alone (the
@@ -173,12 +195,12 @@ fn timed<T>(f: &mut impl FnMut() -> T) -> Duration {
 ///
 /// # Returns
 ///
-/// Each timed round's time without the progress and under it, in order.
+/// Each timed round's run without the progress and under it, in order.
 fn paired<T>(
     rounds: usize,
     mut plain: impl FnMut() -> T,
     mut under: impl FnMut() -> T,
-) -> Vec<(Duration, Duration)> {
+) -> Vec<(Run, Run)> {
     timed(&mut plain);
     timed(&mut under);
     (0..rounds)
@@ -194,40 +216,51 @@ fn paired<T>(
         .collect()
 }
 
-/// Returns the best time without a progress and the best under one.
+/// Returns the least cost without a progress and the least under one.
 ///
 /// # Arguments
 ///
-/// * `rounds` - Each round's time without a progress and under one.
+/// * `rounds` - Each round's cost without a progress and under one.
 ///
 /// # Returns
 ///
-/// The two fastest runs; `None` for no rounds.
-fn bests(rounds: &[(Duration, Duration)]) -> Option<(Duration, Duration)> {
+/// The two least costs; `None` for no rounds.
+fn bests<T: Ord + Copy>(rounds: &[(T, T)]) -> Option<(T, T)> {
     let plain = rounds.iter().map(|r| r.0).min()?;
     let under = rounds.iter().map(|r| r.1).min()?;
     Some((plain, under))
 }
 
-/// Returns the best time under a progress over the best time without one,
-/// and whether it is within [`REPORTED_RATIO`].
+/// Returns the least processor time under a progress over the least
+/// without one, and whether it is within [`REPORTED_RATIO`].
 ///
-/// Load only ever adds time, so each side's fastest run is the nearest its
-/// floor: a spike on either side moves no minimum while one run of that
-/// side ran clear of load, and a progress that costs more raises the floor
-/// of every run under it.
+/// Processor time leaves out the time the process waited for a processor,
+/// which is most of what load on the machine adds to a run's wall time.
+/// What load still adds (shared caches and cores) only ever adds, so each
+/// side's least run is the nearest its floor: a spike on either side moves
+/// no minimum while one run of that side ran clear of it, and a progress
+/// that costs more raises the floor of every run under it.
+///
+/// It cannot see a cost that waits rather than computes, or one on the
+/// thread the others wait for, or a sweep that spreads over fewer threads
+/// under a progress. The last is held by a test of the progress module
+/// (`a_progress_takes_no_threads_from_a_sweep`); the first two are held by
+/// nothing here, and the wall ratio [`reported`] prints beside this one is
+/// where a person sees them. No wall bar is asserted: load on the machine
+/// moves the wall ratio as far as a sweep run on one thread does.
 ///
 /// # Arguments
 ///
-/// * `rounds` - Each round's time without a progress and under one.
+/// * `rounds` - Each round's processor ticks without a progress and under
+///   one.
 ///
 /// # Returns
 ///
 /// The ratio and whether it is at most [`REPORTED_RATIO`]; no rounds read
 /// as an infinite ratio, past it.
-fn progress_ratio(rounds: &[(Duration, Duration)]) -> (f64, bool) {
+fn progress_ratio(rounds: &[(u64, u64)]) -> (f64, bool) {
     let ratio = bests(rounds).map_or(f64::INFINITY, |(plain, under)| {
-        under.as_secs_f64() / plain.as_secs_f64()
+        as_f64(under) / as_f64(plain)
     });
     (ratio, ratio <= REPORTED_RATIO)
 }
@@ -241,29 +274,24 @@ fn progress_ratio(rounds: &[(Duration, Duration)]) -> (f64, bool) {
 /// per-round ratio would pass).
 #[test]
 fn a_spiked_round_passes_and_a_dearer_progress_fails() {
-    let ms = |p: f64, u: f64| {
-        (
-            Duration::from_secs_f64(p / 1e3),
-            Duration::from_secs_f64(u / 1e3),
-        )
-    };
-    let mut spiked = vec![ms(29.0, 30.0); 8];
-    spiked.extend([ms(29.2, 70.5), ms(70.5, 30.0)]);
+    let ms = |p: u64, u: u64| (p, u);
+    let mut spiked = vec![ms(290, 300); 8];
+    spiked.extend([ms(292, 705), ms(705, 300)]);
     assert!(progress_ratio(&spiked).1, "{:?}", progress_ratio(&spiked));
-    let mut floored = vec![ms(29.0, 32.8); 9];
-    floored.push(ms(70.5, 32.8));
+    let mut floored = vec![ms(290, 328); 9];
+    floored.push(ms(705, 328));
     assert!(
         !progress_ratio(&floored).1,
         "{:?}",
         progress_ratio(&floored)
     );
     let noisy = [
-        ms(1430.0, 1520.0),
-        ms(1350.0, 1530.0),
-        ms(1400.0, 1520.0),
-        ms(1360.0, 1530.0),
-        ms(1410.0, 1520.0),
-        ms(1380.0, 1530.0),
+        ms(1430, 1520),
+        ms(1350, 1530),
+        ms(1400, 1520),
+        ms(1360, 1530),
+        ms(1410, 1520),
+        ms(1380, 1530),
     ];
     assert!(!progress_ratio(&noisy).1, "{:?}", progress_ratio(&noisy));
     assert!(!progress_ratio(&[]).1);
@@ -297,8 +325,11 @@ fn reported(p: &Program, a: &Analysis, o: &Overlay, entries: &[u64]) -> Vec<Stri
         || progress.within(|| decompile_all(p, a, o, entries)),
     );
     let ms = |d: Duration| d.as_secs_f64() * 1e3;
-    let (plain, watched) = bests(&analysis).unwrap_or_default();
-    let (whole, swept) = bests(&all).unwrap_or_default();
+    let wall = |rounds: &[(Run, Run)]| -> Vec<(Duration, Duration)> {
+        rounds.iter().map(|(p, u)| (p.wall, u.wall)).collect()
+    };
+    let (plain, watched) = bests(&wall(&analysis)).unwrap_or_default();
+    let (whole, swept) = bests(&wall(&all)).unwrap_or_default();
     println!(
         "analysis:   {:.1} ms (best of {ANALYSIS_ROUNDS})",
         ms(plain)
@@ -317,10 +348,15 @@ fn reported(p: &Program, a: &Analysis, o: &Overlay, entries: &[u64]) -> Vec<Stri
     [("analysis", &analysis), ("decompile", &all)]
         .into_iter()
         .filter_map(|(what, rounds)| {
-            let (ratio, within) = progress_ratio(rounds);
-            println!("ratio:      {what} {ratio:.3} under a progress");
+            let cpu: Vec<(u64, u64)> = rounds.iter().map(|(p, u)| (p.cpu, u.cpu)).collect();
+            let (ratio, within) = progress_ratio(&cpu);
+            let (p, u) = bests(&wall(rounds)).unwrap_or_default();
+            println!(
+                "ratio:      {what} {ratio:.3} in processor time under a progress (at most {REPORTED_RATIO}), {:.3} in wall time (not held)",
+                u.as_secs_f64() / p.as_secs_f64()
+            );
             (!within).then(|| {
-                format!("{what} under a progress took {ratio:.3} times its best without, past {REPORTED_RATIO}")
+                format!("{what} under a progress spent {ratio:.3} times the processor time it spent without, past {REPORTED_RATIO}")
             })
         })
         .collect()

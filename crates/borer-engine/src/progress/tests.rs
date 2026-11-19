@@ -137,6 +137,41 @@ fn a_cap_bounds_the_threads_a_sweep_runs_on() {
     assert_eq!(seen.lock().expect("no item panicked").len(), most);
 }
 
+/// A progress takes no parallelism from a sweep.
+///
+/// A striped sweep under a progress spreads over as many threads as the
+/// same sweep without one, and a decompile sweep reads as many cores under
+/// it; the bench's processor-time ratio cannot see either.
+///
+/// # Panics
+///
+/// When the sweep under the progress runs on fewer threads, or reads fewer
+/// cores.
+#[test]
+fn a_progress_takes_no_threads_from_a_sweep() {
+    let items: Vec<usize> = (0..1000).collect();
+    let spread = || {
+        let seen = std::sync::Mutex::new(Vec::new());
+        crate::analysis::striped(&items, |_| {
+            let mut seen = seen.lock().expect("no item panics");
+            let here = std::thread::current().id();
+            if !seen.contains(&here) {
+                seen.push(here);
+            }
+        });
+        (
+            seen.into_inner().expect("no item panicked").len(),
+            super::cores(),
+        )
+    };
+    let plain = spread();
+    let under = Progress::new().within(spread);
+    assert_eq!(
+        under, plain,
+        "threads and cores under a progress, and without"
+    );
+}
+
 /// Every thread a sweep spawns works under the progress and the cap of the
 /// thread that started it: four threads mapped under a cap of one each
 /// read the cap of one, on any machine.

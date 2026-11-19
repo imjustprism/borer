@@ -60,6 +60,9 @@ ignore = true
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# a path dependency with no version: the engine's dev-dependency on
+# borer-live, which a version would make a cycle `cargo publish` refuses
+allow-wildcard-paths = true
 highlight = "all"
 workspace-default-features = "allow"
 external-default-features = "allow"
