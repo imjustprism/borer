@@ -797,8 +797,8 @@ pub struct Harness {
     watched: Option<(EntityId, Subscription)>,
     /// The call tree phase, once its root's read is asked for.
     tree_run: Option<tree::TreeRun>,
-    /// What each draw showed while the actions phase runs, read as it drew: when, and the
-    /// read; `None` outside the phase.
+    /// What each draw showed while a step of the actions phase is watched, read as it
+    /// drew: when, and the read; `None` otherwise, so a sweep's timed draws read nothing.
     draws: Option<Vec<(Instant, watch::Seen)>>,
     /// Observers of the pane, the panel and the binary, which settle input marks and
     /// re-render the harness, so it checks its one-shot report, whenever they change.

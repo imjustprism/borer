@@ -779,7 +779,6 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        self.draws = Some(Vec::new());
         let run = ActionsRun {
             cancel,
             window_id: window.window_handle().window_id(),
@@ -872,6 +871,7 @@ impl Harness {
             self.bench_done(run, window, cx);
             return;
         }
+        self.draws = matches!(run.going, Some(Going::Watching(..))).then(Vec::new);
         cx.on_next_frame(window, move |this, window, cx| {
             this.actions_step(run, window, cx);
         });
@@ -1228,6 +1228,30 @@ mod tests {
         });
         assert_eq!(draws.len(), 1, "{draws:?}");
         assert_eq!(draws.first().map(|(_, read)| read), Some(&now));
+    }
+
+    /// A frame of a watched step reads the draws after it, and a frame of a sweep reads
+    /// none, so a sweep's timed draws do no read of their own.
+    #[gpui::test]
+    fn only_a_watched_step_reads_its_draws(cx: &mut TestAppContext) {
+        let (harness, cx) = harness(cx);
+        let at = now_instant();
+        let later = at + Duration::from_secs(60);
+        let reads = |going: Going, cx: &mut VisualTestContext| {
+            let mut run = run_on_notepad(Act::GoTo, later);
+            run.going = Some(going);
+            harness.update_in(cx, |harness, window, cx| {
+                harness.draws = None;
+                harness.actions_step(run, window, cx);
+                harness.draws.is_some()
+            })
+        };
+        let still = Box::new(Watch::new(Stamp::default()));
+        assert!(
+            reads(Going::Watching(still, at, true), cx),
+            "a watched step"
+        );
+        assert!(!reads(Going::Sweeping(Sweep::Pan, later, 0), cx), "a sweep");
     }
 
     /// Returns a phase on notepad timing `act`, with nothing left to run, stopping at
