@@ -41,6 +41,7 @@ use crate::binary::Binary;
 use crate::code_view::CodeLines;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
+use crate::panels::add_panels;
 use crate::shell::Shell;
 use crate::stored::FixedSources;
 use crate::worker::{
@@ -901,8 +902,10 @@ impl Harness {
             }));
     }
 
-    /// Returns the functions panel of the measured workspace, docking one on the left first
-    /// when there is none; a phase shows its rows in it without a load through the binary.
+    /// Returns the functions panel of the measured workspace, docking every panel the app
+    /// docks first when there is none, as a load does ([`add_panels`]); a phase shows its
+    /// rows in it without a load through the binary, and its xrefs and other panels are
+    /// there as in the app.
     ///
     /// # Arguments
     ///
@@ -913,6 +916,12 @@ impl Harness {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Entity<FunctionsPanel> {
+        if self.panel(cx).is_none() {
+            let binary = self.binary.clone();
+            self.workspace.update(cx, |workspace, cx| {
+                add_panels(workspace, &binary, None, window, cx);
+            });
+        }
         let panel = self.panel(cx).unwrap_or_else(|| {
             add_functions_panel(
                 &self.workspace,
