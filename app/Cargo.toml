@@ -18,6 +18,8 @@ publish = false
 
 [workspace.dependencies]
 anyhow = "1"
+# The chat's Claude adapter: Anthropic's request converter, stream and event mapper.
+anthropic = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 assets = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 borer-engine = { path = "../crates/borer-engine" }
 borer-front = { path = "../crates/borer-front" }
@@ -25,6 +27,8 @@ client = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae19
 clock = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 collections = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 command_palette = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# The keychain credentials provider the chat's model providers keep API keys with.
+credentials_provider = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 command_palette_hooks = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 db = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 dirs = "6"
@@ -33,19 +37,27 @@ embed-resource = "3.0.12"
 editor = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 fs = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 futures = "0.3.34"
+# The chat's Gemini adapter: Google AI's request converter, stream and event mapper.
+google_ai = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 gpui = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", features = ["profiler"] }
 gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", default-features = false, features = ["font-kit", "wayland", "x11"] }
 http_client = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # Decodes the X11 window icon, at the version and with a feature gpui already builds.
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 language = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# The chat's model layer: provider trait, registry, request and stream types, fake model.
+language_model = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 lsp = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 menu = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# The chat's OpenAI-compatible adapter (OpenAI, OpenRouter, Ollama, LM Studio): chat completions.
+open_ai = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 node_runtime = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 paths = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 picker = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 platform_title_bar = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 project = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# The one real HTTP client, handed to the chat's providers only.
+reqwest_client = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 search = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -63,6 +75,8 @@ ui_input = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae
 # read them from a Zed checkout at run time and find none in this repository.
 util = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288", features = ["debug-embed"] }
 workspace = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# Picks the keychain credentials provider (never the development file provider).
+zed_credentials_provider = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 zed_actions = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 
 [workspace.lints.rust]
