@@ -460,6 +460,79 @@ impl Query {
             Self::Script | Self::SetType => return None,
         })
     }
+
+    /// Returns the index of the first argument whose words beginning `--`
+    /// the query's own parser reads, the command being argument 0.
+    ///
+    /// Each query answers here, so one whose parser reads a flag cannot be
+    /// left out: the option filter refused `export --split` while a list
+    /// apart from the parser lacked it.
+    ///
+    /// # Returns
+    ///
+    /// `None` for a query that reads no word beginning `--`.
+    pub(super) const fn own_flags_from(self) -> Option<usize> {
+        match self {
+            Self::Export => Some(2),
+            Self::Script => Some(3),
+            Self::Info
+            | Self::Functions
+            | Self::Function
+            | Self::Summary
+            | Self::Symbols
+            | Self::Hexdump
+            | Self::Entropy
+            | Self::Search
+            | Self::Fstrings
+            | Self::Findstr
+            | Self::Disasm
+            | Self::Disasmfn
+            | Self::Decompile
+            | Self::Class
+            | Self::Fieldrefs
+            | Self::Vslot
+            | Self::Index
+            | Self::Grep
+            | Self::Shape
+            | Self::Messages
+            | Self::About
+            | Self::Snapshot
+            | Self::Changes
+            | Self::Map
+            | Self::Attrs
+            | Self::Ports
+            | Self::Anchors
+            | Self::Xrefs
+            | Self::Cfg
+            | Self::Callgraph
+            | Self::Strings
+            | Self::Crypto
+            | Self::Qt
+            | Self::Triage
+            | Self::Taint
+            | Self::Layout
+            | Self::Why
+            | Self::Solve
+            | Self::Partial
+            | Self::Flat
+            | Self::Vm
+            | Self::Devirt
+            | Self::Unpack
+            | Self::Oracle
+            | Self::Emulate
+            | Self::Run
+            | Self::Hidden
+            | Self::Read
+            | Self::ExportPack
+            | Self::Scenario
+            | Self::Scenarios
+            | Self::Types
+            | Self::SetType
+            | Self::Extra(_)
+            | Self::Wire(_)
+            | Self::Verify => None,
+        }
+    }
 }
 
 /// Which way `callgraph` walks.
@@ -1137,10 +1210,10 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 /// Refuses a word beginning `--` that a query does not read, before its
 /// binary loads.
 ///
-/// The words after `script`'s file are the script's own, and the words
-/// after `export`'s binary are read by [`export_args`] here, so no second
-/// list of `export`'s flags can miss one: such a list lacked `--split`, and
-/// the usage line `export <binary> --split <dir>` was refused.
+/// The words from [`Query::own_flags_from`] on are the query's own parser's;
+/// `export`'s are read by [`export_args`] here, so no second list of its
+/// flags can miss one: such a list lacked `--split`, and the usage line
+/// `export <binary> --split <dir>` was refused.
 ///
 /// # Arguments
 ///
@@ -1152,16 +1225,9 @@ const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
 /// For a word beginning `--` the query does not read, or `export`'s
 /// arguments as [`export_args`] refuses them.
 pub(super) fn refuse_unknown_options(q: Query, args: &[String]) -> anyhow::Result<()> {
-    let own_from = if q == Query::Script {
-        3
-    } else if q == Query::Export {
-        2
-    } else {
-        usize::MAX
-    };
     if let Some(flag) = args
         .iter()
-        .take(own_from)
+        .take(q.own_flags_from().unwrap_or(usize::MAX))
         .skip(1)
         .find(|a| a.starts_with("--") && !COMMAND_FLAGS.contains(&a.as_str()))
     {
