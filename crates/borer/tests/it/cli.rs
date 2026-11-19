@@ -281,6 +281,11 @@ fn cli_refuses_unknown_words_precisely() {
             "unknown option '--bogus'; the options are --pack <file>, --no-auto-packs and --no-pdb",
         ),
         (&["info", "--bogus", "x"][..], "unknown option '--bogus'"),
+        (&["grep", "x.exe", "--save"][..], "unknown option '--save'"),
+        (
+            &["script", "x.exe", "--save", "p.json"][..],
+            "unknown option '--save'",
+        ),
         (
             &["bogus", "x"][..],
             "unknown command 'bogus'; `borer help` lists the commands",

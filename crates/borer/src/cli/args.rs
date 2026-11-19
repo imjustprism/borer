@@ -1201,16 +1201,12 @@ pub(super) fn unknown_word(word: &str) -> String {
     }
 }
 
-/// The words beginning `--` a query may hold before the words it reads itself.
-///
-/// The options [`split_pack_args`] takes off the line are not among them;
-/// `setup` and `doctor` refuse any other word with their own message.
-const COMMAND_FLAGS: &[&str] = &["--help", "--save"];
-
 /// Refuses a word beginning `--` that a query does not read, before its
 /// binary loads.
 ///
-/// The words from [`Query::own_flags_from`] on are the query's own parser's;
+/// The options [`split_pack_args`] takes off the line and `--help` are gone
+/// by then. The words from [`Query::own_flags_from`] on are the query's own
+/// parser's, and every other word beginning `--` is refused;
 /// `export`'s are read by [`export_args`] here, so no second list of its
 /// flags can miss one: such a list lacked `--split`, and the usage line
 /// `export <binary> --split <dir>` was refused.
@@ -1229,7 +1225,7 @@ pub(super) fn refuse_unknown_options(q: Query, args: &[String]) -> anyhow::Resul
         .iter()
         .take(q.own_flags_from().unwrap_or(usize::MAX))
         .skip(1)
-        .find(|a| a.starts_with("--") && !COMMAND_FLAGS.contains(&a.as_str()))
+        .find(|a| a.starts_with("--"))
     {
         bail!("{}", unknown_word(flag));
     }
