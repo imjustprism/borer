@@ -263,12 +263,12 @@ pub(crate) const RESOURCE_TEMPLATES: &[(&str, &str, &str)] = &[
     ),
     (
         "borer://devirt/{address}",
-        "Run a virtualized function and recover the program it executes: handlers summarized once, the trace cleaned of dead stores (writes nothing that runs after them reads) and cut into straight-line runs at every virtual branch, one line per step. The address carries comma-separated settings: budget=<n> raises the step cap (2000000 by default, at most 100000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
-        "borer://devirt/{entry},budget=4000000",
+        "Run a virtualized function and recover the program it executes: handlers summarized once, the trace cleaned of dead stores (writes nothing that runs after them reads) and cut into straight-line runs at every virtual branch, one line per step. The address carries comma-separated settings: steps=<n> (or budget=<n>) raises the step cap (2000000 by default, at most 100000000) for a protector whose dispatch starts after a long bootstrap; strict faults on the first read of an import or of memory the loader would fill, where by default it reads zero and goes on; reg=<value> presets a register, such as the VM's context pointer the entry does not build",
+        "borer://devirt/{entry},steps=4000000",
     ),
     (
         "borer://unpack/{address}",
-        "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Append ,budget=N to raise the step cap toward a fuller unpack",
+        "Run a packer's bootstrap and report the code it decrypts into memory, with the original entry point. Settings after the address, comma-separated: steps=<n> (or budget=<n>) raises the step cap (10000000 by default, at most 100000000); strict and reg=<value> as devirt takes them",
         "borer://unpack/{entry}",
     ),
     (

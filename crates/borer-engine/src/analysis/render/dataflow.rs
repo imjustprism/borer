@@ -1131,6 +1131,28 @@ pub(super) fn parse_count(text: &str) -> Option<usize> {
     }
 }
 
+/// Returns a caller's step cap when it is 1 to `max`.
+///
+/// This is the one rule every `steps=` follows: past the ceiling is
+/// refused, not clamped, so a run shorter than the one asked for never
+/// comes back with no sign of it.
+///
+/// # Arguments
+///
+/// * `n` - The steps asked for.
+/// * `max` - The ceiling for this kind of run.
+///
+/// # Errors
+///
+/// When `n` is 0 or past `max`, naming the range.
+pub(super) fn steps_within(n: usize, max: usize) -> Result<usize, String> {
+    if (1..=max).contains(&n) {
+        Ok(n)
+    } else {
+        Err(format!("steps is 1 to {max}"))
+    }
+}
+
 /// The registers a function's arguments, and the arguments of the calls it
 /// makes, travel in, in convention order, as the value passes read them.
 ///
@@ -1411,8 +1433,8 @@ impl ExperimentSpec {
     /// out of the pseudo-C sets that argument; `a0` names none and is refused
     /// rather than read as the first), `w<addr>=<hex>`
     /// writes bytes, `stop=<addr>` halts there, `steps=<n>` sets the budget
-    /// (at most [`BUDGET_MAX`], as `run` takes; more is refused, not run for
-    /// hours), `trace=<n>` records what each of the last `n` instructions changed
+    /// (1 to [`BUDGET_MAX`] by [`steps_within`], as `run` takes; more is
+    /// refused, not run for hours), `trace=<n>` records what each of the last `n` instructions changed
     /// (the run's head is watched by giving it a small `steps=`),
     /// `origin=<v>` names the instruction that first produced `v` in a
     /// register or in memory, `profile=<n>` reports the `n` most-executed
@@ -1483,11 +1505,8 @@ impl ExperimentSpec {
                     .ok_or_else(|| format!("bad profile count in {token}"))?
                     .min(PROFILE_MAX);
             } else if key == "steps" {
-                spec.budget =
-                    parse_count(value).ok_or_else(|| format!("bad step count in {token}"))?;
-                if spec.budget > BUDGET_MAX {
-                    return Err(format!("{token}: steps is at most {BUDGET_MAX}"));
-                }
+                let n = parse_count(value).ok_or_else(|| format!("bad step count in {token}"))?;
+                spec.budget = steps_within(n, BUDGET_MAX).map_err(|e| format!("{token}: {e}"))?;
             } else if key == "dump" {
                 let (addr, len) = value
                     .split_once(':')
@@ -1753,7 +1772,7 @@ mod tests {
         let o = Overlay::default();
         for (spec, token) in [
             ("0x1000,steps=abc", "steps=abc"),
-            ("0x1000,steps=99999999999", "steps is at most 20000000"),
+            ("0x1000,steps=99999999999", "steps is 1 to 20000000"),
             ("0x1000,trace=zz", "trace=zz"),
             ("0x1000,dump=0x1000:abc", "dump=0x1000:abc"),
             ("0x1000,foo", "directive foo"),

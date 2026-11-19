@@ -50,7 +50,7 @@ pub(super) const DEVIRT_DROPPED_MAX: usize = 6;
 /// faulting on the first such read recovers one virtual instruction and
 /// stops. Installing the import stubs and reading zero from unmapped memory
 /// lets the dispatch loop turn far enough to trace the virtual program. A
-/// `strict` token faults on the first missing read instead. A `budget=N`
+/// `strict` token faults on the first missing read instead. A `steps=N`
 /// token raises the step cap toward a full run, up to
 /// [`UNPACK_BUDGET_MAX`], for a protector whose dispatch starts only after a
 /// bootstrap that decrypts for a hundred million steps or more; the default
@@ -69,7 +69,7 @@ pub(super) const DEVIRT_DROPPED_MAX: usize = 6;
 /// * `p` - The loaded image.
 /// * `a` - The analysis: functions, blocks, jump tables.
 /// * `o` - User names.
-/// * `target` - The virtualized function's address, with optional `budget=N`
+/// * `target` - The virtualized function's address, with optional `steps=N`
 ///   and registers.
 ///
 /// # Returns
@@ -95,41 +95,8 @@ pub fn devirtualize_tsv(
             format!("no function {}", one_line(addr))
         }
     })?;
-    let rest: Vec<&str> = parts.map(str::trim).filter(|t| !t.is_empty()).collect();
-    let budget = match budget_token(rest.iter().copied()) {
-        None => DEVIRT_BUDGET,
-        Some(v) => parse_count(v)
-            .ok_or_else(|| format!("bad budget in budget={}", one_line(v)))?
-            .min(UNPACK_BUDGET_MAX),
-    };
-    let mut emu = Emulator::new(p, budget).ok_or_else(|| String::from("unknown architecture"))?;
-    emu.install_imports();
-    let strict = rest.iter().any(|p| matches!(*p, "strict" | "nobesteffort"));
-    emu.set_permissive(!strict);
-    for token in rest
-        .iter()
-        .filter(|t| !matches!(**t, "strict" | "nobesteffort"))
-    {
-        let (reg, value) = token.split_once('=').ok_or_else(|| {
-            format!(
-                "cannot read the directive {}; use strict, budget=N, or reg=value",
-                one_line(token)
-            )
-        })?;
-        let reg = reg.trim();
-        if reg.eq_ignore_ascii_case("budget") {
-            continue;
-        }
-        let v =
-            parse_addr(value.trim()).ok_or_else(|| format!("bad value in {}", one_line(token)))?;
-        let reg = reg.trim();
-        if !emu.set_register(reg.to_lowercase().as_str(), v) {
-            return Err(format!(
-                "{} is not a register this can set; use rax..r15 or rsp",
-                one_line(reg)
-            ));
-        }
-    }
+    let s = Settings::parse(parts, DEVIRT_BUDGET)?;
+    let mut emu = armed(p, s.budget, s.strict, &s.presets)?;
     let run = emu.run(entry);
     let jumps = emu.indirect_jumps();
     if jumps.is_empty() {
@@ -680,7 +647,7 @@ fn dead_stores(
 /// Instructions the unpacking trace runs before giving up.
 pub(super) const UNPACK_BUDGET: usize = 10_000_000;
 
-/// Ceiling on a caller-supplied `budget=`, so a request cannot run unbounded.
+/// Ceiling on a caller-supplied `steps=`, so a request cannot run unbounded.
 pub(super) const UNPACK_BUDGET_MAX: usize = 100_000_000;
 
 /// Most materialized regions listed before the rest are summarized.
@@ -720,16 +687,12 @@ pub(super) struct UnpackSpec {
 }
 
 impl UnpackSpec {
-    /// Parses `[<address>][,budget=N][,strict][,<reg>=<value>...]`.
+    /// Parses `[<address>][,steps=N][,strict][,<reg>=<value>...]`.
     ///
-    /// An empty address is the image's entry point. `budget=N` raises the
-    /// step cap toward a full unpack, up to [`UNPACK_BUDGET_MAX`]; a budget
-    /// that is not a count ([`parse_count`]) is refused rather than left at
-    /// the default or read as hex, so a caller who asked for more steps
-    /// does not get another run back with no sign of it. `strict` (or
-    /// `nobesteffort`) faults on the first read of memory the loader would
-    /// fill, which pins exactly what a simple packer's bootstrap still
-    /// needs. The rest are register presets.
+    /// An empty address is the image's entry point; the settings after it
+    /// are read as [`Settings::parse`] reads them. `steps=N` raises the step
+    /// cap toward a full unpack, and `strict` pins exactly what a simple
+    /// packer's bootstrap still needs.
     ///
     /// # Arguments
     ///
@@ -760,36 +723,11 @@ impl UnpackSpec {
         } else {
             resolve(a, o, addr).ok_or_else(|| format!("no start address {}", one_line(addr)))?
         };
-        let pairs: Vec<&str> = parts.collect();
-        let budget = match budget_token(pairs.iter().copied()) {
-            None => UNPACK_BUDGET,
-            Some(v) => parse_count(v)
-                .ok_or_else(|| format!("bad budget in budget={}", one_line(v)))?
-                .min(UNPACK_BUDGET_MAX),
-        };
-        let strict = pairs
-            .iter()
-            .any(|p| matches!(p.trim(), "strict" | "nobesteffort"));
-        let mut presets: Vec<(String, u64)> = Vec::new();
-        for pair in &pairs {
-            let token = pair.trim();
-            if token.is_empty() || matches!(token, "strict" | "nobesteffort") {
-                continue;
-            }
-            let (key, value) = token.split_once('=').ok_or_else(|| {
-                format!(
-                    "cannot read the directive {}; use budget=N, strict, or reg=value",
-                    one_line(token)
-                )
-            })?;
-            let key = key.trim();
-            if key.eq_ignore_ascii_case("budget") {
-                continue;
-            }
-            let v = parse_addr(value.trim())
-                .ok_or_else(|| format!("bad value in {}", one_line(token)))?;
-            presets.push((key.to_owned(), v));
-        }
+        let Settings {
+            budget,
+            strict,
+            presets,
+        } = Settings::parse(parts, UNPACK_BUDGET)?;
         Ok(Self {
             entry,
             budget,
@@ -799,16 +737,108 @@ impl UnpackSpec {
     }
 }
 
-/// The value of the `budget=` directive among a spec's directives, if any.
+/// The settings `unpack` and `devirt` read after the address, as
+/// `steps=N` (or `budget=N`), `strict` and `<reg>=<value>` presets.
+#[derive(Debug)]
+struct Settings {
+    /// Most instructions the run may take.
+    budget: usize,
+    /// Fault on the first read the loader would fill instead of reading zero.
+    strict: bool,
+    /// Register presets as `(name as written, value)`, in spec order.
+    presets: Vec<(String, u64)>,
+}
+
+/// The settings a spec may name, for a refusal to list.
+const SETTINGS: &str = "steps=N, strict, or <reg>=<value> with reg rax..r15 or rsp";
+
+impl Settings {
+    /// Parses the comma-separated settings after a spec's address.
+    ///
+    /// The step cap is `steps=N` as `emulate` names it, or `budget=N`, held
+    /// to 1..=[`UNPACK_BUDGET_MAX`] ([`steps_within`]); a cap that is not a
+    /// count ([`parse_count`]) is refused rather than left at the default.
+    /// `strict` (or `nobesteffort`) faults on the first missing read. Every
+    /// other `key=value` is a register preset, checked when it is applied
+    /// ([`armed`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `parts` - The tokens after the address.
+    /// * `default` - The step cap when the spec names none.
+    ///
+    /// # Errors
+    ///
+    /// When a cap does not read or is out of range, a setting has no `=`, or
+    /// a preset's value does not read.
+    fn parse<'s>(parts: impl Iterator<Item = &'s str>, default: usize) -> Result<Self, String> {
+        let mut s = Self {
+            budget: default,
+            strict: false,
+            presets: Vec::new(),
+        };
+        for token in parts.map(str::trim).filter(|t| !t.is_empty()) {
+            if matches!(token, "strict" | "nobesteffort") {
+                s.strict = true;
+                continue;
+            }
+            let (key, value) = token.split_once('=').ok_or_else(|| {
+                format!(
+                    "cannot read the directive {}; use {SETTINGS}",
+                    one_line(token)
+                )
+            })?;
+            let key = key.trim();
+            let what = if key.eq_ignore_ascii_case("steps") {
+                "step count"
+            } else if key.eq_ignore_ascii_case("budget") {
+                "budget"
+            } else {
+                let v = parse_addr(value.trim())
+                    .ok_or_else(|| format!("bad value in {}", one_line(token)))?;
+                s.presets.push((key.to_owned(), v));
+                continue;
+            };
+            let n =
+                parse_count(value).ok_or_else(|| format!("bad {what} in {}", one_line(token)))?;
+            s.budget = steps_within(n, UNPACK_BUDGET_MAX)?;
+        }
+        Ok(s)
+    }
+}
+
+/// Returns an emulator for a protector run: imports installed, best-effort
+/// unless `strict`, and each preset applied.
 ///
 /// # Arguments
 ///
-/// * `directives` - The tokens after the address.
-fn budget_token<'s>(mut directives: impl Iterator<Item = &'s str>) -> Option<&'s str> {
-    directives.find_map(|part| {
-        let (k, v) = part.split_once('=')?;
-        k.trim().eq_ignore_ascii_case("budget").then(|| v.trim())
-    })
+/// * `p` - The loaded image.
+/// * `budget` - Most instructions the run may take.
+/// * `strict` - Fault on the first missing read instead of reading zero.
+/// * `presets` - Register presets as `(name as written, value)`.
+///
+/// # Errors
+///
+/// When the architecture is not emulated, or a preset names neither a
+/// register nor a setting, listing the settings.
+fn armed<'p>(
+    p: &'p Program,
+    budget: usize,
+    strict: bool,
+    presets: &[(String, u64)],
+) -> Result<Emulator<'p>, String> {
+    let mut emu = Emulator::new(p, budget).ok_or_else(|| String::from("unknown architecture"))?;
+    emu.install_imports();
+    emu.set_permissive(!strict);
+    for (name, v) in presets {
+        if !emu.set_register(name.to_lowercase().as_str(), *v) {
+            return Err(format!(
+                "{} is not a register or a setting; use {SETTINGS}",
+                one_line(name)
+            ));
+        }
+    }
+    Ok(emu)
 }
 
 /// Runs a packer's bootstrap and reports the code it decrypts into memory.
@@ -863,7 +893,7 @@ fn budget_token<'s>(mut directives: impl Iterator<Item = &'s str>) -> Option<&'s
 /// * `a` - The analysis.
 /// * `o` - User names.
 /// * `target` - Where to start, the entry by default, with optional `reg=val`
-///   presets and a `budget=N` step cap for pushing toward a full unpack.
+///   presets and a `steps=N` step cap for pushing toward a full unpack.
 ///
 /// # Returns
 ///
@@ -876,18 +906,7 @@ fn budget_token<'s>(mut directives: impl Iterator<Item = &'s str>) -> Option<&'s
 pub fn unpack_tsv(p: &Program, a: &Analysis, o: &Overlay, target: &str) -> Result<String, String> {
     x86_only(p, "unpack")?;
     let spec = UnpackSpec::parse(p, a, o, target)?;
-    let mut emu =
-        Emulator::new(p, spec.budget).ok_or_else(|| String::from("unknown architecture"))?;
-    emu.install_imports();
-    emu.set_permissive(!spec.strict);
-    for (name, v) in &spec.presets {
-        if !emu.set_register(name.to_lowercase().as_str(), *v) {
-            return Err(format!(
-                "{} is not a register this can set; use rax..r15 or rsp",
-                one_line(name)
-            ));
-        }
-    }
+    let mut emu = armed(p, spec.budget, spec.strict, &spec.presets)?;
     let entry = spec.entry;
     let run = emu.run(entry);
     let regions = emu.materialized();
@@ -1120,7 +1139,7 @@ pub fn unpacked_image(
 /// and its step cap.
 ///
 /// The spec is read by the grammar [`unpack_tsv`] reads, so `unpack <file>
-/// <addr>,budget=N <out>` starts where the report starts and fills as much,
+/// <addr>,steps=N <out>` starts where the report starts and fills as much,
 /// and a directive the report refuses is refused here rather than dropped.
 /// [`unpacked_image`] runs best-effort with no presets, so a spec asking
 /// for `strict` or a register is refused too: the image written would not
@@ -1428,7 +1447,7 @@ pub(super) fn retarget_pe_to_memory_layout(buf: &mut [u8], base: u64, oep: Optio
 
 #[cfg(test)]
 mod tests {
-    use super::{UNPACK_BUDGET, UnpackSpec, devirtualize_tsv, rebuild, unpack_start};
+    use super::{UNPACK_BUDGET, UnpackSpec, devirtualize_tsv, rebuild, unpack_start, unpack_tsv};
     use crate::analysis::{Analysis, Overlay};
     use crate::emulate::Emulator;
     use crate::program::{Arch, Program, Section};
@@ -1510,6 +1529,46 @@ mod tests {
         let err = devirtualize_tsv(&p, &a, &o, "0x1000,budget=abc").unwrap_err();
         assert!(err.contains("bad budget in budget=abc"), "{err}");
         assert!(devirtualize_tsv(&p, &a, &o, "0x1000,budget=0x100").is_ok());
+    }
+
+    /// `unpack` and `devirt` take `steps=N` as `emulate` does.
+    ///
+    /// They keep `budget=N`, refuse a cap out of range where it was
+    /// clamped, and refuse an unknown setting naming it and the settings
+    /// there are, where it read as a register only.
+    ///
+    /// # Panics
+    ///
+    /// When `steps=` is not the cap, a cap out of range runs, or a refusal
+    /// does not name the token and the settings.
+    #[test]
+    fn unpack_and_devirt_read_steps_and_name_an_unknown_setting() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let cap = |spec| UnpackSpec::parse(&p, &a, &o, spec).map(|s| s.budget);
+        assert_eq!(cap("0x1000,steps=0x100"), Ok(0x100));
+        assert_eq!(cap("0x1000,STEPS=5"), Ok(5));
+        assert_eq!(cap("0x1000,budget=7"), Ok(7));
+        assert_eq!(cap("0x1000,steps=0"), Err("steps is 1 to 100000000".into()));
+        assert_eq!(
+            cap("0x1000,steps=100000001"),
+            Err("steps is 1 to 100000000".into())
+        );
+        assert_eq!(
+            cap("0x1000,steps=abc"),
+            Err("bad step count in steps=abc".into())
+        );
+        assert!(devirtualize_tsv(&p, &a, &o, "0x1000,steps=0x100").is_ok());
+        let unknown = "nosuch is not a register or a setting; use steps=N, strict, or <reg>=<value> with reg rax..r15 or rsp";
+        for render in [unpack_tsv, devirtualize_tsv] {
+            assert_eq!(render(&p, &a, &o, "0x1000,nosuch=5").unwrap_err(), unknown);
+            let err = render(&p, &a, &o, "0x1000,nosuch").unwrap_err();
+            assert!(
+                err.ends_with("; use steps=N, strict, or <reg>=<value> with reg rax..r15 or rsp"),
+                "{err}"
+            );
+        }
     }
 
     /// A handler the image cannot read but the run decrypted is summarized

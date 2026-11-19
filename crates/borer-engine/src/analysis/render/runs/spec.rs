@@ -172,10 +172,7 @@ pub(super) fn parse_run(a: &Analysis, o: &Overlay, spec: &str) -> Result<RunSpec
             .strip_prefix("steps=")
             .and_then(parse_count)
             .ok_or_else(|| format!("cannot read {}; use steps=N", one_line(option)))?;
-        if n == 0 || n > BUDGET_MAX {
-            return Err(format!("steps is 1 to {BUDGET_MAX}"));
-        }
-        budget = n;
+        budget = steps_within(n, BUDGET_MAX)?;
     }
     if let Some(extra) = rest.next() {
         return Err(format!(

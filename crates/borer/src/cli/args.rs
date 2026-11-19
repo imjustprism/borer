@@ -72,8 +72,8 @@ commands:
   partial <binary> <address>               a counted loop comparing a few bits of a product: lattice, not more samples
   flat <binary> [address]                  functions whose control flow was flattened into a switch
   vm <binary> [address]                    find the VM dispatch loops, or describe one's handlers
-  devirt <binary> <address>[,budget=N,...]  run a virtualized function and recover its virtual program; budget=N pushes past a long bootstrap
-  unpack <binary> <address>[,budget=N] [out]  run the unpacker; with out, write the materialized image
+  devirt <binary> <address>[,steps=N,...]  run a virtualized function and recover its virtual program; steps=N pushes past a long bootstrap
+  unpack <binary> <address>[,steps=N] [out]  run the unpacker; with out, write the materialized image
   oracle <binary> <address|name>           run a checksum on the standard probe and name it
   emulate <binary> <spec>                  run code and read it back; spec: addr[,reg=v,aN=v,w<addr>=<hex>,stop=<addr>,steps=<n>,trace=<n>,origin=<v>,dump=<addr>:<len>]; aN is the decompiler's aN, a1 the first
   run <binary> <function>[,steps=N]/<input>[;<input>...]  call a function on typed inputs (each: comma-separated 5, -1, \"text\", hex:0102, out:16) and check its decompiled text gives the same
@@ -289,9 +289,9 @@ pub(super) enum Query {
     Flat,
     /// `vm [address]`: the VM dispatch loops found, or one loop's handlers.
     Vm,
-    /// `devirt <address>[,budget=N,...]`: the virtual program a virtualized function runs.
+    /// `devirt <address>[,steps=N,...]`: the virtual program a virtualized function runs.
     Devirt,
-    /// `unpack <address>[,budget=N] [out]`: the unpacker's report, or with `out` the image it materialized written to a file, since a tool reads a file and an image inside one emulator run is only a report.
+    /// `unpack <address>[,steps=N] [out]`: the unpacker's report, or with `out` the image it materialized written to a file, since a tool reads a file and an image inside one emulator run is only a report.
     Unpack,
     /// `oracle <address|name>`: run a checksum on the standard probe and name it.
     Oracle,
