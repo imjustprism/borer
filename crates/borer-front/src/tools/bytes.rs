@@ -422,13 +422,13 @@ pub fn search(h: &dyn Held, p: &SearchParams) -> Result<String, Failure> {
         let prog = s.program();
         let mut hits = match kind {
             SearchKind::Bytes => {
-                let pattern = borer_engine::search::parse_pattern(query).ok_or_else(|| {
+                let lanes = borer_engine::search::parse_masked(query).map_err(|why| {
                     format!(
-                        "bad byte pattern {}: use hex tokens or ??",
+                        "bad byte pattern {}: {why}",
                         borer_engine::text::quoted(query)
                     )
                 })?;
-                borer_engine::search::find_bytes(prog, &pattern, offset)
+                borer_engine::search::find_masked(prog, &lanes, offset)
             }
             SearchKind::Text => borer_engine::search::find_text(prog, query, offset),
         };

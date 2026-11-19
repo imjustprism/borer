@@ -21,7 +21,7 @@ commands:
   symbols <binary> [filter] [offset] [limit]  imports, exports and locals (50 a page, max 1000)
   hexdump <binary> <address|name> [length]  bytes at a virtual address or name, or at off:<n> in the file (default 64, max 4096)
   entropy <binary> [threshold]             high-entropy regions (default 7.2)
-  search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards, or a substring; 500 a page
+  search <binary> <pattern> [text] [offset]  AOB hex with ?? wildcards and 4? nibbles, or a substring; 500 a page
   fstrings <binary> <address|name>         string literals one function references, or the user strings a .NET method loads
   findstr <binary> <filter>                functions referencing a matching string
   disasm <binary> <address|name> [count]   disassemble at a virtual address or name, from the start of the instruction it is inside (default 32, max 256)
@@ -220,7 +220,7 @@ pub(super) enum Query {
     Hexdump,
     /// `entropy [threshold]`: high-entropy regions.
     Entropy,
-    /// `search <pattern> [text|bytes] [offset]`: AOB hex with `??` wildcards, or a substring.
+    /// `search <pattern> [text|bytes] [offset]`: AOB hex with `??` wildcards and `4?` nibbles, or a substring.
     Search,
     /// `fstrings <address|name>`: the string literals one function references.
     Fstrings,

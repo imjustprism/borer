@@ -466,7 +466,7 @@ pub struct QueryParams {
 #[derive(Debug, Default, serde::Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SearchParams {
-    /// Hex bytes with ?? wildcards (kind=bytes) or a literal substring (kind=text).
+    /// Hex bytes with ?? or 4? wildcards (kind=bytes) or a substring (kind=text).
     pub query: String,
     /// What the query is (default bytes).
     pub kind: Option<SearchKind>,

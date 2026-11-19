@@ -366,9 +366,9 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
             let hits = match kind {
                 SearchKind::Text => search::find_text(&s.program, pattern, offset),
                 SearchKind::Bytes => {
-                    let pat = search::parse_pattern(pattern)
-                        .context("bad AOB pattern; use hex bytes with ?? wildcards")?;
-                    search::find_bytes(&s.program, &pat, offset)
+                    let lanes = search::parse_masked(pattern)
+                        .map_err(|why| anyhow::anyhow!("bad AOB pattern: {why}"))?;
+                    search::find_masked(&s.program, &lanes, offset)
                 }
             };
             let a = s.analysis_or_empty();

@@ -105,6 +105,37 @@ mod tests {
         assert_eq!(search(true), "# 256 hits\n");
     }
 
+    /// The bytes kind takes nibbles, answering what the whole byte answers
+    /// where the nibble agrees, and refuses a bad token at its column.
+    ///
+    /// # Panics
+    ///
+    /// When a nibble is refused, answers otherwise, or a bad token passes.
+    #[test]
+    fn a_byte_search_takes_nibbles() {
+        use crate::params::SearchParams;
+        let server = raw_server();
+        let search = |query: &str| {
+            borer_front::tools::search(
+                &server,
+                &SearchParams {
+                    query: query.to_owned(),
+                    kind: None,
+                    offset: None,
+                    limit: None,
+                    count_only: Some(true),
+                },
+            )
+            .map_err(crate::errors::failed)
+        };
+        let whole = search("c3").expect("searches");
+        assert_eq!(search("c?").expect("searches"), whole);
+        assert_eq!(search("?3").expect("searches"), whole);
+        assert_eq!(search("d?").expect("searches"), "# 0 hits\n");
+        let why = format!("{:?}", search("c3 zz").expect_err("zz is no byte"));
+        assert!(why.contains("column 4"), "{why}");
+    }
+
     /// The string search's `filter` doc gives the engine's literal floor,
     /// under which a string matches only whole.
     ///

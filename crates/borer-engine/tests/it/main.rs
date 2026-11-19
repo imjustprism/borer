@@ -80,6 +80,7 @@ mod linear;
 mod listing;
 mod lsda;
 mod macho;
+mod masked;
 mod memo;
 mod metadata;
 mod negfields;

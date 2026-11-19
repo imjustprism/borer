@@ -28,6 +28,118 @@ pub fn parse_pattern(s: &str) -> Option<Vec<Option<u8>>> {
         .collect()
 }
 
+/// Most bytes one masked pattern holds: past it every candidate's verify
+/// costs more than the scan it narrows.
+pub const PATTERN_MAX: usize = 4096;
+
+/// One byte of a masked pattern: the bits it fixes and their value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Lane {
+    /// The fixed bits' value; zero outside `mask`.
+    pub value: u8,
+    /// The bits the pattern fixes: `0xff` a whole byte, `0xf0` or `0x0f` a
+    /// nibble, `0` any byte.
+    pub mask: u8,
+}
+
+impl From<Option<u8>> for Lane {
+    /// Returns a whole fixed byte, or any byte for `None`.
+    fn from(b: Option<u8>) -> Self {
+        b.map_or(Lane { value: 0, mask: 0 }, |value| Lane {
+            value,
+            mask: 0xff,
+        })
+    }
+}
+
+/// Parses a masked byte pattern such as `48 8b 4? ?? ff`.
+///
+/// # Arguments
+///
+/// * `s` - Whitespace-separated tokens: two hex digits (`8b`), a hex digit
+///   and `?` for a nibble (`4?` fixes the high one, `?8` the low one), or
+///   `?`/`??` for any byte.
+///
+/// # Returns
+///
+/// One [`Lane`] per token.
+///
+/// # Errors
+///
+/// When the pattern has no token, more than [`PATTERN_MAX`], or a token of
+/// another form, naming its 1-based column and the forms a token takes.
+pub fn parse_masked(s: &str) -> Result<Vec<Lane>, String> {
+    let mut lanes = Vec::new();
+    for (at, tok) in words(s) {
+        let lane = lane(tok).ok_or_else(|| {
+            format!(
+                "column {}: {} is not a byte; write two hex digits (8b), a hex digit and ? for a nibble (4? or ?8), or ? or ?? for any byte",
+                at.saturating_add(1),
+                crate::text::quoted(tok)
+            )
+        })?;
+        if lanes.len() == PATTERN_MAX {
+            return Err(format!(
+                "column {}: a byte pattern holds at most {PATTERN_MAX} bytes",
+                at.saturating_add(1)
+            ));
+        }
+        lanes.push(lane);
+    }
+    if lanes.is_empty() {
+        return Err("the byte pattern has no byte; write hex bytes such as 48 8b ?? 4?".to_owned());
+    }
+    Ok(lanes)
+}
+
+/// Returns the whitespace-separated words of `s`, each with the byte
+/// offset it starts at.
+///
+/// # Arguments
+///
+/// * `s` - The text.
+pub(crate) fn words(s: &str) -> impl Iterator<Item = (usize, &str)> {
+    s.char_indices()
+        .filter(|&(i, c)| {
+            !c.is_whitespace()
+                && s.get(..i)
+                    .and_then(|head| head.chars().next_back())
+                    .is_none_or(char::is_whitespace)
+        })
+        .filter_map(|(i, _)| {
+            let tail = s.get(i..)?;
+            tail.split(char::is_whitespace).next().map(|w| (i, w))
+        })
+}
+
+/// Reads one masked pattern token.
+///
+/// # Arguments
+///
+/// * `tok` - The token: `8b`, `4?`, `?8`, `??` or `?`.
+///
+/// # Returns
+///
+/// The lane, or `None` for any other token.
+fn lane(tok: &str) -> Option<Lane> {
+    let nibble = |c: u8| match c {
+        b'?' => Some(None),
+        b'0'..=b'9' => Some(Some(c - b'0')),
+        b'a'..=b'f' => Some(Some(c - b'a' + 10)),
+        b'A'..=b'F' => Some(Some(c - b'A' + 10)),
+        _ => None,
+    };
+    let (hi, lo) = match tok.as_bytes() {
+        [b'?'] => (None, None),
+        [h, l] => (nibble(*h)?, nibble(*l)?),
+        _ => return None,
+    };
+    Some(Lane {
+        value: (hi.unwrap_or(0) << 4) | lo.unwrap_or(0),
+        mask: hi.map_or(0, |_| 0xf0) | lo.map_or(0, |_| 0x0f),
+    })
+}
+
 /// One search match.
 #[derive(Debug, Clone)]
 pub struct Hit {
@@ -49,15 +161,7 @@ pub struct Hits {
 
 /// Scans every section, then the bytes no section maps, for `pattern`.
 ///
-/// The scan is anchored: the pattern's first fixed byte names an anchor,
-/// and eight bytes are tested at a time with [`eq_mask`], so a word with
-/// no anchor byte in it is rejected in a handful of instructions instead
-/// of one window compare per offset. Each candidate is then verified by
-/// whole-word compares against the pattern compiled into `(expected,
-/// mask)` chunks ([`compile_pattern`]): one xor, and and a test cover
-/// eight pattern bytes, wildcards included. A pattern of wildcards alone
-/// has no anchor and keeps the per-window walk, which for it answers a
-/// match at every offset.
+/// The whole-byte case of [`find_masked`]: each `None` is any byte.
 ///
 /// # Arguments
 ///
@@ -69,46 +173,114 @@ pub struct Hits {
 ///
 /// The page after `offset` and the total, both empty for an empty pattern.
 pub fn find_bytes(program: &Program, pattern: &[Option<u8>], offset: usize) -> Hits {
+    let lanes: Vec<Lane> = pattern.iter().map(|&b| Lane::from(b)).collect();
+    find_masked(program, &lanes, offset)
+}
+
+/// Scans every section, then the bytes no section maps, for a masked
+/// pattern.
+///
+/// The scan is anchored: the pattern's rarest fully fixed byte names an
+/// anchor, and eight bytes are tested at a time with [`eq_mask`], so a
+/// word with no anchor byte in it is rejected in a handful of
+/// instructions instead of one window compare per offset. Each candidate
+/// is then verified by whole-word compares against the pattern compiled
+/// into `(expected, mask)` chunks ([`compile_pattern`]): one xor, and and
+/// a test cover eight pattern bytes, nibbles and wildcards included. A
+/// pattern with no fully fixed byte has no anchor and keeps the
+/// per-window walk, which for wildcards alone answers a match at every
+/// offset.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image whose bytes are scanned.
+/// * `lanes` - The pattern, as produced by [`parse_masked`].
+/// * `offset` - Matches to skip before the page starts.
+///
+/// # Returns
+///
+/// The page after `offset` and the total, both empty for an empty pattern.
+pub fn find_masked(program: &Program, lanes: &[Lane], offset: usize) -> Hits {
     let mut out = Hits::default();
-    let Some(reach) = pattern.len().checked_sub(1) else {
+    let Some(reach) = lanes.len().checked_sub(1) else {
         return out;
     };
-    let Some((anchor_at, anchor)) = anchor_of(pattern, program.bytes.as_slice()) else {
-        return scan(program, pattern.len(), offset, |_| true);
-    };
-    let chunks = compile_pattern(pattern);
+    let finder = Finder::new(lanes, program.bytes.as_slice());
     for span in spans(program, reach) {
-        let Some(last) = span.data.len().checked_sub(pattern.len()) else {
-            continue;
+        finder.each(&span, |i| out.push(&span, i, offset));
+    }
+    out
+}
+
+/// A masked pattern ready to scan: its lanes, its compare chunks and its
+/// anchor.
+#[derive(Debug)]
+pub(crate) struct Finder<'p> {
+    /// The pattern.
+    lanes: &'p [Lane],
+    /// The pattern as [`compile_pattern`] holds it.
+    chunks: Vec<(u64, u64)>,
+    /// The anchor's offset in the pattern and its byte ([`anchor_of`]);
+    /// `None` when no byte is fully fixed.
+    anchor: Option<(usize, u8)>,
+}
+
+impl<'p> Finder<'p> {
+    /// Compiles a pattern and chooses its anchor from a sample of `file`.
+    ///
+    /// # Arguments
+    ///
+    /// * `lanes` - The pattern; not empty.
+    /// * `file` - The file the scan will walk, for the anchor's sample.
+    pub(crate) fn new(lanes: &'p [Lane], file: &[u8]) -> Self {
+        Finder {
+            lanes,
+            chunks: compile_pattern(lanes),
+            anchor: anchor_of(lanes, file),
+        }
+    }
+
+    /// Hands `visit` the offset in the span of each match starting in
+    /// its run, ascending.
+    ///
+    /// # Arguments
+    ///
+    /// * `span` - The run and the bytes after it a match may cover.
+    /// * `visit` - Called with each match's offset in the span.
+    pub(crate) fn each(&self, span: &Span<'_>, mut visit: impl FnMut(u64)) {
+        let Some(last) = span.data.len().checked_sub(self.lanes.len()) else {
+            return;
+        };
+        let Some((anchor_at, anchor)) = self.anchor else {
+            for (i, w) in (0..span.own).zip(span.data.windows(self.lanes.len())) {
+                if compiled_match(w, self.lanes, &self.chunks) {
+                    visit(i);
+                }
+            }
+            return;
+        };
+        let mut test = |z: usize| {
+            if let Some(i) = z.checked_sub(anchor_at)
+                && i <= last
+                && compiled_match(&span.data[i..], self.lanes, &self.chunks)
+            {
+                visit(crate::num::from_usize(i));
+            }
         };
         let (words, _tail) = span.data.as_chunks::<8>();
         for (k, w) in words.iter().enumerate() {
-            let word = u64::from_le_bytes(*w);
-            let mut m = eq_mask(word, anchor);
+            let mut m = eq_mask(u64::from_le_bytes(*w), anchor);
             while m != 0 {
-                let z = k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8));
+                test(k * 8 + crate::num::saturating_usize(u64::from(m.trailing_zeros() / 8)));
                 m &= m - 1;
-                let Some(i) = z.checked_sub(anchor_at) else {
-                    continue;
-                };
-                if i <= last && compiled_match(&span.data[i..], pattern, &chunks) {
-                    out.push(&span, crate::num::from_usize(i), offset);
-                }
             }
         }
         for z in words.len() * 8..span.data.len() {
-            if span.data[z] != anchor {
-                continue;
-            }
-            let Some(i) = z.checked_sub(anchor_at) else {
-                continue;
-            };
-            if i <= last && compiled_match(&span.data[i..], pattern, &chunks) {
-                out.push(&span, crate::num::from_usize(i), offset);
+            if span.data[z] == anchor {
+                test(z);
             }
         }
     }
-    out
 }
 
 /// Bytes of the file the anchor's frequency is counted over, a bound on
@@ -118,8 +290,8 @@ const ANCHOR_SAMPLE: usize = 32 << 10;
 /// longer pattern's bytes repeat these or lose nothing by it.
 const ANCHOR_CANDIDATES: usize = 8;
 
-/// Chooses the pattern's anchor: the position and value of the fixed
-/// byte least frequent in a sample of the file.
+/// Chooses the pattern's anchor: the position and value of the fully
+/// fixed byte least frequent in a sample of the file.
 ///
 /// Every candidate the scan tests is an anchor hit, and the anchor is
 /// the one byte a pattern can pick to be tested least: a frequency count
@@ -129,22 +301,23 @@ const ANCHOR_CANDIDATES: usize = 8;
 /// with it, the verify each candidate pays stays correct, only less
 /// selective. At most [`ANCHOR_CANDIDATES`] distinct bytes are counted,
 /// each a word-wise pass over [`ANCHOR_SAMPLE`] bytes, so the choice
-/// costs microseconds against the whole-file scan it narrows.
+/// costs microseconds against the whole-file scan it narrows. A nibble
+/// is never an anchor: the word test compares whole bytes.
 ///
 /// # Arguments
 ///
-/// * `pattern` - Bytes with `None` wildcards, as produced by [`parse_pattern`].
+/// * `lanes` - The pattern, as produced by [`parse_masked`].
 /// * `file` - The file the scan will walk, for the frequency sample.
 ///
 /// # Returns
 ///
-/// The anchor's offset in the pattern and its byte, or `None` when every
-/// byte is a wildcard.
-fn anchor_of(pattern: &[Option<u8>], file: &[u8]) -> Option<(usize, u8)> {
+/// The anchor's offset in the pattern and its byte, or `None` when no
+/// byte is fully fixed.
+fn anchor_of(lanes: &[Lane], file: &[u8]) -> Option<(usize, u8)> {
     let mut candidates: Vec<u8> = Vec::new();
-    for b in pattern.iter().flatten() {
-        if !candidates.contains(b) && candidates.len() < ANCHOR_CANDIDATES {
-            candidates.push(*b);
+    for l in lanes.iter().filter(|l| l.mask == 0xff) {
+        if !candidates.contains(&l.value) && candidates.len() < ANCHOR_CANDIDATES {
+            candidates.push(l.value);
         }
     }
     let sample = &file[..file.len().min(ANCHOR_SAMPLE)];
@@ -167,36 +340,36 @@ fn anchor_of(pattern: &[Option<u8>], file: &[u8]) -> Option<(usize, u8)> {
         })
         .min_by_key(|&(hits, b)| (hits, b))
         .map(|(_, b)| b)?;
-    let at = pattern.iter().position(|p| p.is_some_and(|p| p == best))?;
+    let at = lanes
+        .iter()
+        .position(|l| l.mask == 0xff && l.value == best)?;
     Some((at, best))
 }
 
-/// Compiles a byte pattern into eight-byte `(expected, mask)` compare
+/// Compiles a masked pattern into eight-byte `(expected, mask)` compare
 /// chunks.
 ///
 /// Chunk `k` covers the pattern's bytes `8k..8k+8`: `expected` holds each
-/// fixed byte in its lane, and `mask` carries a `0xff` lane where the
-/// pattern fixes the byte and a zero lane for a wildcard. A window chunk
+/// lane's fixed bits in its lane, and `mask` the lane's mask (`0xff` a
+/// whole byte, `0xf0` or `0x0f` a nibble, zero any byte). A window chunk
 /// matches when `(window_word ^ expected) & mask` is zero, eight bytes
 /// compared with three instructions whatever the wildcards.
 ///
 /// # Arguments
 ///
-/// * `pattern` - Bytes with `None` wildcards, as produced by [`parse_pattern`].
+/// * `lanes` - The pattern, as produced by [`parse_masked`].
 ///
 /// # Returns
 ///
 /// One chunk per eight pattern bytes, the last short.
-fn compile_pattern(pattern: &[Option<u8>]) -> Vec<(u64, u64)> {
-    pattern
+fn compile_pattern(lanes: &[Lane]) -> Vec<(u64, u64)> {
+    lanes
         .chunks(8)
         .map(|chunk| {
             let (mut expected, mut mask) = (0u64, 0u64);
-            for (lane, p) in chunk.iter().enumerate() {
-                if let Some(b) = p {
-                    expected |= u64::from(*b) << (8 * lane);
-                    mask |= 0xff << (8 * lane);
-                }
+            for (lane, l) in chunk.iter().enumerate() {
+                expected |= u64::from(l.value & l.mask) << (8 * lane);
+                mask |= u64::from(l.mask) << (8 * lane);
             }
             (expected, mask)
         })
@@ -215,14 +388,14 @@ fn compile_pattern(pattern: &[Option<u8>]) -> Vec<(u64, u64)> {
 /// # Arguments
 ///
 /// * `rest` - The bytes from the candidate position on.
-/// * `pattern` - The bytes with wildcards sought.
+/// * `lanes` - The pattern sought.
 /// * `chunks` - The pattern as [`compile_pattern`] holds it.
 ///
 /// # Returns
 ///
-/// Whether every fixed byte of the pattern equals the rest's byte at its
-/// lane.
-fn compiled_match(rest: &[u8], pattern: &[Option<u8>], chunks: &[(u64, u64)]) -> bool {
+/// Whether every fixed bit of the pattern equals the rest's bit at its
+/// place.
+fn compiled_match(rest: &[u8], lanes: &[Lane], chunks: &[(u64, u64)]) -> bool {
     for (k, (expected, mask)) in chunks.iter().enumerate() {
         let base = 8 * k;
         if mask == &0 {
@@ -233,10 +406,10 @@ fn compiled_match(rest: &[u8], pattern: &[Option<u8>], chunks: &[(u64, u64)]) ->
                 return false;
             }
         } else {
-            return pattern[base..]
+            return lanes[base..]
                 .iter()
                 .zip(rest.get(base..).unwrap_or(&[]))
-                .all(|(p, b)| p.is_none_or(|p| p == *b));
+                .all(|(l, b)| b & l.mask == l.value & l.mask);
         }
     }
     true
@@ -472,7 +645,7 @@ fn folded_pair(b: u8) -> (u8, u8) {
 /// One run of bytes a search walks, with the bytes after it that a match
 /// starting inside it may run on into.
 #[derive(Debug, Clone, Copy)]
-struct Span<'a> {
+pub(crate) struct Span<'a> {
     /// The run's bytes, then up to the search's reach of the file's next
     /// bytes.
     data: &'a [u8],
@@ -559,36 +732,6 @@ fn utf16le_eq_ignore_ascii_case(window: &[u8], wide: &[u8]) -> bool {
                         w[0] == n[0]
                     }
             })
-}
-
-/// Walks every window of every section and of the bytes no section maps,
-/// counting the matches and keeping the page of them after `offset`.
-///
-/// The walk never stops early: the total is what tells a caller how far
-/// the pages go, and a section is a memory compare per window. A window may
-/// run past its run's end into the file's next bytes ([`spans`]). Only a
-/// pattern of pure wildcards takes this walk: every other pattern is
-/// anchored and scanned eight bytes at a time by [`find_bytes`].
-///
-/// # Arguments
-///
-/// * `program` - The loaded image whose bytes are scanned.
-/// * `len` - The window length; zero matches nothing.
-/// * `offset` - Matches to skip before the page starts.
-/// * `matches` - Tells whether one window is a hit.
-fn scan(program: &Program, len: usize, offset: usize, matches: impl Fn(&[u8]) -> bool) -> Hits {
-    let mut out = Hits::default();
-    let Some(reach) = len.checked_sub(1) else {
-        return out;
-    };
-    for span in spans(program, reach) {
-        for (i, w) in (0..span.own).zip(span.data.windows(len)) {
-            if matches(w) {
-                out.push(&span, i, offset);
-            }
-        }
-    }
-    out
 }
 
 /// Demangles a decorated symbol, or returns the name unchanged.
