@@ -269,7 +269,7 @@ fn overlaps(ctx: Ctx, zed: &str) -> bool {
         Ctx::Code => &["Workspace", "Pane", "Editor"],
         Ctx::Rows => &["Workspace", "Dock", "Editor"],
         Ctx::Start | Ctx::Overview | Ctx::Graph | Ctx::Hex | Ctx::Struct => &["Workspace", "Pane"],
-        Ctx::StructEditor => &["Workspace", "Pane", "Editor"],
+        Ctx::StructEditor | Ctx::Annotate => &["Workspace", "Pane", "Editor"],
         Ctx::Table | Ctx::CallTree => &["Workspace", "Dock"],
         Ctx::MenuBar => &["Workspace", "menu"],
     };
@@ -360,6 +360,7 @@ fn handled(cx: &mut TestAppContext) -> Vec<(Ctx, BTreeSet<&'static str>)> {
                 | Ctx::CallTree
                 | Ctx::Struct
                 | Ctx::StructEditor
+                | Ctx::Annotate
                 | Ctx::MenuBar => anywhere.clone(),
             };
             (ctx, names)

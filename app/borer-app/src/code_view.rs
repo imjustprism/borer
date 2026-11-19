@@ -444,7 +444,7 @@ pub(crate) mod tests {
 
     use borer_engine::analysis::decompile::view::{view, view_of};
     use borer_engine::analysis::{Analysis, EnumSource, Overlay};
-    use borer_engine::program::{Arch, BinaryFormat, Program, Section};
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
     use borer_engine::view::{Kind, Ref};
 
     use super::{ClickOutcome, CodeLines, CodePalette, ROLES, Role, describe, resolve_ref_click};
@@ -518,6 +518,34 @@ pub(crate) mod tests {
         let sections = vec![Section::mapped(".text", ENTRY, 0, size, false, true)];
         let mut program = Program::raw(bytes, Arch::X86_64, ENTRY, Some(ENTRY), sections);
         program.format = BinaryFormat::Pe;
+        let analysis = Analysis::compute(&program);
+        let overlay = Overlay {
+            enum_source: EnumSource::Binary,
+            ..Overlay::default()
+        };
+        (program, analysis, overlay)
+    }
+
+    /// Returns an x64 image whose caller calls the callee, beside a function apart, as a
+    /// program whose overlay reads enums as the server's does, at 0x1000, 0x1030 and 0x1060.
+    pub(crate) fn three_functions() -> (Program, Analysis, Overlay) {
+        let mut bytes = vec![0xcc; 0x200];
+        let caller: &[u8] = &[
+            0x48, 0x83, 0xec, 0x28, // ASM: sub rsp,0x28
+            0xe8, 0x27, 0, 0, 0, // ASM: call CALLEE
+            0x48, 0x83, 0xc4, 0x28, 0xc3, // ASM: add rsp,0x28; ret
+        ];
+        bytes[..caller.len()].copy_from_slice(caller);
+        bytes[0x30..0x36].copy_from_slice(&[0x8b, 0x01, 0x83, 0xc0, 0x01, 0xc3]); // ASM: mov eax,[rcx]; add eax,1; ret
+        bytes[0x60..0x66].copy_from_slice(&[0xb8, 2, 0, 0, 0, 0xc3]); // ASM: mov eax,2; ret
+        let sections = vec![Section::mapped(".text", 0x1000, 0, 0x200, false, true)];
+        let mut program = Program::raw(bytes, Arch::X86_64, 0x1000, Some(0x1000), sections);
+        program.format = BinaryFormat::Pe;
+        program.symbols = vec![Symbol {
+            name: "apart".to_owned(),
+            addr: 0x1060,
+            kind: SymbolKind::Export,
+        }];
         let analysis = Analysis::compute(&program);
         let overlay = Overlay {
             enum_source: EnumSource::Binary,

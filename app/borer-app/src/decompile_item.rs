@@ -39,6 +39,7 @@ use crate::actions::{
     BACK_HINT, FollowLink, Hint, NextWrongBlock, PreviousWrongBlock, RecheckBlock, ShowCheck,
     ShowHex, ToggleListing, Xrefs,
 };
+use crate::annotate::{Annotator, answer_asks};
 use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::check_marks::{MarkHits, Marks, Toward, glyph_layer, paint_gutter};
@@ -49,6 +50,7 @@ use crate::places::{PERMANENT, Place, open_beside, open_later};
 use crate::worker::{Job, LoadedBinary, Referent, decompile_or_why, listing_blocking};
 
 mod checks;
+mod inline;
 
 use checks::{RECHECK_STATES, act_on_code};
 
@@ -201,6 +203,8 @@ pub struct DecompileItem {
     revision: Option<u64>,
     /// The line to put at the top once lines built after an edit arrive.
     keep_top: Option<usize>,
+    /// The cursor's row and byte to put back once the tab's lines are built again.
+    keep_cursor: Option<(usize, usize)>,
     /// An address to move to once the view is built ([`Self::go_to_address`]).
     waiting: Option<u64>,
     /// The background build.
@@ -217,6 +221,11 @@ pub struct DecompileItem {
     recheck_job: Job,
     /// The start of the block [`Self::recheck_job`] rechecks, while it runs.
     rechecking: Option<u64>,
+    /// The inline editor open under the cursor's line, its block in the editor, and its
+    /// events.
+    inline: Option<(Entity<Annotator>, CustomBlockId, Subscription)>,
+    /// The request for what the cursor's referent takes, before an inline editor opens.
+    offer_job: Job,
 }
 
 impl std::fmt::Debug for DecompileItem {
@@ -337,6 +346,7 @@ impl DecompileItem {
             ],
             revision: None,
             keep_top: None,
+            keep_cursor: None,
             waiting: None,
             job: Job::default(),
             marks: None,
@@ -345,6 +355,8 @@ impl DecompileItem {
             evidence: None,
             recheck_job: Job::default(),
             rechecking: None,
+            inline: None,
+            offer_job: Job::default(),
         };
         item.load(build, window, cx);
         item
@@ -438,7 +450,8 @@ impl DecompileItem {
                 let buffer = cx.insert_entity(reservation, |cx| {
                     Buffer::build(text, None, Capability::ReadOnly, cx)
                 });
-                let focused = self.editor.focus_handle(cx).is_focused(window);
+                let focused = self.editor.focus_handle(cx).contains_focused(window, cx);
+                self.inline = None;
                 self.editor = read_only_editor(buffer, window, cx);
                 self.editor_events = cx.subscribe(&self.editor, |item, editor, event, cx| {
                     item.on_editor_event(&editor, event, cx);
@@ -463,6 +476,9 @@ impl DecompileItem {
                 self.paint(false, cx);
                 if let Some(top) = self.keep_top.take() {
                     self.scroll_to(top);
+                }
+                if let Some(cursor) = self.keep_cursor.take() {
+                    self.put_cursor(cursor, window, cx);
                 }
                 if let Some(va) = self.waiting.take() {
                     self.go_to_address(va, cx);
@@ -700,6 +716,7 @@ impl DecompileItem {
             return;
         };
         self.keep_top = Some(self.top_line());
+        self.keep_cursor = self.cursor(cx);
         let (source, form) = (self.loaded.clone(), self.form);
         self.load(move || form.build(&source, entry), window, cx);
     }
@@ -820,6 +837,35 @@ impl DecompileItem {
             .update(cx, |editor, cx| editor.create_nav_history_entry(cx));
         self.pending = Some(Jump { line, cursor: true });
         cx.notify();
+    }
+
+    /// Puts the cursor at buffer row and byte `(row, col)`, held to the lines there are,
+    /// moving no scroll and no nav history.
+    ///
+    /// # Arguments
+    ///
+    /// * `(row, col)` - Buffer row and byte in the row.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn put_cursor(
+        &self,
+        (row, col): (usize, usize),
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let at = Point::new(
+            u32::try_from(row).unwrap_or(u32::MAX),
+            u32::try_from(col).unwrap_or(u32::MAX),
+        );
+        self.editor.update(cx, |editor, cx| {
+            let at = editor
+                .buffer()
+                .read(cx)
+                .snapshot(cx)
+                .clip_point(at, Bias::Left);
+            let effects = SelectionEffects::no_scroll().nav_history(false);
+            editor.change_selections(effects, window, cx, |s| s.select_ranges([at..at]));
+        });
     }
 
     /// Applies a jump: moves the cursor when it asks, and anchors the editor's top at the
@@ -1304,7 +1350,7 @@ impl Render for DecompileItem {
         let item = cx.entity().downgrade();
         let grade_of = move |row, cx: &App| item.upgrade()?.read(cx).grade(row);
         let marks = glyph_layer(self.editor.clone(), grade_of, self.hits.clone());
-        div()
+        answer_asks(div(), cx, Self::annotate)
             .key_context("DecompileView")
             .on_action(cx.listener(|item, _: &Xrefs, window, cx| {
                 item.open_function_place(

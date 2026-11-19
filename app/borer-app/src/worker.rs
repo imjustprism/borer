@@ -15,7 +15,7 @@ use borer_engine::analysis::decompile::replay::{
 };
 use borer_engine::analysis::decompile::text_check;
 use borer_engine::analysis::decompile::view::view;
-use borer_engine::analysis::edit::{self, Edit, Force};
+use borer_engine::analysis::edit::{self, Change, Edit, Force, Kind, Offer, Plan};
 use borer_engine::analysis::find::{Found, Query, everywhere};
 use borer_engine::analysis::project::{self, PROJECT_MAX, Project};
 use borer_engine::analysis::render::{
@@ -28,16 +28,18 @@ use borer_engine::analysis::utypes::{
     TypeDetail, TypeKind, TypeRows, TypeSource, type_detail, type_rows,
 };
 use borer_engine::analysis::{
-    Analysis, EnumSource, Overlay, decompile, name_of, no_function_at, resolve_suggesting,
+    Analysis, EnumSource, Overlay, cdecl, decompile, name_of, no_function_at, resolve_suggesting,
 };
 use borer_engine::cancel::Cancel;
 use borer_engine::hexdump::{HexRows, hex_rows};
+use borer_engine::num::from_usize;
 use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, SymbolKind, read_regular};
 use borer_engine::session::{self, Open, Pdb};
 use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
-use borer_engine::view::{LineBlock, View};
+use borer_engine::view::{LineBlock, Ref, View};
 use borer_front::project_file::{self, Existing};
+use borer_front::tools;
 use gpui::{App, Context, Global, SharedString, Task, Window};
 
 use crate::call_tree::Search;
@@ -166,7 +168,8 @@ impl Jobs {
 }
 
 /// Spawns synchronous engine work onto GPUI's background executor, under a fresh
-/// [`Cancel`], and lists it in [`Jobs`] while it runs.
+/// [`Cancel`], and lists it in [`Jobs`] while it runs; work whose flag is raised before it
+/// starts never runs.
 ///
 /// # Arguments
 ///
@@ -191,6 +194,9 @@ pub fn spawn_engine<R: Send + Unpin + 'static>(
     let flag = cancel.clone();
     let task = cx.background_executor().spawn(async move {
         flag.within(|| {
+            if Cancel::raised() {
+                return None;
+            }
             let answer = run_engine(work);
             (!Cancel::raised()).then_some(answer)
         })
@@ -534,58 +540,229 @@ pub fn load_binary_blocking(
     }))
 }
 
-/// Plans `edits` over `loaded`'s overlay through the engine's edit path and commits them,
-/// as the server's annotating tools do.
+/// An engine plan whose lines were on screen before it commits: the one thing
+/// [`commit_blocking`] takes.
 ///
-/// Must be called inside [`spawn_engine`].
-///
-/// # Arguments
-///
-/// * `loaded` - The state the edits are made over.
-/// * `edits` - The edits, in order.
-///
-/// # Returns
-///
-/// The state they leave, and how many overlay entries they wrote.
-///
-/// # Errors
-///
-/// Returns the engine's refusal when it refuses an edit or the overlay would pass a cap;
-/// nothing was written.
-pub fn edit_blocking(
-    loaded: &LoadedBinary,
-    edits: &[Edit],
-) -> anyhow::Result<(Arc<LoadedBinary>, usize)> {
-    let (program, analysis) = (&loaded.program, &loaded.analysis);
-    let plan = edit::plan(program, analysis, &loaded.overlay, edits, Force::Refuse)?;
-    commit_blocking(loaded, &plan)
+/// Only the inline editor, the struct tab, the chat's proposal card and the undo stack make
+/// one, each once the plan's lines are shown or, for an undo, are the receipt; a source scan
+/// in the tests holds that.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    /// The plan.
+    plan: Plan,
+    /// Its lines as a dry run words them.
+    said: Vec<String>,
+    /// Its lines as a commit words them, once [`commit_blocking`] committed it.
+    done: Vec<String>,
 }
 
-/// Commits `plan` to `loaded`'s overlay through the engine's edit path, as a dry run showed
-/// it: the engine refuses a plan made over another overlay ([`edit::Stale`]).
+impl Shown {
+    /// Returns `plan` as shown, with its lines as a dry run words them.
+    ///
+    /// # Arguments
+    ///
+    /// * `plan` - The plan whose lines were on screen.
+    #[must_use]
+    pub(crate) fn new(plan: Plan) -> Self {
+        let said = words(&plan, true);
+        Self {
+            plan,
+            said,
+            done: Vec::new(),
+        }
+    }
+
+    /// Returns the plan's lines as a dry run words them.
+    #[must_use]
+    pub fn said(&self) -> &[String] {
+        &self.said
+    }
+
+    /// Returns what the commit did, as one line: the first line its commit words, and how
+    /// many more there are; empty before it committed.
+    #[must_use]
+    pub fn receipt(&self) -> String {
+        let Some(first) = self.done.first() else {
+            return String::new();
+        };
+        match self.done.len().saturating_sub(1) {
+            0 => first.clone(),
+            more => format!("{first} (and {more} more lines)"),
+        }
+    }
+
+    /// Returns the entries the plan writes, which an undo takes back.
+    #[must_use]
+    pub fn changes(&self) -> &[Change] {
+        self.plan.changes()
+    }
+
+    /// Returns about how many bytes the step holds: its lines as shown and as committed,
+    /// and the old and new values its changes keep ([`Change::bytes`]).
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        let lines: usize = self.said.iter().chain(&self.done).map(String::len).sum();
+        let changes: usize = self.plan.changes().iter().map(Change::bytes).sum();
+        lines.saturating_add(changes)
+    }
+}
+
+/// Writes `plan` to a copy of `loaded`'s overlay through the engine's commit, the one
+/// place the app calls it.
+///
+/// # Arguments
+///
+/// * `loaded` - The state the plan was made over.
+/// * `plan` - The plan.
+///
+/// # Errors
+///
+/// Returns the engine's refusal: the plan is stale or an entry changed since; nothing was
+/// written.
+fn write_plan(loaded: &LoadedBinary, plan: &Plan) -> anyhow::Result<Arc<LoadedBinary>> {
+    let mut overlay = (*loaded.overlay).clone();
+    edit::commit(&loaded.program, &loaded.analysis, &mut overlay, plan)?;
+    Ok(loaded.with_overlay(overlay))
+}
+
+/// Commits a shown plan over `loaded`'s overlay through the engine's edit path, the path
+/// the server's annotating tools take.
 ///
 /// Must be called inside [`spawn_engine`].
 ///
 /// # Arguments
 ///
-/// * `loaded` - The state the plan is committed to.
-/// * `plan` - The plan, made over some overlay of `loaded`'s program.
+/// * `loaded` - The state the plan was made over.
+/// * `shown` - The plan, its lines shown.
 ///
 /// # Returns
 ///
-/// The state it leaves and how many overlay entries it changed.
+/// The state it leaves, and the plan with its lines as the commit words them, which the
+/// undo stack keeps.
 ///
 /// # Errors
 ///
-/// Returns [`edit::Stale`] when the overlay moved since the plan was made, or the engine's
-/// refusal.
+/// Returns the engine's refusal when another edit landed since the plan was made or the
+/// overlay would pass a cap; nothing was written.
 pub fn commit_blocking(
     loaded: &LoadedBinary,
-    plan: &edit::Plan,
-) -> anyhow::Result<(Arc<LoadedBinary>, usize)> {
-    let mut overlay = (*loaded.overlay).clone();
-    edit::commit(&loaded.program, &loaded.analysis, &mut overlay, plan)?;
-    Ok((loaded.with_overlay(overlay), plan.changes().len()))
+    mut shown: Shown,
+) -> anyhow::Result<(Arc<LoadedBinary>, Shown)> {
+    let next = write_plan(loaded, &shown.plan)?;
+    shown.done = words(&shown.plan, false);
+    Ok((next, shown))
+}
+
+/// Plans taking `changes`, a committed plan's, back over `loaded`'s overlay as it is now
+/// ([`edit::revert`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state now.
+/// * `changes` - The changes taken back.
+///
+/// # Errors
+///
+/// Returns the engine's refusal: an edit since changed an entry, or taking the changes
+/// back would leave what a plan refuses.
+pub fn revert_blocking(loaded: &LoadedBinary, changes: &[Change]) -> Result<Plan, String> {
+    let (p, a) = (&*loaded.program, &*loaded.analysis);
+    edit::revert(p, a, &loaded.overlay, changes).map_err(|e| format!("{e:#}"))
+}
+
+/// Returns the edit of `kind` that `referent` takes over `loaded`'s overlay, as the engine
+/// says ([`edit::offer`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the edit would be made over.
+/// * `referent` - What a token or row links to.
+/// * `kind` - What is asked of it.
+///
+/// # Errors
+///
+/// The engine's sentence when the referent takes no edit of that kind.
+pub fn offer_blocking(loaded: &LoadedBinary, referent: &Ref, kind: Kind) -> Result<Offer, String> {
+    let (p, a) = (&*loaded.program, &*loaded.analysis);
+    edit::offer(p, a, &loaded.overlay, referent, kind)
+}
+
+/// Plans the edit `form` makes of `value` over `loaded`'s overlay through the catalog row
+/// an agent would call for it ([`tools::propose`]), so a person's edit is held to an
+/// agent's rule.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - The state the edit would be made over.
+/// * `form` - The engine's form.
+/// * `value` - What the person typed.
+///
+/// # Returns
+///
+/// The plan and its lines, which [`Shown::new`] takes once they are on screen.
+///
+/// # Errors
+///
+/// Returns the row's refusal of the value or the engine's of the edit, in their words.
+pub fn plan_form_blocking(
+    loaded: &LoadedBinary,
+    form: &edit::Form,
+    value: &str,
+) -> Result<(Plan, Vec<String>), String> {
+    let held = tools::Loaded {
+        program: Arc::clone(&loaded.program),
+        analysis: Arc::clone(&loaded.analysis),
+        overlay: Arc::clone(&loaded.overlay),
+    };
+    let plan = tools::propose(&held, form, value).map_err(|f| f.message)?;
+    let said = words(&plan, true);
+    Ok((plan, said))
+}
+
+/// Reads the C header at `path` through the checked reader, at most as many bytes as the
+/// engine reads declarations of ([`cdecl::TEXT_MAX`]), a UTF-8 byte order mark dropped.
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `path` - The header.
+///
+/// # Errors
+///
+/// Returns why: the path is refused, the file is past the cap or does not read, or it is
+/// not UTF-8 text.
+pub fn read_header_blocking(path: &Path) -> anyhow::Result<String> {
+    let bytes = read_regular(path, from_usize(cdecl::TEXT_MAX))?;
+    let text = String::from_utf8(bytes)
+        .map_err(|_| anyhow::anyhow!("{} is not UTF-8 text", path.display()))?;
+    Ok(text
+        .strip_prefix('\u{feff}')
+        .map_or_else(|| text.clone(), str::to_owned))
+}
+
+/// Returns a plan's lines as a dry run or a commit words them, one per line of text, each
+/// followed by its note ([`borer_engine::analysis::edit::Line::note`]).
+///
+/// # Arguments
+///
+/// * `plan` - The plan.
+/// * `dry` - Whether the plan is yet to commit.
+fn words(plan: &Plan, dry: bool) -> Vec<String> {
+    let mut out = Vec::with_capacity(plan.lines().len());
+    for line in plan.lines() {
+        let (said, _) = line.said(dry);
+        let lines = said.lines().map(str::trim).filter(|l| !l.is_empty());
+        out.extend(lines.map(str::to_owned));
+        out.extend(line.note());
+    }
+    out
 }
 
 /// Reads and parses the project file at `path` ([`Project::from_json`]).
@@ -640,9 +817,7 @@ pub fn open_project_blocking(
     )?;
     let left_out = admitted.left_out();
     let (plan, _, said) = admitted.into_parts();
-    let mut overlay = (*loaded.overlay).clone();
-    edit::commit(program, analysis, &mut overlay, &plan)?;
-    Ok((loaded.with_overlay(overlay), said, left_out))
+    Ok((write_plan(loaded, &plan)?, said, left_out))
 }
 
 /// Writes `loaded`'s annotations to a project file at `path` as the engine spells one,
@@ -949,51 +1124,24 @@ pub fn type_detail_blocking(
 ///
 /// * `loaded` - The state the edits would be made over.
 /// * `edits` - The edits, in order.
+/// * `force` - Whether a name another address answers to is taken.
+///
+/// # Returns
+///
+/// The plan and its lines, which [`Shown::new`] takes once they are on screen.
 ///
 /// # Errors
 ///
 /// Returns the engine's refusal of the first edit it refuses, or of a cap the edits pass.
-pub fn plan_blocking(loaded: &LoadedBinary, edits: &[Edit]) -> Result<Vec<String>, String> {
-    planned_blocking(loaded, edits, Force::Refuse).map(|(_, lines)| lines)
-}
-
-/// Plans `edits` over `overlay` through the engine's edit path, writing nothing.
-///
-/// It is the chat face's edit seam, planning over the names the person left whatever the
-/// face's answers print. Must be called inside [`spawn_engine`].
-///
-/// # Errors
-///
-/// Returns the engine's refusal of the first edit it refuses, or of a cap the edits pass.
-pub fn plan_over(
-    program: &Program,
-    analysis: &Analysis,
-    overlay: &Overlay,
-    edits: &[Edit],
-    force: Force,
-) -> anyhow::Result<edit::Plan> {
-    edit::plan(program, analysis, overlay, edits, force)
-}
-
-/// Plans `edits` over `loaded`'s overlay as [`plan_blocking`] does, keeping the plan.
-///
-/// A later [`commit_blocking`] commits exactly what its lines say; `force` says whether a
-/// name another address holds is taken.
-///
-/// Must be called inside [`spawn_engine`].
-///
-/// # Errors
-///
-/// Returns the engine's refusal.
 pub fn planned_blocking(
     loaded: &LoadedBinary,
     edits: &[Edit],
     force: Force,
-) -> Result<(edit::Plan, Vec<String>), String> {
+) -> Result<(Plan, Vec<String>), String> {
     let (p, a) = (&*loaded.program, &*loaded.analysis);
     let plan = edit::plan(p, a, &loaded.overlay, edits, force).map_err(|e| format!("{e:#}"))?;
-    let lines = plan.lines().iter().map(|line| line.said(true).0).collect();
-    Ok((plan, lines))
+    let said = words(&plan, true);
+    Ok((plan, said))
 }
 
 /// Proposes a struct from the accesses of the function at `entry` through its first
@@ -1469,6 +1617,29 @@ pub(crate) mod tests {
         assert!(settled);
     }
 
+    /// Work whose flag is raised before the executor starts it never runs, so a superseded
+    /// plan costs nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the work runs.
+    #[gpui::test]
+    fn work_raised_before_it_starts_never_runs(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let ran = Arc::new(AtomicU64::new(0));
+        let counted = ran.clone();
+        let request = cx.update(|cx| {
+            spawn_engine("superseded", cx, move || {
+                counted.fetch_add(1, Ordering::Relaxed)
+            })
+        });
+        running(cx).remove(0).1.raise();
+        cx.run_until_parked();
+        drop(request);
+        assert_eq!(ran.load(Ordering::Relaxed), 0);
+    }
+
     /// Dropping a request before it is answered raises its flag at once.
     ///
     /// # Panics
@@ -1533,14 +1704,17 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 66] {
+    fn sources() -> [(&'static str, &'static str); 71] {
         [
             ("actions.rs", include_str!("actions.rs")),
+            ("annotate.rs", include_str!("annotate.rs")),
+            ("annotate/tests.rs", include_str!("annotate/tests.rs")),
             ("app_assets.rs", include_str!("app_assets.rs")),
             ("app_dirs.rs", include_str!("app_dirs.rs")),
             ("app_settings.rs", include_str!("app_settings.rs")),
             ("app_view.rs", include_str!("app_view.rs")),
             ("binary.rs", include_str!("binary.rs")),
+            ("binary/log.rs", include_str!("binary/log.rs")),
             ("call_tree.rs", include_str!("call_tree.rs")),
             ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
             ("card.rs", include_str!("card.rs")),
@@ -1565,12 +1739,17 @@ pub(crate) mod tests {
                 "decompile_item/checks.rs",
                 include_str!("decompile_item/checks.rs"),
             ),
+            (
+                "decompile_item/inline.rs",
+                include_str!("decompile_item/inline.rs"),
+            ),
             ("features.rs", include_str!("features.rs")),
             ("function_columns.rs", include_str!("function_columns.rs")),
             ("functions_panel.rs", include_str!("functions_panel.rs")),
             ("goto.rs", include_str!("goto.rs")),
             ("graph_item.rs", include_str!("graph_item.rs")),
             ("hex_item.rs", include_str!("hex_item.rs")),
+            ("history.rs", include_str!("history.rs")),
             ("lib.rs", include_str!("lib.rs")),
             ("linear_item.rs", include_str!("linear_item.rs")),
             ("main.rs", include_str!("main.rs")),
@@ -1775,6 +1954,8 @@ pub(crate) mod tests {
             ".to_json(",
             "edit::plan",
             "edit::commit",
+            "edit::revert",
+            "edit::offers",
             "project_file::",
             "type_rows(",
             "type_detail(",
@@ -1812,6 +1993,103 @@ pub(crate) mod tests {
                 assert!(!code.contains(call), "{name} names {call}");
             }
         }
+    }
+
+    /// Nothing commits a plan whose lines were not shown.
+    ///
+    /// The engine's commit is called in one helper, which only the shown plan's commit and
+    /// the project open call, and a shown plan is made only by the inline editor, the
+    /// struct tab, the chat's proposal card and the undo stack.
+    #[test]
+    fn no_commit_without_a_shown_plan() {
+        let worker: String = kept(include_str!("worker.rs"))
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .replace(",)", ")");
+        assert_eq!(worker.matches("edit::commit(").count(), 1);
+        let helper = worker.split("fnwrite_plan(").nth(1).unwrap_or_default();
+        let helper = helper.split("fn").next().unwrap_or_default();
+        assert!(helper.contains("edit::commit("), "{helper}");
+        assert_eq!(worker.matches("write_plan(").count(), 3);
+        let commit = worker
+            .split("pubfncommit_blocking(")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            commit.starts_with("loaded:&LoadedBinary,mutshown:Shown)"),
+            "{commit}"
+        );
+        assert!(
+            commit.contains("write_plan(loaded,&shown.plan)"),
+            "{commit}"
+        );
+        for (name, text) in sources() {
+            let made = kept(text).matches("Shown::new").count();
+            let allowed = matches!(
+                name,
+                "annotate.rs" | "types.rs" | "history.rs" | "chat/thread.rs"
+            );
+            assert_eq!(made > 0, allowed, "{name} makes a shown plan {made} times");
+        }
+    }
+
+    /// A header past the engine's cap on declarations is refused with its size, and a byte
+    /// order mark is dropped from one within it.
+    #[test]
+    fn a_header_past_the_declarations_cap_is_refused_with_its_size() {
+        let dir = scratch("header");
+        let big = dir.join("big.h");
+        let size = super::cdecl::TEXT_MAX + 1;
+        std::fs::write(&big, vec![b' '; size]).unwrap();
+        let why = format!("{:#}", super::read_header_blocking(&big).unwrap_err());
+        let small = dir.join("small.h");
+        std::fs::write(&small, "\u{feff}struct P { int x; };").unwrap();
+        let read = super::read_header_blocking(&small).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(why.contains(&size.to_string()), "{why}");
+        assert_eq!(read, "struct P { int x; };");
+    }
+
+    /// No module writes the overlay: no map of it is changed and no overlay is borrowed to
+    /// write, but in the one helper that hands it to the engine's commit.
+    #[test]
+    fn no_app_module_writes_the_overlay() {
+        let maps = [
+            "names",
+            "comments",
+            "types",
+            "applied",
+            "prototypes",
+            "vars",
+            "fields",
+        ];
+        let writes = [
+            "insert(", "remove(", "entry(", "clear(", "retain(", "extend(", "get_mut(",
+        ];
+        let mut found = Vec::new();
+        let worker = ("worker.rs", include_str!("worker.rs"));
+        for (name, text) in sources().into_iter().chain([worker]) {
+            let code = kept(text);
+            for map in maps {
+                for write in writes {
+                    let call = format!("overlay.{map}.{write}");
+                    if code.contains(&call) {
+                        found.push(format!("{name}: {call}"));
+                    }
+                }
+            }
+            for write in [".assign(", ".restate(", "&mut Overlay"] {
+                if code.contains(write) {
+                    found.push(format!("{name}: {write}"));
+                }
+            }
+            let borrowed = code.matches("&mut overlay").count();
+            if borrowed != usize::from(name == "worker.rs") {
+                found.push(format!("{name}: &mut overlay {borrowed} times"));
+            }
+        }
+        assert!(found.is_empty(), "{found:?}");
     }
 
     /// Returns the module a line declares in a file of its own (`mod x;` with any

@@ -12,7 +12,7 @@ use std::future::Future;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use borer_engine::analysis::edit::{Edit, Force, Plan};
+use borer_engine::analysis::edit::{Author, Edit, Force, Plan};
 use borer_front::budget::{Narrow, cut_to};
 use futures::StreamExt as _;
 use futures::future::Either;
@@ -28,8 +28,8 @@ use super::providers::{Endpoint, Offered};
 use super::tools::{self, Proposed};
 use borer_engine::text::one_line;
 
-use crate::binary::{Author, Binary, BinaryEvent, Committed};
-use crate::worker::{planned_blocking, spawn_engine};
+use crate::binary::{Binary, BinaryEvent, Committed};
+use crate::worker::{self, planned_blocking, spawn_engine};
 
 /// Most tool calls one turn of the model makes: a call past it is refused and the turn ends.
 pub const TOOL_CALLS_MAX: usize = 40;
@@ -248,8 +248,8 @@ impl Chosen {
     #[must_use]
     pub fn author(&self) -> Author {
         Author::Model {
-            provider: self.model.provider_name.0.clone(),
-            model: self.model.id.0.clone(),
+            provider: self.model.provider_name.0.to_string(),
+            model: self.model.id.0.to_string(),
         }
     }
 
@@ -780,14 +780,13 @@ impl Thread {
             return;
         }
         proposal.verdict = Verdict::Accepting;
-        let (plan, author) = (proposal.plan.clone(), proposal.author.clone());
-        let what = match proposal.edits.as_slice() {
-            [Edit::Name { at, .. }] => format!("Renaming {at:#x}"),
-            _ => "Editing".to_owned(),
-        };
+        let (shown, author) = (
+            worker::Shown::new(proposal.plan.clone()),
+            proposal.author.clone(),
+        );
         let heard = self
             .binary
-            .update(cx, |binary, cx| binary.commit_by(plan, what, author, cx));
+            .update(cx, |binary, cx| binary.commit(shown, author, cx));
         cx.spawn(async move |this, cx| {
             let (verdict, busy) = match heard.await {
                 Ok(Committed::Done) => (Verdict::Accepted, None),
@@ -1213,7 +1212,7 @@ async fn within<T>(
 ///
 /// When the timer fired first.
 async fn within_deadline<R: Unpin + 'static>(
-    ran: crate::worker::EngineTask<R>,
+    ran: worker::EngineTask<R>,
     timer: Option<Task<()>>,
 ) -> Result<Option<R>, ()> {
     let Some(timer) = timer else {

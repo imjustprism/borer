@@ -8,7 +8,6 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use borer_engine::analysis::decompile::replay::{BlockCheck, Grade, Rechecked, TextCheck};
-use borer_engine::analysis::edit::{self, Edit};
 use borer_engine::analysis::project::{Foreign, Project};
 use futures::channel::oneshot;
 use gpui::{
@@ -22,13 +21,16 @@ use borer_engine::cancel::Cancel;
 
 use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
 use crate::commands;
+use crate::history::History;
 use crate::places::Place;
 use crate::recent::{self, RecentBinary, file_name};
 use crate::stored::SavedTab;
 use crate::worker::{
-    Job, LoadedBinary, State, commit_blocking, edit_blocking, load_binary_blocking,
-    open_project_blocking, read_project_blocking, save_project_blocking, spawn_engine,
+    Job, LoadedBinary, State, load_binary_blocking, open_project_blocking, read_project_blocking,
+    save_project_blocking, spawn_engine,
 };
+
+mod log;
 
 /// Returns what a load of `path` is called while it runs: `Reading` and the file's name.
 ///
@@ -45,6 +47,9 @@ type Rechecks = (u64, Arc<Option<TextCheck>>);
 
 /// Most rechecked checks the session holds; past it the oldest is dropped.
 pub const RECHECKED_MAX: usize = 32;
+
+/// Most characters of a plan's first line a job's label holds.
+const LABEL_MAX: usize = 60;
 
 /// The status line while no binary is open.
 pub const NO_BINARY: &str = "No binary loaded";
@@ -98,32 +103,7 @@ pub trait Revision {
     fn revision(&self) -> Option<u64>;
 }
 
-/// Who made an edit.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Author {
-    /// The person at the app.
-    Person,
-    /// A model in the chat panel, whose proposal the person accepted.
-    Model {
-        /// The provider's name, as its registry row gives it.
-        provider: SharedString,
-        /// The model's id at that provider.
-        model: SharedString,
-    },
-}
-
-/// One committed edit in the change feed.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Change {
-    /// Who made it.
-    pub author: Author,
-    /// What it did, as the job list called it (`Renaming 0x1000`).
-    pub what: String,
-    /// [`LoadedBinary::fingerprint`] of the overlay it left.
-    pub fingerprint: u64,
-}
-
-/// What became of a plan handed to [`Binary::commit_by`].
+/// What became of a plan handed to [`Binary::commit`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Committed {
     /// It was written, and the change feed holds it.
@@ -181,8 +161,8 @@ pub struct Binary {
     edit: Job,
     /// What [`Self::edit`] runs, `None` while nothing does.
     editing: Option<String>,
-    /// The edits committed since the binary opened, oldest first.
-    changes: Vec<Change>,
+    /// The plans committed to the open binary, to undo and redo.
+    history: History,
     /// The window the binary is shown in, where its questions are asked; `None` until
     /// [`Self::set_window`], and then nothing asks before dropping edits.
     window: Option<AnyWindowHandle>,
@@ -235,7 +215,7 @@ impl Binary {
             remember_task: None,
             edit: Job::default(),
             editing: None,
-            changes: Vec::new(),
+            history: History::default(),
             window: None,
             rechecked: BTreeMap::new(),
             rechecks_put: 0,
@@ -803,7 +783,7 @@ impl Binary {
             this.update(cx, |binary, cx| binary.set_status(why, cx));
         }));
         self.saved = loaded.fingerprint;
-        self.changes.clear();
+        self.history.clear();
         self.restore_tabs(&loaded);
         self.loaded = Some(loaded.clone());
         self.rechecked.clear();
@@ -877,135 +857,6 @@ impl Binary {
         cx.emit(BinaryEvent::Revised(next));
         cx.notify();
         true
-    }
-
-    /// Plans and commits `edits` through the engine's edit path in the background, the same
-    /// path the server's annotating tools take, and shows the overlay they leave.
-    ///
-    /// # Arguments
-    ///
-    /// * `edits` - The edits, in order.
-    /// * `cx` - Binary context.
-    pub fn edit(&mut self, edits: Vec<Edit>, cx: &mut Context<'_, Self>) {
-        self.edit_by(edits, Author::Person, cx);
-    }
-
-    /// Plans and commits `edits` as [`Self::edit`] does, and adds what they changed to the
-    /// change feed under `author`.
-    ///
-    /// # Arguments
-    ///
-    /// * `edits` - The edits, in order.
-    /// * `author` - Who made them.
-    /// * `cx` - Binary context.
-    pub fn edit_by(&mut self, edits: Vec<Edit>, author: Author, cx: &mut Context<'_, Self>) {
-        let label = match edits.first() {
-            Some(Edit::Name { at, .. }) => format!("Renaming {at:#x}"),
-            _ => "Editing".to_owned(),
-        };
-        let what = label.clone();
-        self.run(
-            label,
-            move |loaded| edit_blocking(loaded, &edits),
-            |binary, base, out, cx| match out {
-                Ok((next, changes)) => {
-                    binary.land(&base, next, changes, author, what, cx);
-                }
-                Err(err) => binary.set_status(format!("edit refused: {err:#}"), cx),
-            },
-            cx,
-        );
-    }
-
-    /// Commits `plan` as it was shown, through the engine's edit path in the background, and
-    /// adds it to the change feed under `author`; never plans again, so a plan made over an
-    /// overlay that has moved since is refused as stale.
-    ///
-    /// # Arguments
-    ///
-    /// * `plan` - The plan, as its lines were shown.
-    /// * `what` - What the job list and the change feed call it.
-    /// * `author` - Who made it.
-    /// * `cx` - Binary context.
-    ///
-    /// # Returns
-    ///
-    /// What became of it, once known; the sender drops when the binary does.
-    pub fn commit_by(
-        &mut self,
-        plan: edit::Plan,
-        what: String,
-        author: Author,
-        cx: &mut Context<'_, Self>,
-    ) -> oneshot::Receiver<Committed> {
-        let (said, heard) = oneshot::channel();
-        let busy = match (&self.loaded, &self.editing) {
-            (None, _) => Some(Committed::Refused("open a binary first".to_owned())),
-            (_, Some(running)) => Some(Committed::Busy(format!(
-                "{running} still runs; accept again once it ends"
-            ))),
-            (Some(_), None) => None,
-        };
-        if let Some(busy) = busy {
-            drop(said.send(busy));
-            return heard;
-        }
-        let label = what.clone();
-        self.run(
-            label,
-            move |loaded| commit_blocking(loaded, &plan),
-            move |binary, base, out, cx| {
-                let committed = match out {
-                    Ok((next, changes)) => {
-                        if binary.land(&base, next, changes, author, what, cx) {
-                            Committed::Done
-                        } else {
-                            Committed::Stale
-                        }
-                    }
-                    Err(err) if err.is::<edit::Stale>() => Committed::Stale,
-                    Err(err) => Committed::Refused(format!("{err:#}")),
-                };
-                drop(said.send(committed));
-            },
-            cx,
-        );
-        heard
-    }
-
-    /// Puts `next`, made over `base`, in place of the open state as [`Self::advance`] does,
-    /// and adds it to the change feed as `what` by `author`.
-    ///
-    /// # Returns
-    ///
-    /// Whether it landed.
-    fn land(
-        &mut self,
-        base: &Arc<LoadedBinary>,
-        next: Arc<LoadedBinary>,
-        changes: usize,
-        author: Author,
-        what: String,
-        cx: &mut Context<'_, Self>,
-    ) -> bool {
-        let fingerprint = next.fingerprint;
-        if !self.advance(base, next, cx) {
-            return false;
-        }
-        self.changes.push(Change {
-            author,
-            what,
-            fingerprint,
-        });
-        self.set_status(format!("{changes} overlay entries changed"), cx);
-        true
-    }
-
-    /// Returns the edits committed since the binary opened, oldest first, each with who
-    /// made it: the change feed.
-    #[must_use]
-    pub fn changes(&self) -> &[Change] {
-        &self.changes
     }
 
     /// Opens the system file dialog for a project file and opens the one picked.
@@ -1184,6 +1035,7 @@ impl Binary {
                 Ok((next, said, left_out)) => {
                     let saved = next.fingerprint;
                     if binary.advance(&base, next, cx) {
+                        let forgot = binary.history.clear();
                         let whole = left_out == 0;
                         if whole {
                             binary.saved = saved;
@@ -1194,6 +1046,9 @@ impl Binary {
                             status.push_str(&format!(
                                 "; {left_out} left out stay in the file, so Save asks for a new one"
                             ));
+                        }
+                        if forgot {
+                            status.push_str("; the edits before it can no longer be undone");
                         }
                         binary.project = (whole && !force).then_some(path);
                         binary.set_status(status, cx);
@@ -1651,17 +1506,65 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
-    use borer_engine::analysis::edit::Edit;
+    use borer_engine::analysis::edit::{Author, Edit, Force};
     use borer_engine::analysis::render::{FunctionRows, LeftOut};
     use gpui::{
-        AnyWindowHandle, AppContext as _, Entity, SharedString, TestAppContext, VisualTestContext,
+        AnyWindowHandle, AppContext as _, Context, Entity, SharedString, TestAppContext,
+        VisualTestContext,
     };
     use ui::Color;
 
     use super::{Binary, STILL_READING, UNSAVED};
     use crate::app_view::tests::sample;
-    use crate::worker::LoadedBinary;
     use crate::worker::tests::{HELPER, scratch, tiny_pe};
+    use crate::worker::{LoadedBinary, Shown, planned_blocking};
+
+    impl Binary {
+        /// Plans `edits` over the binary's state now and commits the plan through
+        /// [`Binary::commit`], the path the inline editor's Enter takes: a test's way to make
+        /// edits the views then show.
+        ///
+        /// # Arguments
+        ///
+        /// * `edits` - The edits, in order.
+        /// * `cx` - Binary context.
+        ///
+        /// # Panics
+        ///
+        /// When nothing is loaded or the engine refuses the edits.
+        pub(crate) fn plan_and_commit(&mut self, edits: &[Edit], cx: &mut Context<'_, Self>) {
+            self.plan_and_commit_by(edits, Author::Person, cx);
+        }
+
+        /// Plans `edits` and commits the plan as [`Binary::plan_and_commit`] does, by
+        /// `author`.
+        ///
+        /// # Arguments
+        ///
+        /// * `edits` - The edits, in order.
+        /// * `author` - Who made them.
+        /// * `cx` - Binary context.
+        ///
+        /// # Panics
+        ///
+        /// When nothing is loaded or the engine refuses the edits.
+        pub(crate) fn plan_and_commit_by(
+            &mut self,
+            edits: &[Edit],
+            author: Author,
+            cx: &mut Context<'_, Self>,
+        ) {
+            let loaded = self.loaded.clone().expect("a binary");
+            let planned = planned_blocking(&loaded, edits, Force::Refuse).expect("planned");
+            drop(self.commit(Shown::new(planned.0), author, cx));
+        }
+
+        /// Forgets the newest committed step, as if another author than the window's person
+        /// had made it.
+        pub(crate) fn forget_newest_step(&mut self) {
+            self.history.forget_newest();
+        }
+    }
 
     /// The status line leads with the engine's architecture and format of the open binary,
     /// soft, then the engine's count of its functions and of those it hid, muted; nothing
@@ -1800,13 +1703,23 @@ mod tests {
             }]
         };
         binary.update(cx, |binary, cx| {
-            binary.edit(rename(CALLER, "first"), cx);
-            binary.edit(rename(CALLEE, "second"), cx);
+            binary.plan_and_commit(&rename(CALLER, "first"), cx);
+            binary.plan_and_commit(&rename(CALLEE, "second"), cx);
         });
         let status = binary.read_with(cx, |binary, _| binary.status().to_owned());
+        let label = |at: u64, name: &str| {
+            let said = planned_blocking(&sample(), &rename(at, name), Force::Refuse)
+                .unwrap()
+                .1;
+            format!("Editing: {}", said[0].chars().take(60).collect::<String>())
+        };
         assert_eq!(
             status,
-            "Renaming 0x1030 refused: Renaming 0x1000 still runs; do it again once it ends"
+            format!(
+                "{} refused: {} still runs; do it again once it ends",
+                label(CALLEE, "second"),
+                label(CALLER, "first")
+            )
         );
         cx.run_until_parked();
         let names = |cx: &mut TestAppContext| {
@@ -1819,7 +1732,9 @@ mod tests {
             })
         };
         assert_eq!(names(cx), (Some("first".to_owned()), None));
-        binary.update(cx, |binary, cx| binary.edit(rename(CALLEE, "second"), cx));
+        binary.update(cx, |binary, cx| {
+            binary.plan_and_commit(&rename(CALLEE, "second"), cx);
+        });
         cx.run_until_parked();
         assert_eq!(names(cx).1, Some("second".to_owned()));
     }
@@ -1886,7 +1801,7 @@ mod tests {
             at: HELPER,
             name: "renamed_helper".to_owned(),
         };
-        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        binary.update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
         cx.run_until_parked();
     }
 
@@ -1942,6 +1857,33 @@ mod tests {
         assert!(!title.contains(UNSAVED), "{title}");
     }
 
+    /// Opening a project forgets the edits Undo could take back and says so; opening one
+    /// with nothing to undo says nothing of it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the status line is wrong or Undo still finds an edit.
+    #[gpui::test]
+    fn opening_a_project_says_it_forgets_what_undo_holds(cx: &mut TestAppContext) {
+        let dir = scratch("forgets");
+        let (binary, cx) = binary(cx);
+        let (exe, project, _) = renamed_and_saved(&binary, &dir, cx);
+        open_project(&binary, &project, cx);
+        let (_, _, status) = state(&binary, cx);
+        assert!(
+            status.ends_with("; the edits before it can no longer be undone"),
+            "{status}"
+        );
+        binary.update(cx, |binary, cx| binary.step(crate::history::Way::Undo, cx));
+        assert_eq!(state(&binary, cx).2, "nothing to undo");
+        let fresh = cx.new(|cx| Binary::new(cx));
+        open(&fresh, &exe, cx);
+        open_project(&fresh, &project, cx);
+        let (_, _, status) = state(&fresh, cx);
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert!(!status.contains("undone"), "{status}");
+    }
+
     /// Opening a project over edits no project file holds asks first: Cancel keeps the
     /// edits, Open replaces them with the project's.
     ///
@@ -1957,7 +1899,7 @@ mod tests {
             at: HELPER,
             name: "renamed_again".to_owned(),
         };
-        binary.update(cx, |binary, cx| binary.edit(vec![again], cx));
+        binary.update(cx, |binary, cx| binary.plan_and_commit(&[again], cx));
         cx.run_until_parked();
         let (unsaved, ..) = state(&binary, cx);
         assert_ne!(unsaved, edited);
@@ -1999,7 +1941,7 @@ mod tests {
                 at: HELPER,
                 name: format!("before_{answer}"),
             };
-            binary.update(cx, |binary, cx| binary.edit(vec![again], cx));
+            binary.update(cx, |binary, cx| binary.plan_and_commit(&[again], cx));
             cx.run_until_parked();
             let (edited, ..) = state(&binary, cx);
             open(&binary, &other, cx);

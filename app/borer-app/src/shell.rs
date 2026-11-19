@@ -430,7 +430,7 @@ mod tests {
             name: "unsaved".to_owned(),
         };
         app.binary
-            .update(cx, |binary, cx| binary.edit(vec![rename], cx));
+            .update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
         cx.run_until_parked();
         assert!(app.binary.read_with(cx, |binary, _| binary.is_unsaved()));
         let asks: [Box<dyn gpui::Action>; 3] = [

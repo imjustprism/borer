@@ -96,13 +96,15 @@ pub enum Ctx {
     Struct,
     /// A struct tab's editor, where a field's new name or type is typed.
     StructEditor,
+    /// The inline editor's text field, where a name, a comment or a type is typed.
+    Annotate,
     /// The in-window menu bar.
     MenuBar,
 }
 
 impl Ctx {
     /// Every context, in the order the keymap's sections go.
-    pub const ALL: [Self; 13] = [
+    pub const ALL: [Self; 14] = [
         Self::Global,
         Self::Workspace,
         Self::Code,
@@ -115,6 +117,7 @@ impl Ctx {
         Self::CallTree,
         Self::Struct,
         Self::StructEditor,
+        Self::Annotate,
         Self::MenuBar,
     ];
 
@@ -124,16 +127,17 @@ impl Ctx {
         match self {
             Self::Global => None,
             Self::Workspace => Some("Workspace"),
-            Self::Code => Some("DecompileView > Editor"),
-            Self::Rows => Some("RowsPanel > Editor"),
+            Self::Code => Some("(DecompileView > Editor) && !Annotating"),
+            Self::Rows => Some("(RowsPanel > Editor) && !Annotating"),
             Self::Start => Some("StartItem"),
             Self::Overview => Some("Overview"),
             Self::Graph => Some("GraphView"),
-            Self::Hex => Some("HexView"),
+            Self::Hex => Some("HexView && !Annotating"),
             Self::Table => Some("BorerRows"),
             Self::CallTree => Some("CallTreePanel"),
             Self::Struct => Some("StructItem && !Editor"),
             Self::StructEditor => Some("StructItem > Editor"),
+            Self::Annotate => Some("Annotating > Editor"),
             Self::MenuBar => Some("MenuBar"),
         }
     }
@@ -304,6 +308,22 @@ pub struct Command {
     pub replaces: &'static [&'static str],
 }
 
+/// Returns Redo Edit's keys in `context`: secondary-shift-z everywhere, and ctrl-y too on
+/// Windows, as its other programs redo.
+///
+/// # Arguments
+///
+/// * `context` - Where the keys work.
+const fn redo_keys(context: Ctx) -> Keys {
+    Keys {
+        all: &[],
+        win: &["ctrl-shift-z", "ctrl-y"],
+        linux: &["ctrl-shift-z"],
+        mac: &["cmd-shift-z"],
+        context,
+    }
+}
+
 /// Returns a row for `action` that is in no menu, binds `keys` and needs nothing.
 const fn binding(action: &'static str, label: &'static str, keys: &'static [Keys]) -> Command {
     Command {
@@ -451,6 +471,118 @@ pub const COMMANDS: &[Command] = &[
             "borer::ProposeStruct",
             "Propose Struct from Accesses",
             (MenuName::Edit, 0),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &["secondary-z"]),
+            Keys::all(Ctx::Table, &["secondary-z"]),
+            Keys::all(Ctx::Hex, &["secondary-z"]),
+        ],
+        replaces: &["editor::Undo"],
+        ..item(
+            "borer::UndoEdit",
+            "Undo Edit",
+            (MenuName::Edit, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            redo_keys(Ctx::Code),
+            redo_keys(Ctx::Table),
+            redo_keys(Ctx::Hex),
+        ],
+        replaces: &["editor::Redo"],
+        ..item(
+            "borer::RedoEdit",
+            "Redo Edit",
+            (MenuName::Edit, 1),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &["n", "f2"]),
+            Keys::all(Ctx::Table, &["n", "f2"]),
+            Keys::all(Ctx::Hex, &["n", "f2"]),
+        ],
+        serves: &["set_name"],
+        replaces: &["editor::Rename"],
+        ..item("borer::Rename", "Rename", (MenuName::Edit, 2), Need::Binary)
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &[";"]),
+            Keys::all(Ctx::Table, &[";"]),
+            Keys::all(Ctx::Hex, &[";"]),
+        ],
+        serves: &["set_comment"],
+        ..item(
+            "borer::Comment",
+            "Comment",
+            (MenuName::Edit, 2),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[
+            Keys::all(Ctx::Code, &["q"]),
+            Keys::all(Ctx::Table, &["q"]),
+            Keys::all(Ctx::Hex, &["q"]),
+        ],
+        serves: &["set_comment", "annotations"],
+        ..item(
+            "borer::AskQuestion",
+            "Ask a Question",
+            (MenuName::Edit, 2),
+            Need::Binary,
+        )
+    },
+    Command {
+        keys: &[Keys::all(Ctx::Code, &["y"])],
+        serves: &["set_type"],
+        ..item(
+            "borer::SetType",
+            "Set Type",
+            (MenuName::Edit, 2),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["set_type"],
+        ..item(
+            "borer::DeclareC",
+            "Declare C...",
+            (MenuName::Edit, 3),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["set_type"],
+        ..item(
+            "borer::DeclareHeader",
+            "Declare C from Header...",
+            (MenuName::Edit, 3),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["set_type"],
+        ..item(
+            "borer::NewEnum",
+            "New Enum...",
+            (MenuName::Edit, 3),
+            Need::Binary,
+        )
+    },
+    Command {
+        serves: &["set_type"],
+        ..item(
+            "borer::NewTypedef",
+            "New Typedef...",
+            (MenuName::Edit, 3),
             Need::Binary,
         )
     },
@@ -1032,6 +1164,7 @@ pub const COMMANDS: &[Command] = &[
             &[
                 Keys::all(Ctx::Struct, &["escape"]),
                 Keys::all(Ctx::StructEditor, &["escape"]),
+                Keys::all(Ctx::Annotate, &["escape"]),
             ],
         )
     },

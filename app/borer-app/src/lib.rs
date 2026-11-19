@@ -1,6 +1,7 @@
 //! Desktop GPUI application over [`borer_engine`], hosted in Zed's workspace.
 
 pub mod actions;
+pub mod annotate;
 pub mod app_assets;
 pub mod app_dirs;
 pub mod app_settings;
@@ -27,6 +28,7 @@ pub mod functions_panel;
 pub mod goto;
 pub mod graph_item;
 pub mod hex_item;
+pub mod history;
 pub mod linear_item;
 pub mod measure;
 pub mod menus;

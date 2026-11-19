@@ -6,7 +6,7 @@ mod edit;
 use std::any::Any;
 use std::sync::Arc;
 
-use borer_engine::analysis::edit::Edit;
+use borer_engine::analysis::edit::{Author, Edit, Force, Plan};
 use borer_engine::analysis::render::{Proposal, Proposed};
 use borer_engine::analysis::utypes::{TypeDetail, TypeKind, TypeRow, TypeRows, TypeSource};
 use borer_engine::num::from_usize;
@@ -43,7 +43,7 @@ use crate::rail::panel;
 use crate::rows_panel::{Answer, Empty, RowKind, RowsPanel, add, current, focus};
 use crate::table::{Align, Column, Columns, Fit, Ink};
 use crate::worker::{
-    Job, LoadedBinary, plan_blocking, propose_blocking, type_detail_blocking, type_rows_blocking,
+    Job, LoadedBinary, planned_blocking, propose_blocking, type_detail_blocking, type_rows_blocking,
 };
 
 /// The types panel's row of [`crate::panels::PANELS`].
@@ -436,8 +436,9 @@ fn name_width(detail: &TypeDetail) -> usize {
     names.max().unwrap_or(0)
 }
 
-/// The edits planned and the engine's dry-run lines for them, or its refusal.
-type Planned = (Vec<Edit>, Result<Vec<String>, String>);
+/// The edits planned, and the engine's plan of them with its dry-run lines, which Enter
+/// commits once they are shown, or its refusal.
+type Planned = (Vec<Edit>, Result<(Plan, Vec<String>), String>);
 
 /// An edit asked for: what, and once planned, the engine's words for it.
 #[derive(Debug)]
@@ -594,8 +595,14 @@ impl StructItem {
     /// Returns the engine's dry-run lines of the planned edit, or its refusal, `None`
     /// before an edit is planned.
     #[must_use]
-    pub fn said(&self) -> Option<&Result<Vec<String>, String>> {
-        self.draft.as_ref()?.planned.as_ref().map(|(_, said)| said)
+    pub fn said(&self) -> Option<Result<Vec<String>, String>> {
+        let (_, planned) = self.draft.as_ref()?.planned.as_ref()?;
+        Some(
+            planned
+                .as_ref()
+                .map(|(_, said)| said.clone())
+                .map_err(Clone::clone),
+        )
     }
 
     /// Returns the edits planned, empty before an edit is planned.
@@ -685,7 +692,7 @@ impl StructItem {
             }
         };
         let (source, asked) = (self.loaded.clone(), edits.clone());
-        let work = move || plan_blocking(&source, &asked);
+        let work = move || planned_blocking(&source, &asked, Force::Refuse);
         let label = format!("Planning an edit of {}", self.subject.title());
         self.plan_job.run(label, cx, work, move |item, said, cx| {
             if let Some(draft) = &mut item.draft {
@@ -729,11 +736,15 @@ impl StructItem {
             None => self.plan(window, cx),
             Some((_, Ok(_))) => {
                 if let Some(Draft {
-                    planned: Some((edits, _)),
+                    planned: Some((_, Ok(planned))),
                     ..
                 }) = self.draft.take()
                 {
-                    self.binary.update(cx, |binary, cx| binary.edit(edits, cx));
+                    let shown = crate::worker::Shown::new(planned.0);
+                    let heard = self
+                        .binary
+                        .update(cx, |binary, cx| binary.commit(shown, Author::Person, cx));
+                    drop(heard);
                 }
             }
             Some((_, Err(_))) => {}
@@ -844,7 +855,7 @@ impl StructItem {
         let draft = self.draft.as_ref()?;
         let typing = draft.planned.is_none() && draft.ask.takes_text();
         let said: Vec<AnyElement> = match &draft.planned {
-            Some((_, Ok(lines))) => lines
+            Some((_, Ok((_, lines)))) => lines
                 .iter()
                 .map(String::as_str)
                 .chain(std::iter::once("Enter commits, Escape drops"))
@@ -1348,7 +1359,7 @@ mod tests {
         let item = struct_tab(&workspace, &loaded, type_place("S", TypeSource::User), cx);
         item.update_in(cx, |item, window, cx| item.start(Ask::Rename, window, cx));
         type_and_confirm(&item, "x", cx);
-        let said = item.read_with(cx, |item, _| item.said().cloned());
+        let said = item.read_with(cx, |item, _| item.said());
         let said = said.unwrap().unwrap();
         assert!(said.iter().any(|line| line.contains('x')), "{said:?}");
         item.update_in(cx, |item, window, cx| item.confirm(window, cx));
@@ -1406,13 +1417,11 @@ mod tests {
         let (workspace, _, loaded, cx) = loaded_with_structs(cx);
         let item = struct_tab(&workspace, &loaded, type_place("D", TypeSource::Dwarf), cx);
         item.update_in(cx, |item, window, cx| item.start(Ask::Rename, window, cx));
-        let refused = item.read_with(cx, |item, _| item.said().cloned());
+        let refused = item.read_with(cx, |item, _| item.said());
         assert!(refused.unwrap().unwrap_err().contains("read only"));
         item.update_in(cx, |item, window, cx| item.start(Ask::Copy, window, cx));
         type_and_confirm(&item, "DCopy", cx);
-        let (planned, said) = item.read_with(cx, |item, _| {
-            (item.planned().to_vec(), item.said().cloned())
-        });
+        let (planned, said) = item.read_with(cx, |item, _| (item.planned().to_vec(), item.said()));
         let [
             Edit::Fields {
                 name, fields, mode, ..
@@ -1462,7 +1471,7 @@ mod tests {
         for ask in [Ask::Add, Ask::Rename, Ask::Retype, Ask::Delete, Ask::Size] {
             item.update_in(cx, |item, window, cx| item.start(ask, window, cx));
             cx.run_until_parked();
-            let said = item.read_with(cx, |item, _| item.said().cloned());
+            let said = item.read_with(cx, |item, _| item.said());
             assert!(matches!(said, Some(Err(_))), "{ask:?}: {said:?}");
         }
     }
@@ -1507,9 +1516,7 @@ mod tests {
         let item = struct_tab(&workspace, &loaded, Place::Proposal { entry: CALLER }, cx);
         item.update_in(cx, |item, window, cx| item.start(Ask::Accept, window, cx));
         type_and_confirm(&item, "Obj", cx);
-        let (planned, said) = item.read_with(cx, |item, _| {
-            (item.planned().to_vec(), item.said().cloned())
-        });
+        let (planned, said) = item.read_with(cx, |item, _| (item.planned().to_vec(), item.said()));
         let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
         let want = edit::plan(p, a, o, &planned, Force::Refuse)
             .map(|plan| {
@@ -1536,7 +1543,7 @@ mod tests {
         assert!(!texts.is_empty(), "the callee reads through rcx");
         item.update_in(cx, |item, window, cx| item.start(Ask::Accept, window, cx));
         type_and_confirm(&item, "Obj", cx);
-        let said = item.read_with(cx, |item, _| item.said().cloned());
+        let said = item.read_with(cx, |item, _| item.said());
         assert!(matches!(said, Some(Ok(_))), "{said:?}");
         item.update_in(cx, |item, window, cx| item.confirm(window, cx));
         cx.run_until_parked();
@@ -1561,7 +1568,7 @@ mod tests {
             type_and_confirm(item, text, cx);
         }
         cx.run_until_parked();
-        let said = item.read_with(cx, |item, _| item.said().cloned());
+        let said = item.read_with(cx, |item, _| item.said());
         let said = said.unwrap().unwrap_or_else(|why| panic!("{ask:?}: {why}"));
         item.update_in(cx, |item, window, cx| item.confirm(window, cx));
         cx.run_until_parked();

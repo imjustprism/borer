@@ -26,7 +26,7 @@ use borer_engine::text;
 use super::thread::Proposal;
 use super::thread::Verdict;
 use super::{AcceptChatProposal, ChatPanel, RejectChatProposal, shown as shown_text};
-use crate::binary::Author;
+use borer_engine::analysis::edit::Author;
 
 /// Width of a card's field labels, so the values line up.
 const LABEL_WIDTH: f32 = 60.0;

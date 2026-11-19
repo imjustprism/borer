@@ -6,6 +6,7 @@ use borer_engine::analysis::render::{SlotUse, SymbolRow};
 use borer_engine::num::from_usize;
 use borer_engine::program::SymbolKind;
 use borer_engine::strings::walk::StringLine;
+use borer_engine::view::Ref;
 use gpui::{Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
@@ -158,6 +159,10 @@ impl RowKind for Strings {
 
     fn referent(row: &StringLine) -> Option<Referent> {
         row.va.map(Referent::Address)
+    }
+
+    fn subject(row: &StringLine) -> Option<Ref> {
+        row.va.map(Ref::String)
     }
 }
 

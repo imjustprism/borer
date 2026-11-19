@@ -22,8 +22,8 @@ use super::providers::{ChatHttp, Endpoint, Offered, credentials};
 use super::thread::{Chosen, Entry, Thread, Verdict, fenced};
 use crate::app_view::AppWindow;
 use crate::app_view::tests::{init, load_sample, open};
-use crate::binary::Author;
 use crate::worker::{Sources, load_binary_blocking};
+use borer_engine::analysis::edit::Author;
 
 mod cards;
 mod panel;

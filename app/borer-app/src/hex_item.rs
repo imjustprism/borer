@@ -17,6 +17,7 @@ use std::sync::Arc;
 use borer_engine::hexdump::{HEXDUMP_MAX, HexFill, HexRows, hexdump_sparse};
 use borer_engine::num::from_usize;
 use borer_engine::program::Section;
+use borer_engine::view::Ref;
 use gpui::{
     AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Font, Hsla,
     InteractiveElement as _, IntoElement, ParentElement as _, Pixels, Render, ScrollStrategy,
@@ -30,6 +31,7 @@ use ui::{Icon, IconName};
 use workspace::{Item, Workspace};
 
 use crate::actions::{LinkHex, ShowHex, Xrefs};
+use crate::annotate::{Ask, Strip, answer_asks};
 use crate::binary::{Binary, BinaryEvent, Revision};
 use crate::card::{Card, Tone};
 use crate::code_view::theme_color;
@@ -443,6 +445,8 @@ pub struct HexItem {
     style: HexStyle,
     /// The layout's background request.
     layout_job: Job,
+    /// The inline editor under the rows, renaming or commenting the cursor's address.
+    strip: Strip,
     /// Rebuilds [`Self::style`] on a settings or theme change, follows the active tab, and
     /// moves to the state an edit or a project leaves.
     _subscriptions: Vec<Subscription>,
@@ -495,6 +499,7 @@ impl HexItem {
             scroll: UniformListScrollHandle::new(),
             style: HexStyle::read(cx),
             layout_job: Job::default(),
+            strip: Strip::default(),
             _subscriptions: vec![
                 cx.observe_global::<SettingsStore>(Self::restyle),
                 cx.observe_global::<GlobalTheme>(Self::restyle),
@@ -887,6 +892,28 @@ impl HexItem {
         })
     }
 
+    /// Opens the inline editor for `ask` at the cursor's address, once the engine says what
+    /// it takes; with no cursor the status line says to put it on a byte.
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What is asked.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Item context.
+    fn annotate(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(at) = self.cursor else {
+            let why = format!("{}: put the cursor on a byte first", ask.title());
+            self.binary
+                .update(cx, |binary, cx| binary.set_status(why, cx));
+            return;
+        };
+        let binary = self.binary.clone();
+        let back = self.focus_handle.clone();
+        let note = Some(format!("{} at {at:#x}", ask.title()));
+        let r = (ask, Ref::Address(at), note);
+        Strip::ask(self, |this| &mut this.strip, binary, r, back, window, cx);
+    }
+
     /// Opens `place` at the cursor's address: its xrefs or its function's code.
     ///
     /// # Arguments
@@ -1015,7 +1042,7 @@ impl Render for HexItem {
                 .into_any_element()
             }
         };
-        div()
+        answer_asks(div(), cx, Self::annotate)
             .track_focus(&self.focus_handle)
             .key_context("HexView")
             .on_action(cx.listener(|this, _: &menu::SelectNext, _, cx| this.move_cursor(1, cx)))
@@ -1052,6 +1079,7 @@ impl Render for HexItem {
                     .child(self.window_line()),
             )
             .child(body)
+            .children(self.strip.element())
     }
 }
 

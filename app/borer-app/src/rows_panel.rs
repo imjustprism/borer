@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use borer_engine::analysis::render::LeftOut;
+use borer_engine::view::Ref;
 use editor::{Editor, EditorEvent};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
@@ -30,6 +31,7 @@ use workspace::Workspace;
 use workspace::dock::{DockPosition, Panel, PanelEvent};
 
 use crate::actions::{CycleSort, FocusFilter, Hint, OPEN_HINT, ShowHex, Xrefs};
+use crate::annotate::{Ask, Strip, answer_asks};
 use crate::binary::{Binary, BinaryEvent, Revision, SettingsNotice, reading_label};
 use crate::card::{Card, Tone};
 use crate::code_view::CodePalette;
@@ -110,6 +112,15 @@ pub trait RowKind: Sized + 'static {
     /// Hex shows; `None` for a row that stands for no address.
     fn referent(_row: &Self::Row) -> Option<Referent> {
         None
+    }
+
+    /// Returns what `row` stands for as the engine's edits name it ([`borer_engine::analysis::edit::offer`]): its
+    /// referent's address or import; `None` for a row that stands for no address.
+    fn subject(row: &Self::Row) -> Option<Ref> {
+        Self::referent(row).map(|referent| match referent {
+            Referent::Address(va) => Ref::Address(va),
+            Referent::Import(slot) => Ref::Import(slot),
+        })
     }
 }
 
@@ -424,6 +435,8 @@ pub struct RowsPanel<K: RowKind> {
     position: DockPosition,
     /// The running background filter, the newest answer winning.
     filter_job: Job,
+    /// The inline editor under the table, renaming or commenting the highlighted row.
+    strip: Strip,
     /// Colors of the engine's token kinds, read again when the theme or the settings change.
     palette: CodePalette,
     /// Reruns the filter on each edit, follows the binary's loads, and lays the table out
@@ -507,6 +520,7 @@ impl<K: RowKind> RowsPanel<K> {
             table_width: px(K::PANEL.size_px),
             position,
             filter_job: Job::default(),
+            strip: Strip::default(),
             palette: CodePalette::from_theme(cx.theme()),
             _subscriptions: subscriptions,
         };
@@ -950,6 +964,48 @@ impl<K: RowKind> RowsPanel<K> {
         }
     }
 
+    /// Opens the inline editor for `ask` under the table, over the highlighted row's
+    /// referent, once the engine says what it takes; a refusal is the status line's, in the
+    /// engine's words, and a row that stands for no address says so there.
+    ///
+    /// # Arguments
+    ///
+    /// * `ask` - What is asked.
+    /// * `window` - Window the panel is in.
+    /// * `cx` - Panel context.
+    fn annotate(&mut self, ask: Ask, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(r) = self.selected_row().and_then(K::subject) else {
+            let why = format!("{}: the highlighted row stands for no address", ask.title());
+            self.binary
+                .update(cx, |binary, cx| binary.set_status(why, cx));
+            return;
+        };
+        let back = self.rows_focus.clone();
+        let binary = self.binary.clone();
+        let note = Strip::va(&r).map(|va| format!("{} the row at {va:#x}", ask.title()));
+        Strip::ask(
+            self,
+            |this| &mut this.strip,
+            binary,
+            (ask, r, note),
+            back,
+            window,
+            cx,
+        );
+    }
+
+    /// Returns whether the inline editor is open under the table.
+    #[cfg(test)]
+    pub(crate) fn strip_open(&self) -> bool {
+        self.strip.element().is_some()
+    }
+
+    /// Returns the focus of the table, under the filter.
+    #[must_use]
+    pub const fn rows_focus(&self) -> &FocusHandle {
+        &self.rows_focus
+    }
+
     /// Sorts by the next sortable column, as [`CycleSort`] asks.
     ///
     /// # Arguments
@@ -1225,23 +1281,24 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `root` - The panel's root element.
     /// * `cx` - Panel context.
     fn answer_row_actions(root: Stateful<Div>, cx: &mut Context<'_, Self>) -> Stateful<Div> {
-        root.on_action(cx.listener(|this, _: &Xrefs, window, cx| {
-            this.open_referent(Place::Xrefs, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &ShowHex, window, cx| {
-            let hex = |referent: Referent| Place::Hex {
-                at: Some(referent.va()),
-            };
-            this.open_referent(hex, window, cx);
-        }))
-        .on_action(cx.listener(|this, _: &CycleSort, _, cx| this.cycle_sort(cx)))
-        .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
-            if K::FILTERS {
-                window.focus(&this.filter.focus_handle(cx), cx);
-            } else {
-                cx.propagate();
-            }
-        }))
+        answer_asks(root, cx, Self::annotate)
+            .on_action(cx.listener(|this, _: &Xrefs, window, cx| {
+                this.open_referent(Place::Xrefs, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowHex, window, cx| {
+                let hex = |referent: Referent| Place::Hex {
+                    at: Some(referent.va()),
+                };
+                this.open_referent(hex, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &CycleSort, _, cx| this.cycle_sort(cx)))
+            .on_action(cx.listener(|this, _: &FocusFilter, window, cx| {
+                if K::FILTERS {
+                    window.focus(&this.filter.focus_handle(cx), cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
     }
 }
 
@@ -1335,6 +1392,7 @@ impl<K: RowKind> Render for RowsPanel<K> {
                     .child(body)
                     .child(watch_width),
             )
+            .children(self.strip.element())
     }
 }
 
@@ -1517,6 +1575,7 @@ pub(crate) mod tests {
     use crate::actions::{CycleSort, ToggleXrefs, Xrefs as XrefsAction};
     use crate::app_assets::Glyph;
     use crate::app_view::tests::{binary_in, init, loaded_of, open};
+    use crate::binary::Binary;
     use crate::code_view::tests::sample_program;
     use crate::panels::PanelSpec;
     use crate::places::Place;
@@ -1806,12 +1865,20 @@ pub(crate) mod tests {
         fn referent(row: &u64) -> Option<Referent> {
             Some(Referent::Address(*row))
         }
+
+        fn subject(row: &u64) -> Option<borer_engine::view::Ref> {
+            (*row != 0x1030).then_some(borer_engine::view::Ref::Address(*row))
+        }
     }
 
-    /// A kind registered only by being added answers Xrefs on its highlighted row and
-    /// sorts on Cycle Sort through the panel's own handlers; no workspace chain names it.
-    #[gpui::test]
-    fn a_kind_added_in_a_test_answers_xrefs_with_no_chain(cx: &mut TestAppContext) {
+    /// Opens a window with a [`Probe`] panel added on the left dock.
+    ///
+    /// # Returns
+    ///
+    /// The workspace, the binary it shows, and the window's context.
+    fn probed(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, Entity<Binary>, &mut VisualTestContext) {
         let app_state = init(cx);
         let (app, cx) = open(&app_state, cx);
         let workspace = app.workspace.clone();
@@ -1819,6 +1886,28 @@ pub(crate) mod tests {
         workspace.update_in(cx, |workspace, window, cx| {
             add::<Probe>(workspace, &binary, DockPosition::Left, window, cx);
         });
+        (workspace, binary, cx)
+    }
+
+    /// Comment on a row that stands for no address says so on the status line and opens no
+    /// editor, in the table or anywhere else.
+    #[gpui::test]
+    fn comment_on_a_row_with_no_address_says_why(cx: &mut TestAppContext) {
+        let (workspace, binary, cx) = probed(cx);
+        let probe = panel_of::<Probe>(&workspace, &sample(), cx);
+        probe.update_in(cx, |panel, window, cx| window.focus(&panel.rows_focus, cx));
+        cx.dispatch_action(crate::annotate::Comment);
+        cx.run_until_parked();
+        let status = binary.read_with(cx, |binary, _| binary.status().to_owned());
+        assert_eq!(status, "Comment: the highlighted row stands for no address");
+        assert!(!probe.read_with(cx, |panel, _| panel.strip_open()));
+    }
+
+    /// A kind registered only by being added answers Xrefs on its highlighted row and
+    /// sorts on Cycle Sort through the panel's own handlers; no workspace chain names it.
+    #[gpui::test]
+    fn a_kind_added_in_a_test_answers_xrefs_with_no_chain(cx: &mut TestAppContext) {
+        let (workspace, _, cx) = probed(cx);
         let loaded = sample();
         let xrefs = panel_of::<Xrefs>(&workspace, &loaded, cx);
         let probe = panel_of::<Probe>(&workspace, &loaded, cx);
@@ -1911,7 +2000,7 @@ pub(crate) mod tests {
                 at: 0x1000,
                 name: name.to_owned(),
             };
-            binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+            binary.update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
             cx.run_until_parked();
             binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint))
         };

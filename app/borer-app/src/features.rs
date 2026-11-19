@@ -26,6 +26,7 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
     crate::types::register(workspace, binary);
     crate::functions_panel::register(workspace, binary);
     crate::decompile_item::register(workspace, binary);
+    crate::annotate::register(workspace, binary);
     crate::goto::register(workspace, binary);
     crate::overview::register(workspace, binary);
     crate::linear_item::register(workspace, binary);

@@ -1086,7 +1086,7 @@ pub(crate) mod tests {
             at: helper,
             name: "renamed_helper".to_owned(),
         };
-        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        binary.update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
         cx.run_until_parked();
         let now = show(cx);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -1148,7 +1148,7 @@ pub(crate) mod tests {
             at: CALLEE,
             name: name.to_owned(),
         };
-        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        binary.update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
         cx.run_until_parked();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.run_until_parked();

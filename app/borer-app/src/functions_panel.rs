@@ -6,6 +6,7 @@ use std::sync::Arc;
 use borer_engine::analysis::render::{
     FunctionOrder, FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut,
 };
+use borer_engine::view::Ref;
 use gpui::{Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
@@ -167,6 +168,10 @@ impl RowKind for Functions {
 
     fn place(row: &FunctionRow) -> Option<Place> {
         Some(Place::decompile(row.entry))
+    }
+
+    fn subject(row: &FunctionRow) -> Option<Ref> {
+        Some(Ref::Function(row.entry))
     }
 }
 
@@ -699,7 +704,7 @@ mod tests {
             at: CALLER,
             name: "caller_0".to_owned(),
         };
-        binary.update(cx, |binary, cx| binary.edit(vec![rename], cx));
+        binary.update(cx, |binary, cx| binary.plan_and_commit(&[rename], cx));
         cx.run_until_parked();
         let now = binary.read_with(cx, |binary, _| binary.loaded().map(|l| l.fingerprint));
         let (text, place, revision, names) = panel.read_with(cx, |panel, cx| {

@@ -5,8 +5,8 @@ use gpui::{TestAppContext, VisualTestContext};
 use serde_json::json;
 
 use super::{answers, ask_each, call, chatting, first_two, have_proposed, verdicts_of};
-use crate::binary::Author;
 use crate::chat::thread::Verdict;
+use borer_engine::analysis::edit::Author;
 
 /// A dry run, `set_name`'s default, answers the model with what it would do and makes no
 /// card; each apply makes one card, a batch of names one card holding every rename, and one
