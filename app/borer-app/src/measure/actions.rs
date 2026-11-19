@@ -47,6 +47,10 @@ const LATE: Duration = Duration::from_secs(10);
 /// Most a run's untimed setup may take to settle before the run is skipped.
 const SETUP_LIMIT: Duration = Duration::from_secs(60);
 
+/// Most the whole phase may run, under the measure script's hour for it, so a phase that
+/// never settles still reports what it timed and the runs it did not reach.
+const PHASE_LIMIT: Duration = Duration::from_mins(45);
+
 /// Most of an action's runs, in percent, that may be skipped before the action misses.
 const SKIPPED_PERCENT: usize = 10;
 
@@ -444,9 +448,38 @@ pub(super) struct ActionsRun {
     times: BTreeMap<(Bench, Act), Times>,
     /// Each sweep's frame draw times in nanoseconds, by binary.
     frames: BTreeMap<(Bench, Sweep), Vec<u64>>,
+    /// When the phase stops whatever is left ([`PHASE_LIMIT`] after it started).
+    deadline: Instant,
+    /// The miss line naming the runs the deadline dropped, once it did.
+    stopped: Option<String>,
 }
 
 impl ActionsRun {
+    /// Drops every run left once `now` is past the deadline, keeping the miss line naming
+    /// how many there were.
+    ///
+    /// # Arguments
+    ///
+    /// * `now` - Start of this frame.
+    ///
+    /// # Returns
+    ///
+    /// Whether the deadline stopped the phase, now or before.
+    fn past_deadline(&mut self, now: Instant) -> bool {
+        if self.stopped.is_none() && now >= self.deadline {
+            let going = self.going.take().is_some() || !self.moves.is_empty();
+            let left = self.script.len().saturating_add(usize::from(going));
+            self.script.clear();
+            self.moves.clear();
+            self.stopped = Some(format!(
+                "MEASURE_MISS bench={} what=phase held=deadline runs_left={left} limit_s={}",
+                self.bench.word(),
+                PHASE_LIMIT.as_secs()
+            ));
+        }
+        self.stopped.is_some()
+    }
+
     /// Returns the times of the action the run going times, `None` for a sweep.
     fn times(&mut self) -> Option<&mut Times> {
         let What::Act(act) = self.what else {
@@ -760,6 +793,8 @@ impl Harness {
             drawn: Vec::new(),
             times: BTreeMap::new(),
             frames: BTreeMap::new(),
+            deadline: now_instant() + PHASE_LIMIT,
+            stopped: None,
         };
         self.next_bench(run, prep, window, cx);
     }
@@ -806,6 +841,10 @@ impl Harness {
             return;
         }
         let now = now_instant();
+        if run.past_deadline(now) {
+            self.bench_done(run, window, cx);
+            return;
+        }
         run.take_frames();
         let draws = self.draws.as_mut().map(std::mem::take).unwrap_or_default();
         let read = seen(&self.workspace, &self.binary, cx);
@@ -997,7 +1036,7 @@ impl Harness {
     }
 
     /// Reports the binary the runs were on, then loads the large DLL after notepad, or
-    /// ends the phase.
+    /// ends the phase: after the large DLL, or once the deadline stopped it.
     ///
     /// # Arguments
     ///
@@ -1011,7 +1050,7 @@ impl Harness {
                 return;
             }
         }
-        if run.bench == Bench::Large {
+        if run.bench == Bench::Large || run.stopped.is_some() {
             self.actions_end(&run, cx);
             return;
         }
@@ -1041,7 +1080,8 @@ impl Harness {
     /// * `cx` - Harness context.
     fn actions_end(&mut self, run: &ActionsRun, cx: &mut Context<'_, Self>) {
         self.draws = None;
-        let missed = misses(&run.times, &run.frames);
+        let mut missed = misses(&run.times, &run.frames);
+        missed.extend(run.stopped.clone());
         let end = format!(
             "MEASURE_ACTIONS misses={} ui_engine_calls={}",
             missed.len(),
@@ -1061,14 +1101,14 @@ impl Harness {
 )]
 mod tests {
     use std::collections::{BTreeMap, VecDeque};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use borer_engine::analysis::render::{FunctionRow, RowSource};
     use borer_engine::cancel::Cancel;
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
     use super::{
-        Act, ActionsRun, Bench, Move, Prep, RUNS, Sweep, Target, Times, What, feed, misses,
+        Act, ActionsRun, Bench, Going, Move, Prep, RUNS, Sweep, Target, Times, What, feed, misses,
         pick_targets, prep_of, script,
     };
     use crate::app_view::tests::{CALLER, init, sample};
@@ -1190,6 +1230,64 @@ mod tests {
         assert_eq!(draws.first().map(|(_, read)| read), Some(&now));
     }
 
+    /// Returns a phase on notepad timing `act`, with nothing left to run, stopping at
+    /// `deadline`.
+    fn run_on_notepad(act: Act, deadline: Instant) -> ActionsRun {
+        ActionsRun {
+            cancel: Cancel::new(),
+            window_id: WindowId::from(1),
+            _tracing: Tracing { turned_on: false },
+            collector: gpui::profiler::FrameTimingCollector::new(),
+            bench: Bench::Notepad,
+            script: VecDeque::new(),
+            what: What::Act(act),
+            moves: VecDeque::new(),
+            going: None,
+            drawn: Vec::new(),
+            times: BTreeMap::new(),
+            frames: BTreeMap::new(),
+            deadline,
+            stopped: None,
+        }
+    }
+
+    /// A run that never settles holds the phase only until its deadline: then the phase
+    /// drops every run left, the one going among them, and names how many in a miss line.
+    #[test]
+    fn the_deadline_stops_a_phase_that_never_settles() {
+        let at = now_instant();
+        let mut run = run_on_notepad(Act::GoTo, at + Duration::from_secs(1));
+        let prep = Prep {
+            bench: Bench::Notepad,
+            loaded: sample(),
+            targets: (0..4u64)
+                .map(|i| Target {
+                    entry: 0x1000 + i,
+                    name: format!("f{i}"),
+                })
+                .collect(),
+            largest: Vec::new(),
+        };
+        run.script = script(&prep);
+        let left = run.script.len();
+        let still = Watch::new(Stamp::default());
+        run.going = Some(Going::Watching(Box::new(still), at, true));
+        assert!(!run.past_deadline(at), "before the deadline");
+        assert!(run.going.is_some() && run.script.len() == left);
+        assert!(run.past_deadline(at + Duration::from_secs(1)));
+        assert!(run.going.is_none() && run.script.is_empty());
+        let want = format!(
+            "MEASURE_MISS bench=notepad what=phase held=deadline runs_left={} limit_s=2700",
+            left + 1
+        );
+        assert_eq!(run.stopped.as_deref(), Some(want.as_str()));
+        let missed = misses(&run.times, &run.frames);
+        assert!(
+            missed.is_empty(),
+            "nothing timed, nothing else missed: {missed:?}"
+        );
+    }
+
     /// A change read as a frame drew is credited to that frame's presentation, not to the
     /// next frame's start.
     ///
@@ -1200,20 +1298,8 @@ mod tests {
     fn a_change_is_credited_to_the_frame_that_drew_it() {
         let at = now_instant();
         let ms = |n| at + Duration::from_millis(n);
-        let mut run = ActionsRun {
-            cancel: Cancel::new(),
-            window_id: WindowId::from(1),
-            _tracing: Tracing { turned_on: false },
-            collector: gpui::profiler::FrameTimingCollector::new(),
-            bench: Bench::Notepad,
-            script: VecDeque::new(),
-            what: What::Act(Act::Find),
-            moves: VecDeque::new(),
-            going: None,
-            drawn: vec![(ms(1), Some(ms(3)))],
-            times: BTreeMap::new(),
-            frames: BTreeMap::new(),
-        };
+        let mut run = run_on_notepad(Act::Find, ms(60_000));
+        run.drawn = vec![(ms(1), Some(ms(3)))];
         let shows = |status: &str| Seen {
             stamp: Stamp {
                 status: status.to_owned(),

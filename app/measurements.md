@@ -132,7 +132,9 @@ after which no job runs, every open view shows the binary's state, no docked pan
 an older one (a closed panel marked to ask again when it opens is not older) and the stamp
 holds one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
-is printed as skipped; an action whose setup failed in more than 10% of its runs misses. The bars are `BARS` in `borer-app/src/measure/actions.rs`:
+is printed as skipped; an action whose setup failed in more than 10% of its runs misses. A phase
+still running after 45 minutes stops and prints a miss naming the runs it did not reach.
+The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 
 | Action | Ack p99 | Settle p95, notepad | Settle p95, large DLL |
 | --- | --- | --- | --- |
