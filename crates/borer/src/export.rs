@@ -536,6 +536,25 @@ fn refuse_occupied(root: &Path, shown: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Refuses a split directory that is unusable or holds anything, so a
+/// caller can ask before the analysis the split needs.
+///
+/// # Arguments
+///
+/// * `dir` - The directory as the caller named it.
+///
+/// # Errors
+///
+/// When the path is unusable ([`borer_engine::program::unusable_path`]),
+/// or the directory holds anything or cannot be read.
+pub fn refuse_split_dir(dir: &str) -> anyhow::Result<()> {
+    let root = Path::new(dir);
+    if let Some(why) = borer_engine::program::unusable_path(root) {
+        anyhow::bail!("{why}; nothing was written");
+    }
+    refuse_occupied(root, &short_path(dir))
+}
+
 /// Creates the `src` and `include` directories of a split under its
 /// directory, which [`refuse_occupied`] found new or empty.
 ///
@@ -608,12 +627,9 @@ pub fn write_split(
 ) -> anyhow::Result<String> {
     use borer_engine::analysis::decompile::export::export_units;
     use borer_engine::analysis::{modsdk, split};
+    refuse_split_dir(dir)?;
     let root = Path::new(dir);
-    if let Some(why) = borer_engine::program::unusable_path(root) {
-        anyhow::bail!("{why}; nothing was written");
-    }
     let shown = short_path(dir);
-    refuse_occupied(root, &shown)?;
     let sdk = modsdk::build(program, analysis, overlay);
     if borer_engine::cancel::Cancel::raised() {
         anyhow::bail!(

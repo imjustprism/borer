@@ -95,17 +95,16 @@ impl Extra {
 ///
 /// # Errors
 ///
-/// For a bad argument, a path that names a device, an engine refusal or
-/// a write that fails.
+/// For a bad argument, a path that names a device, a split directory that
+/// holds anything (refused before the analysis), an engine refusal or a
+/// write that fails.
 pub(super) fn export(args: &[String], s: &Session) -> anyhow::Result<()> {
     let asked = super::args::export_args(args)?;
-    for out in asked
-        .c
-        .iter()
-        .chain(asked.mods.iter().map(|(_, out)| out))
-        .chain(&asked.split)
-    {
+    for out in asked.c.iter().chain(asked.mods.iter().map(|(_, out)| out)) {
         super::packs::writable(out)?;
+    }
+    if let Some(dir) = asked.split {
+        borer::export::refuse_split_dir(dir)?;
     }
     let mut a = s.analysis(Feature::Decompile)?;
     if let Some(dir) = asked.split {
