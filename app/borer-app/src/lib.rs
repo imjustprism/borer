@@ -100,7 +100,8 @@ pub fn run() -> anyhow::Result<()> {
                     | CliMode::Headless(_)
                     | CliMode::MeasureMemory(_)
                     | CliMode::Measure(_)
-                    | CliMode::MeasureDrop(..)) => cx
+                    | CliMode::MeasureDrop(..)
+                    | CliMode::ChatDemo(_)) => cx
                         .open_window(options, |window, cx| {
                             cx.new(|cx| {
                                 Harness::new(measured, harness_slot, &app_state, window, cx)

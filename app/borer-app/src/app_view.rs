@@ -110,17 +110,11 @@ pub fn data_dir(mode: &CliMode, given: Option<PathBuf>) -> anyhow::Result<PathBu
     if let Some(dir) = given {
         return Ok(dir);
     }
-    match mode {
-        CliMode::Interactive(_) => Ok(with_host_env(|env| env.borer())?.data),
-        CliMode::FirstFrame
-        | CliMode::ReportOpen(_)
-        | CliMode::Headless(_)
-        | CliMode::MeasureMemory(_)
-        | CliMode::Measure(_)
-        | CliMode::MeasureDrop(..) => anyhow::bail!(
-            "a measurement run needs --data-dir <dir>, a fresh directory its caller removes"
-        ),
-    }
+    anyhow::ensure!(
+        mode.is_interactive(),
+        "a measurement run needs --data-dir <dir>, a fresh directory its caller removes"
+    );
+    Ok(with_host_env(|env| env.borer())?.data)
 }
 
 /// Points Zed's database and logs at `dir`, and creates the app's config directory

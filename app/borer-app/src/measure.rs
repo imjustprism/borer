@@ -8,6 +8,7 @@
 //! [`Harness`], and a plain `borer-app [binary]` window has none.
 
 mod actions;
+mod chat_demo;
 mod drop;
 mod input;
 mod scroll;
@@ -246,6 +247,26 @@ pub enum CliMode {
     /// Drops the folder `<path>` on the start tab and on a tab of the binary `<binary>`
     /// (default notepad), prints `DROP_DONE` with the project's folder count, and exits.
     MeasureDrop(PathBuf, PathBuf),
+    /// Opens `<path>` (default notepad) and replays a canned conversation of a scripted model
+    /// in the chat panel, printing `CHAT_STAGE <name>` at each state worth a screenshot.
+    ChatDemo(PathBuf),
+}
+
+impl CliMode {
+    /// Returns whether the run is a person's window rather than a measurement.
+    #[must_use]
+    pub const fn is_interactive(&self) -> bool {
+        match self {
+            Self::Interactive(_) => true,
+            Self::FirstFrame
+            | Self::ReportOpen(_)
+            | Self::Headless(_)
+            | Self::MeasureMemory(_)
+            | Self::Measure(_)
+            | Self::MeasureDrop(..)
+            | Self::ChatDemo(_) => false,
+        }
+    }
 }
 
 /// One-shot startup transition decided from the current [`CliMode`] and load state.
@@ -310,7 +331,8 @@ pub fn evaluate_one_shot(
         CliMode::Interactive(_)
         | CliMode::Headless(_)
         | CliMode::Measure(_)
-        | CliMode::MeasureDrop(..) => OneShotAction::Wait,
+        | CliMode::MeasureDrop(..)
+        | CliMode::ChatDemo(_) => OneShotAction::Wait,
     }
 }
 
@@ -471,6 +493,7 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
             Ok(CliMode::ReportOpen(PathBuf::from(p)))
         }
         Some("--headless") => Ok(CliMode::Headless(path_or_notepad())),
+        Some("--chat-demo") => Ok(CliMode::ChatDemo(path_or_notepad())),
         Some("--measure-memory") => Ok(CliMode::MeasureMemory(path_or_notepad())),
         Some("--measure-drop") => {
             let p = args
@@ -837,7 +860,9 @@ impl Harness {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let path = match &mode {
-            CliMode::ReportOpen(p) | CliMode::MeasureMemory(p) => Some(p.clone()),
+            CliMode::ReportOpen(p) | CliMode::MeasureMemory(p) | CliMode::ChatDemo(p) => {
+                Some(p.clone())
+            }
             CliMode::Interactive(p) => p.clone(),
             CliMode::FirstFrame
             | CliMode::Headless(_)
@@ -876,7 +901,8 @@ impl Harness {
             | CliMode::ReportOpen(_)
             | CliMode::Headless(_)
             | CliMode::MeasureMemory(_)
-            | CliMode::MeasureDrop(..) => None,
+            | CliMode::MeasureDrop(..)
+            | CliMode::ChatDemo(_) => None,
         };
         let mut harness = Self {
             root,
@@ -904,6 +930,9 @@ impl Harness {
         };
         if let Some(phase) = phase {
             harness.begin(phase, window, cx);
+        }
+        if matches!(harness.mode, CliMode::ChatDemo(_)) {
+            cx.on_next_frame(window, |this, window, cx| this.chat_demo(window, cx));
         }
         if let CliMode::MeasureDrop(dir, binary) = &harness.mode {
             let (dir, binary) = (dir.clone(), binary.clone());

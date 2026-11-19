@@ -407,6 +407,26 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Shows `models` as `offer`'s list without asking the provider, as the chat demo does:
+    /// nothing is sent anywhere.
+    pub(crate) fn offer_listed(
+        &mut self,
+        offer: Offered,
+        models: Vec<Chosen>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.key = Self::key_field(window, cx);
+        self.picked = Some(offer);
+        self.models = models;
+        cx.notify();
+    }
+
+    /// Returns the handle that opens and closes the model picker.
+    pub(crate) const fn picker(&self) -> &PopoverMenuHandle<ChatPicker> {
+        &self.picker
+    }
+
     /// Sends again what the error at entry `ix` failed on, when it is the newest failed turn
     /// and none runs ([`Thread::retry_at`]); nothing otherwise.
     fn retry(&self, ix: usize, cx: &mut Context<'_, Self>) {
