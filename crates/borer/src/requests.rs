@@ -20,16 +20,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use borer_engine::cancel::Cancel;
+use borer_front::deadline::{DEADLINE_DEFAULT, deadline_of, note};
 use rmcp::ErrorData;
 use tokio::sync::Semaphore;
 
 use crate::errors::err_internal;
-
-/// The environment variable naming the per-request deadline, in seconds.
-pub(crate) const DEADLINE_ENV: &str = "BORER_DEADLINE_SECS";
-
-/// The deadline when the environment names none.
-const DEADLINE_DEFAULT: Duration = Duration::from_mins(5);
 
 /// Most requests the engine works on at once.
 const REQUESTS_MAX: usize = 2;
@@ -88,18 +83,14 @@ impl Gate {
     ///
     /// The gate.
     pub(crate) fn from_env() -> Self {
-        let Ok(text) = std::env::var(DEADLINE_ENV) else {
-            return Self::default();
-        };
-        match text.trim().parse::<u64>() {
-            Ok(0) => Self::with_deadline(None),
-            Ok(secs) => Self::with_deadline(Some(Duration::from_secs(secs))),
-            Err(_) => {
-                eprintln!(
-                    "borer: {DEADLINE_ENV}={} is not a number of seconds; using {}",
-                    borer_engine::text::one_line(&text),
-                    DEADLINE_DEFAULT.as_secs()
-                );
+        match deadline_of(
+            std::env::var(borer_front::deadline::DEADLINE_ENV)
+                .ok()
+                .as_deref(),
+        ) {
+            Ok(deadline) => Self::with_deadline(deadline),
+            Err(why) => {
+                eprintln!("borer: {why}");
                 Self::default()
             }
         }
@@ -111,10 +102,7 @@ impl Gate {
     ///
     /// The note, naming the deadline and the variable that sets it.
     pub(crate) fn note(&self) -> String {
-        let secs = self.deadline.map_or(0, |d| d.as_secs());
-        format!(
-            "# stopped: time limit: the request ran past {secs}s and stopped there, so the answer above is partial; ask for less (one function, a filter, a page) or raise {DEADLINE_ENV}"
-        )
+        note(self.deadline)
     }
 
     /// Runs one request on a blocking thread once a permit is free, with

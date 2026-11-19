@@ -382,6 +382,22 @@ pub const SERVER_ONLY: &[(&str, &str)] = &[
     ),
 ];
 
+/// Returns the refusal a face without the MCP server answers a call of a
+/// tool only the server runs: the tool by name and why ([`SERVER_ONLY`]).
+///
+/// # Arguments
+///
+/// * `name` - The tool's name, as the caller called it.
+///
+/// # Returns
+///
+/// `None` when the server keeps no tool of that name.
+#[must_use]
+pub fn server_only(name: &str) -> Option<Failure> {
+    let (kept, why) = SERVER_ONLY.iter().find(|(kept, _)| *kept == name)?;
+    Some(Failure::asked(format!("{kept} is not run here: {why}")))
+}
+
 /// Builds a catalog row whose schema, parser and handler read one
 /// parameters type, the handler named as the tool; its hints are [`READS`]
 /// unless given.
@@ -577,7 +593,23 @@ pub const TOOLS: &[Tool] = &[
 
 #[cfg(test)]
 mod tests {
-    use super::{SERVER_ONLY, TOOLS, params::QueryParams, parse};
+    use super::{SERVER_ONLY, TOOLS, params::QueryParams, parse, server_only};
+
+    /// A call of a tool the server keeps is refused by name with why, and
+    /// a catalog tool is not one.
+    ///
+    /// # Panics
+    ///
+    /// When a server tool is not refused, or a catalog tool is.
+    #[test]
+    fn a_server_tool_is_refused_by_name() {
+        for (kept, why) in SERVER_ONLY {
+            let refused = server_only(kept).expect("the server's");
+            assert_eq!(refused.cause, super::Cause::Asked);
+            assert_eq!(refused.message, format!("{kept} is not run here: {why}"));
+        }
+        assert!(TOOLS.iter().all(|t| server_only(t.name).is_none()));
+    }
 
     /// The rows are named once each, in name order, and no tool is both the
     /// catalog's and the server's.
