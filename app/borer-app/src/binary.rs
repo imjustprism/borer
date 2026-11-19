@@ -18,6 +18,8 @@ use ui::{Color, Label, LabelCommon as _, LabelSize, h_flex};
 use workspace::{HideStatusItem, ItemHandle, StatusItemView, Workspace};
 
 use borer_engine::cancel::Cancel;
+use borer_engine::progress::Progress;
+use gpui::prelude::FluentBuilder as _;
 
 use crate::actions::{OpenProject, SaveProject, SaveProjectAs};
 use crate::commands;
@@ -151,6 +153,8 @@ pub struct Binary {
     recent: Vec<RecentBinary>,
     /// Flag of the running load; raising it drops the load's answer.
     load_flag: Cancel,
+    /// Where the running or last load's engine work has reached.
+    load_progress: Progress,
     /// The running background load.
     load_task: Option<Task<()>>,
     /// The running file dialog.
@@ -210,6 +214,7 @@ impl Binary {
             status,
             recent,
             load_flag: Cancel::new(),
+            load_progress: Progress::new(),
             load_task: None,
             prompt_task: None,
             remember_task: None,
@@ -261,6 +266,12 @@ impl Binary {
     #[must_use]
     pub const fn reading(&self) -> Option<&Loading> {
         self.reading.as_ref()
+    }
+
+    /// Returns where the running or last load's engine work has reached.
+    #[must_use]
+    pub const fn load_progress(&self) -> &Progress {
+        &self.load_progress
     }
 
     /// Returns the file whose engine load still runs, shown or cancelled, if any; no other
@@ -611,6 +622,7 @@ impl Binary {
         let work = move || load_binary_blocking(path, &sources, notes);
         let request = spawn_engine(label, cx, work);
         self.load_flag = request.flag();
+        self.load_progress = request.progress();
         self.load_task = Some(cx.spawn(async move |this, cx| {
             let result = request.await;
             let Some(this) = this.upgrade() else {
@@ -1359,18 +1371,24 @@ pub(crate) fn status_label(text: impl Into<SharedString>, color: Color) -> Label
 
 impl Render for StatusLine {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let facts = self.binary.read(cx).facts().iter();
+        let facts = self.binary.read(cx).facts();
+        let text = self.text(cx);
         h_flex()
             .min_w_0()
             .gap_3()
-            .pr_2()
-            .child(
-                h_flex()
-                    .flex_none()
-                    .gap_3()
-                    .children(facts.map(|(text, color)| status_label(text.clone(), *color))),
-            )
-            .child(status_label(self.text(cx), Color::Placeholder).truncate())
+            .when(!facts.is_empty() || !text.is_empty(), |line| line.pr_2())
+            .when(!facts.is_empty(), |line| {
+                line.child(
+                    h_flex().flex_none().gap_3().children(
+                        facts
+                            .iter()
+                            .map(|(text, color)| status_label(text.clone(), *color)),
+                    ),
+                )
+            })
+            .when(!text.is_empty(), |line| {
+                line.child(status_label(text, Color::Placeholder).truncate())
+            })
     }
 }
 

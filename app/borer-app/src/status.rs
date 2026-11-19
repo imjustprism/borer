@@ -1,8 +1,8 @@
 //! The status bar's items beside the facts line ([`crate::binary::StatusLine`]).
 //!
-//! They are the engine's check grades of the function in the active tab, the running load
-//! with its cancel, the active function's address, the light and dark switch and the
-//! palette's key.
+//! They are the engine's check grades of the function in the active tab, the running work
+//! with the engine's phase and progress (the load with its cancel), the active function's
+//! address, the light and dark switch and the palette's key.
 //!
 //! Each formats what the engine or the binary holds and derives nothing; the grades come
 //! from a background engine call, never from the UI thread.
@@ -11,30 +11,51 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use borer_engine::analysis::decompile::replay::{Grade, TextCheck};
+use borer_engine::progress::{Progress, Snapshot};
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, Window, div, px,
+    Action, Animation, AnimationExt as _, AnyElement, App, AppContext as _, Context, Entity, Hsla,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px,
 };
 use theme::{ActiveTheme as _, Theme};
 use ui::{
-    ButtonCommon as _, Clickable as _, Color, IconButton, IconName, IconSize, KeyBinding,
-    LabelCommon as _, Tooltip, h_flex, rems_from_px,
+    ButtonCommon as _, Clickable as _, Color, IconButton, IconName, IconSize, KeyBinding, Label,
+    LabelCommon as _, ProgressBar, Tooltip, h_flex, rems_from_px,
 };
 use workspace::{HideStatusItem, ItemHandle, StatusItemView};
 
 use crate::actions::{KEY_PX, PALETTE_HINT, ToggleTheme};
 use crate::app_assets::{AppIcon, Glyph};
-use crate::binary::{Binary, Loading, reading_label, status_label};
+use crate::binary::{Binary, reading_label, status_label};
 use crate::check_marks::GRADE_COUNT;
 use crate::decompile_item::DecompileItem;
-use crate::worker::{GradeCounts, Job, LoadedBinary, grade_counts_blocking};
+use crate::worker::{GradeCounts, Job, Jobs, LoadedBinary, grade_counts_blocking};
 
 /// How long a load runs before the work item shows it.
 const WORK_SHOWN_AFTER: Duration = Duration::from_millis(100);
 
 /// How often the work item redraws its elapsed time, in whole seconds, while it shows.
 const WORK_TICK: Duration = Duration::from_secs(1);
+
+/// How often the work item reads the engine's progress while a work runs; it redraws only
+/// when what it shows changes.
+const PROGRESS_POLL: Duration = Duration::from_millis(100);
+
+/// Width in logical pixels of the work item's progress bar.
+const PROGRESS_BAR_PX: f32 = 80.0;
+
+/// Most times a second the spinner redraws: the rate the work item polls at.
+const SPINNER_FPS: f32 = 10.0;
+
+/// The spinner's frames, one turn of a braille dot.
+const SPINNER_FRAMES: [&str; 8] = [
+    "\u{28fe}", "\u{28fd}", "\u{28fb}", "\u{28bf}", "\u{287f}", "\u{28df}", "\u{28ef}", "\u{28f7}",
+];
+
+/// How much faster the work's label gives up width than its phase, so a narrow bar cuts
+/// the file name first, then the phase, and never the percent or Cancel.
+const LABEL_SHRINK: f32 = 1000.0;
 
 /// Width in logical pixels of a grade's rail.
 const RAIL_WIDTH_PX: f32 = 4.0;
@@ -286,16 +307,106 @@ impl StatusItemView for Grades {
     }
 }
 
-/// The running load: what it reads, for how long, and a button that cancels it.
+/// What the engine's progress of a work says, as the work item shows it: the name of the
+/// phase running, and the share of its sweep's items done as a whole percent.
+pub type ProgressWords = (Option<&'static str>, Option<u8>);
+
+/// Returns what the work item says of `snapshot`.
+///
+/// # Arguments
+///
+/// * `snapshot` - The engine's progress, as polled.
+///
+/// # Returns
+///
+/// The phase's name, `None` before any phase ran; the percent of the phase's items done,
+/// `None` while the engine counts no items for the phase, so no share is ever guessed, and
+/// `None` once all are done, as the phase may still work past its count.
+#[must_use]
+pub fn progress_words(snapshot: &Snapshot) -> ProgressWords {
+    let percent = (snapshot.done < snapshot.total).then(|| {
+        let done = u128::from(snapshot.done);
+        u8::try_from(done * 100 / u128::from(snapshot.total)).unwrap_or(99)
+    });
+    (snapshot.phase.map(|phase| phase.name), percent)
+}
+
+/// Returns a spinner that says a work runs, redrawn at most [`SPINNER_FPS`] times a second,
+/// so a long work does not redraw the window at the display's rate.
+pub(crate) fn spinner() -> AnyElement {
+    let turn = Animation::new(Duration::from_secs(1))
+        .repeat()
+        .with_max_fps(SPINNER_FPS);
+    status_label(SPINNER_FRAMES[0], Color::Muted)
+        .with_animation("work-spinner", turn, |mut label, delta| {
+            let frames = SPINNER_FRAMES.len();
+            let at = (1..=frames)
+                .position(|k| delta * as_f32(frames) < as_f32(k))
+                .unwrap_or(0);
+            label.set_text(SPINNER_FRAMES[at]);
+            label
+        })
+        .into_any_element()
+}
+
+/// Returns `n` as a float, exact for the few frames a spinner has.
+///
+/// # Arguments
+///
+/// * `n` - A small count.
+fn as_f32(n: usize) -> f32 {
+    u16::try_from(n).map_or(f32::MAX, f32::from)
+}
+
+/// Returns how far a work is: a slim bar and the percent when the engine counts the
+/// phase's items, else a spinner that only says the work runs.
+///
+/// # Arguments
+///
+/// * `percent` - The share done, as [`progress_words`] gives it.
+/// * `cx` - Application context reading the theme.
+pub(crate) fn gauge(percent: Option<u8>, cx: &App) -> AnyElement {
+    let Some(percent) = percent else {
+        return spinner();
+    };
+    let bar = ProgressBar::new("work-progress", f32::from(percent), 100.0, cx);
+    h_flex()
+        .gap_1p5()
+        .child(div().w(px(PROGRESS_BAR_PX)).child(bar))
+        .child(status_label(format!("{percent}%"), Color::Muted))
+        .into_any_element()
+}
+
+/// A work the item shows: the load, else the oldest engine request.
+struct Running {
+    /// What the work does to which subject (`Reading notepad.exe`).
+    label: SharedString,
+    /// When it started, or when the item first saw it, on the executor's clock.
+    since: Instant,
+    /// Where the engine's work has reached.
+    progress: Progress,
+    /// Whether it is the load, which shows its elapsed time and can be cancelled.
+    load: bool,
+}
+
+/// The running work: the load, else the oldest engine request that runs long enough to
+/// show; what it does, the engine's phase and progress, and for the load its time and a
+/// button that cancels it.
 pub struct Work {
     /// The window's binary.
     binary: Entity<Binary>,
-    /// The load the redraw task follows, by its start.
-    ticking_for: Option<Instant>,
-    /// Redraws the elapsed time while the load runs.
+    /// The oldest engine request seen running and when the item first saw it.
+    job: Option<(u64, Instant)>,
+    /// What the item last drew of the work's progress, so a poll redraws on a change only.
+    words: ProgressWords,
+    /// Whether the item last drew the work.
+    drawn: bool,
+    /// When the elapsed time was last redrawn.
+    redrawn: Option<Instant>,
+    /// Polls the work while one runs.
     tick: Option<Task<()>>,
-    /// Follows the binary's loads.
-    _observe: Subscription,
+    /// Follows the binary's loads and the app's requests.
+    _observe: [Subscription; 2],
 }
 
 impl std::fmt::Debug for Work {
@@ -313,10 +424,16 @@ impl Work {
     /// * `cx` - Item context.
     #[must_use]
     pub fn new(binary: Entity<Binary>, cx: &mut Context<'_, Self>) -> Self {
-        let observe = cx.observe(&binary, |work: &mut Self, _, cx| work.follow(cx));
+        let observe = [
+            cx.observe(&binary, |work: &mut Self, _, cx| work.follow(cx)),
+            cx.observe_global::<Jobs>(|work: &mut Self, cx| work.follow(cx)),
+        ];
         let mut work = Self {
             binary,
-            ticking_for: None,
+            job: None,
+            words: (None, None),
+            drawn: false,
+            redrawn: None,
             tick: None,
             _observe: observe,
         };
@@ -324,85 +441,145 @@ impl Work {
         work
     }
 
-    /// Starts redrawing for a load that started since the last one, once when the item
-    /// shows ([`WORK_SHOWN_AFTER`]) and every [`WORK_TICK`] after, until that load ends.
+    /// Returns the work the item shows, if any: the load, else the oldest request, once the
+    /// item has seen it.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the binary and the requests.
+    fn running(&self, cx: &App) -> Option<Running> {
+        let binary = self.binary.read(cx);
+        if let Some(loading) = binary.reading() {
+            return Some(Running {
+                label: reading_label(&loading.path),
+                since: loading.since,
+                progress: binary.load_progress().clone(),
+                load: true,
+            });
+        }
+        let (id, label, progress) = Jobs::oldest(cx)?;
+        let (seen, since) = self.job?;
+        (seen == id).then_some(Running {
+            label,
+            since,
+            progress,
+            load: false,
+        })
+    }
+
+    /// Starts polling the work every [`PROGRESS_POLL`] while one runs, unless a poll runs.
     ///
     /// # Arguments
     ///
     /// * `cx` - Item context.
     fn follow(&mut self, cx: &mut Context<'_, Self>) {
-        cx.notify();
-        let Some(since) = self.binary.read(cx).reading().map(|loading| loading.since) else {
-            return;
-        };
-        if self.ticking_for == Some(since) {
+        if self.tick.is_some() {
             return;
         }
-        self.ticking_for = Some(since);
         self.tick = Some(cx.spawn(async move |this, cx| {
-            let mut wait = WORK_SHOWN_AFTER;
             loop {
-                cx.background_executor().timer(wait).await;
-                wait = WORK_TICK;
+                cx.background_executor().timer(PROGRESS_POLL).await;
                 let Some(this) = this.upgrade() else {
                     return;
                 };
-                let running = this.update(cx, |work, cx| {
-                    cx.notify();
-                    work.binary
-                        .read(cx)
-                        .reading()
-                        .is_some_and(|loading| loading.since == since)
-                });
-                if !running {
+                if !this.update(cx, Self::poll) {
                     return;
                 }
             }
         }));
     }
+
+    /// Reads the work and redraws the item when it first shows, when the engine's phase or
+    /// percent moves, when it ends, and for the load every [`WORK_TICK`] for its elapsed time.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Item context.
+    ///
+    /// # Returns
+    ///
+    /// Whether a work still runs; once none does the poll ends.
+    fn poll(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let now = cx.background_executor().now();
+        if self.binary.read(cx).reading().is_none() {
+            let oldest = Jobs::oldest(cx).map(|(id, ..)| id);
+            if oldest != self.job.map(|(id, _)| id) {
+                self.job = oldest.map(|id| (id, now));
+            }
+        }
+        let Some(running) = self.running(cx) else {
+            if self.drawn {
+                cx.notify();
+            }
+            (self.drawn, self.redrawn, self.tick) = (false, None, None);
+            return false;
+        };
+        let shown = shown_for(running.since, now).is_some();
+        let words = progress_words(&running.progress.snapshot());
+        let second = running.load
+            && self
+                .redrawn
+                .is_none_or(|at| now.saturating_duration_since(at) >= WORK_TICK);
+        if shown && (!self.drawn || second || words != self.words) {
+            if !self.drawn || second {
+                self.redrawn = Some(now);
+            }
+            (self.drawn, self.words) = (true, words);
+            cx.notify();
+        }
+        true
+    }
 }
 
-/// Returns how long `loading` has run at `now` once the work item shows it, `None` before
-/// [`WORK_SHOWN_AFTER`].
+/// Returns how long a work started at `since` has run at `now` once the work item shows
+/// it, `None` before [`WORK_SHOWN_AFTER`].
 ///
 /// # Arguments
 ///
-/// * `loading` - The running load.
+/// * `since` - When the work started, or when the item first saw it.
 /// * `now` - The executor's clock.
 #[must_use]
-pub fn shown_for(loading: &Loading, now: Instant) -> Option<Duration> {
-    let elapsed = now.saturating_duration_since(loading.since);
+pub fn shown_for(since: Instant, now: Instant) -> Option<Duration> {
+    let elapsed = now.saturating_duration_since(since);
     (elapsed >= WORK_SHOWN_AFTER).then_some(elapsed)
 }
 
 impl Render for Work {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let Some(loading) = self.binary.read(cx).reading() else {
+        let Some(running) = self.running(cx) else {
             return div().into_any_element();
         };
-        let now = cx.background_executor().now();
-        let Some(elapsed) = shown_for(loading, now) else {
+        let Some(elapsed) = shown_for(running.since, cx.background_executor().now()) else {
             return div().into_any_element();
         };
-        let label = reading_label(&loading.path);
+        let (phase, percent) = progress_words(&running.progress.snapshot());
         let binary = self.binary.clone();
+        let shrinks =
+            |label: Label, by: f32| div().min_w_0().flex_shrink(by).child(label.truncate());
         h_flex()
-            .flex_none()
+            .min_w_0()
             .gap_2()
-            .child(status_label(label, Color::Muted))
-            .child(status_label(
-                format!("{} s", elapsed.as_secs()),
-                Color::Placeholder,
+            .child(shrinks(
+                status_label(running.label, Color::Muted),
+                LABEL_SHRINK,
             ))
-            .child(
-                IconButton::new("cancel-load", IconName::Close)
-                    .icon_size(IconSize::XSmall)
-                    .icon_color(Color::Placeholder)
-                    .tooltip(Tooltip::text("Cancel"))
-                    .on_click(move |_, _, cx| {
-                        binary.update(cx, |binary, cx| binary.cancel_load(cx));
-                    }),
-            )
+            .children(phase.map(|phase| shrinks(status_label(phase, Color::Placeholder), 1.0)))
+            .child(div().flex_none().child(gauge(percent, cx)))
+            .when(running.load, |row| {
+                row.child(div().flex_none().child(status_label(
+                    format!("{} s", elapsed.as_secs()),
+                    Color::Placeholder,
+                )))
+                .child(
+                    IconButton::new("cancel-load", IconName::Close)
+                        .icon_size(IconSize::Small)
+                        .icon_color(Color::Muted)
+                        .tooltip(Tooltip::text("Cancel"))
+                        .on_click(move |_, _, cx| {
+                            binary.update(cx, |binary, cx| binary.cancel_load(cx));
+                        }),
+                )
+            })
             .into_any_element()
     }
 }
@@ -617,7 +794,9 @@ mod tests {
     use gpui::{AppContext as _, TestAppContext, VisualTestContext};
     use workspace::Workspace;
 
-    use super::{Address, Grades, Work, grade_text, shown_for};
+    use borer_engine::progress::{Phase, Snapshot};
+
+    use super::{Address, Grades, Work, grade_text, progress_words, shown_for};
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{
         CALLER, init, load_sample, open, open_caller, open_place, sample, shown,
@@ -938,6 +1117,35 @@ mod tests {
         assert_eq!(got.disagree, 0);
     }
 
+    /// The work item shows a percent only of the items the engine counts.
+    ///
+    /// It names the engine's phase; no percent before a phase, for a phase with no count, or
+    /// once every counted item is done while the phase runs on; the share done otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a percent shows that the engine did not count, or is not the share done.
+    #[test]
+    fn the_work_item_shows_only_the_engines_share() {
+        let phase = Phase {
+            index: 0,
+            of: 2,
+            name: "analysis discover",
+        };
+        let at = |phase, done, total| progress_words(&Snapshot { phase, done, total });
+        assert_eq!(at(None, 0, 0), (None, None));
+        assert_eq!(at(Some(phase), 0, 0), (Some("analysis discover"), None));
+        assert_eq!(at(Some(phase), 7, 0), (Some("analysis discover"), None));
+        assert_eq!(
+            at(Some(phase), 50, 200),
+            (Some("analysis discover"), Some(25))
+        );
+        assert_eq!(at(Some(phase), 199, 200).1, Some(99));
+        assert_eq!(at(Some(phase), 200, 200), (Some("analysis discover"), None));
+        assert_eq!(at(Some(phase), 300, 200).1, None);
+        assert_eq!(at(None, u64::MAX - 1, u64::MAX).1, Some(99));
+    }
+
     /// The bar's words and numbers are those of the answer's header line.
     ///
     /// # Panics
@@ -988,10 +1196,13 @@ mod tests {
             path: PathBuf::from("big.dll"),
             since,
         };
-        assert_eq!(shown_for(&loading, since + Duration::from_millis(99)), None);
+        assert_eq!(
+            shown_for(loading.since, since + Duration::from_millis(99)),
+            None
+        );
         let later = since + Duration::from_millis(1500);
         assert_eq!(
-            shown_for(&loading, later),
+            shown_for(loading.since, later),
             Some(Duration::from_millis(1500))
         );
         init(cx);

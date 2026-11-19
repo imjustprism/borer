@@ -35,6 +35,7 @@ use borer_engine::hexdump::{HexRows, hex_rows};
 use borer_engine::num::from_usize;
 use borer_engine::pack::Packs;
 use borer_engine::program::{Feature, Program, SymbolKind, read_regular};
+use borer_engine::progress::Progress;
 use borer_engine::session::{self, Open, Pdb};
 use borer_engine::strings::walk::{StringEncoding, StringRows, WALK_MIN, string_rows};
 use borer_engine::view::{LineBlock, Ref, View};
@@ -108,6 +109,8 @@ pub struct EngineTask<R> {
     task: Task<Option<R>>,
     /// The flag in force while the work runs.
     cancel: Cancel,
+    /// Where the engine's work has reached, which it writes and the app polls.
+    progress: Progress,
 }
 
 impl<R: Unpin + 'static> Future for EngineTask<R> {
@@ -124,6 +127,12 @@ impl<R> EngineTask<R> {
     pub fn flag(&self) -> Cancel {
         self.cancel.clone()
     }
+
+    /// Returns the request's progress, which the engine moves as the work runs.
+    #[must_use]
+    pub fn progress(&self) -> Progress {
+        self.progress.clone()
+    }
 }
 
 impl<R> Drop for EngineTask<R> {
@@ -134,15 +143,15 @@ impl<R> Drop for EngineTask<R> {
 
 /// Lists the engine requests running in the app, oldest first.
 ///
-/// Each entry is an id, a label naming the request's subject and its [`Cancel`]; a raised
-/// flag marks an answered or dropped request, which readers skip and the next request
-/// prunes. It holds no time, and no answer reads it.
+/// Each entry is an id, a label naming the request's subject, its [`Cancel`] and its
+/// [`Progress`]; a raised flag marks an answered or dropped request, which readers skip and
+/// the next request prunes. It holds no time, and no answer reads it.
 #[derive(Debug, Default)]
 pub struct Jobs {
     /// Id of the newest request.
     newest: u64,
-    /// Every request since the last prune: id, label and flag.
-    live: Vec<(u64, SharedString, Cancel)>,
+    /// Every request since the last prune: id, label, flag and progress.
+    live: Vec<(u64, SharedString, Cancel, Progress)>,
 }
 
 impl Global for Jobs {}
@@ -161,9 +170,26 @@ impl Jobs {
     #[must_use]
     pub fn running(cx: &App) -> Vec<(u64, SharedString, Cancel)> {
         cx.try_global::<Self>().map_or_else(Vec::new, |jobs| {
-            let live = jobs.live.iter().filter(|(_, _, flag)| !flag.is_raised());
-            live.cloned().collect()
+            let live = jobs.live.iter().filter(|(_, _, flag, _)| !flag.is_raised());
+            live.map(|(id, label, flag, _)| (*id, label.clone(), flag.clone()))
+                .collect()
         })
+    }
+
+    /// Returns the oldest request still running, with its progress.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context holding the list.
+    ///
+    /// # Returns
+    ///
+    /// Its id, label and progress, `None` while none runs.
+    #[must_use]
+    pub fn oldest(cx: &App) -> Option<(u64, SharedString, Progress)> {
+        let jobs = cx.try_global::<Self>()?;
+        let (id, label, _, progress) = jobs.live.iter().find(|(_, _, f, _)| !f.is_raised())?;
+        Some((*id, label.clone(), progress.clone()))
     }
 }
 
@@ -186,22 +212,27 @@ pub fn spawn_engine<R: Send + Unpin + 'static>(
     cx: &mut App,
     work: impl FnOnce() -> R + Send + 'static,
 ) -> EngineTask<R> {
-    let cancel = Cancel::new();
+    let (cancel, progress) = (Cancel::new(), Progress::new());
     let jobs = cx.default_global::<Jobs>();
-    jobs.live.retain(|(_, _, flag)| !flag.is_raised());
+    jobs.live.retain(|(_, _, flag, _)| !flag.is_raised());
     jobs.newest = jobs.newest.saturating_add(1);
-    jobs.live.push((jobs.newest, label.into(), cancel.clone()));
-    let flag = cancel.clone();
+    let entry = (jobs.newest, label.into(), cancel.clone(), progress.clone());
+    jobs.live.push(entry);
+    let (flag, reports) = (cancel.clone(), progress.clone());
     let task = cx.background_executor().spawn(async move {
         flag.within(|| {
             if Cancel::raised() {
                 return None;
             }
-            let answer = run_engine(work);
+            let answer = reports.within(|| run_engine(work));
             (!Cancel::raised()).then_some(answer)
         })
     });
-    EngineTask { task, cancel }
+    EngineTask {
+        task,
+        cancel,
+        progress,
+    }
 }
 
 /// Holds one view's newest engine request.
@@ -1651,6 +1682,36 @@ pub(crate) mod tests {
         let flag = running(cx).remove(0).1;
         drop(request);
         assert!(flag.is_raised());
+    }
+
+    /// A request's progress is the one the list shows for it, and its work runs under it,
+    /// so the engine's phases of an analysis reach it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the list holds another progress or no phase reaches the request's.
+    #[gpui::test]
+    fn a_request_carries_the_engines_progress(cx: &mut TestAppContext) {
+        use borer_engine::analysis::Analysis;
+        use borer_engine::program::{Arch, Program, Section};
+        let request = cx.update(|cx| {
+            spawn_engine("Analyzing", cx, || {
+                let code = vec![0xc3_u8; 0x10];
+                let text = Section::mapped(".text", 0x1000, 0, 0x10, false, true);
+                let program = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+                Analysis::compute(&program).functions.len()
+            })
+        });
+        let listed = cx
+            .read(Jobs::oldest)
+            .map(|(_, label, progress)| (label, progress));
+        let (label, progress) = listed.unwrap();
+        assert_eq!(label, "Analyzing");
+        assert_eq!(progress.snapshot(), request.progress().snapshot());
+        cx.run_until_parked();
+        let phase = request.progress().snapshot().phase.unwrap();
+        assert!(phase.name.starts_with("analysis "), "{}", phase.name);
+        assert_eq!(progress.snapshot(), request.progress().snapshot());
     }
 
     /// A find runs under a flag of its own, so a raised request flag keeps the name index

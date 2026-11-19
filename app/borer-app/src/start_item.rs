@@ -16,7 +16,7 @@ use gpui::{
 use theme::ActiveTheme as _;
 use ui::{
     Color, Divider, DividerColor, Headline, Icon, IconName, IconSize, KeyBinding, Label,
-    LabelCommon as _, LabelSize, ListItem, ListItemSpacing, SpinnerLabel, Toggleable as _, h_flex, rems_from_px,
+    LabelCommon as _, LabelSize, ListItem, ListItemSpacing, Toggleable as _, h_flex, rems_from_px,
     v_flex,
 };
 use workspace::{Item, Pane};
@@ -27,6 +27,7 @@ use crate::app_view::open_dropped;
 use crate::binary::{Binary, reading_label};
 use crate::recent::{RecentBinary, SHOWN_MAX};
 use crate::rows_panel::{Rows, row_keys};
+use crate::status::{gauge, progress_words, spinner};
 
 /// Side in logical pixels of the borer mark beside the greeting.
 const MARK_PX: f32 = 40.0;
@@ -447,11 +448,22 @@ impl Render for StartItem {
         let column = v_flex().w(px(COLUMN_PX)).max_w_full().gap_6();
         let binary = self.binary.read(cx);
         let column = if let Some(busy) = binary.busy() {
-            let reading = h_flex()
-                .justify_center()
+            let (phase, percent) = progress_words(&binary.load_progress().snapshot());
+            let reading = v_flex()
+                .items_center()
                 .gap_2()
-                .child(SpinnerLabel::new())
-                .child(Label::new(reading_label(busy)).color(Color::Muted));
+                .child(Label::new(reading_label(busy)).color(Color::Muted))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(spinner())
+                        .children(phase.map(|phase| {
+                            Label::new(phase)
+                                .size(LabelSize::Small)
+                                .color(Color::Placeholder)
+                        }))
+                        .children(percent.map(|percent| gauge(Some(percent), cx))),
+                );
             column.child(reading)
         } else {
             let error = binary.load_error().map(|e| {
