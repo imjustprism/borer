@@ -1149,15 +1149,47 @@ def measure_scroll_phase(
     return kv
 
 
+def _stall_watchdog(proc: subprocess.Popen[str], idle_s: float, last: list[str]) -> threading.Event:
+    """Kill `proc` once it prints nothing for `idle_s` seconds; `last` holds its latest line."""
+    stalled = threading.Event()
+    seen = [time.monotonic(), ""]
+
+    def _poll() -> None:
+        while proc.poll() is None:
+            if last and last[-1] != seen[1]:
+                seen[:] = [time.monotonic(), last[-1]]
+            if time.monotonic() - seen[0] > idle_s:
+                stalled.set()
+                with contextlib.suppress(OSError):
+                    proc.kill()
+                return
+            time.sleep(0.5)
+
+    threading.Thread(target=_poll, daemon=True).start()
+    return stalled
+
+
+ACTIONS_IDLE_S = 60.0
+"""Longest the actions phase may go without a line: each run of its script prints one."""
+
+
 def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
-    """Run the actions phase, print its table, and return its rows, misses and skips."""
+    """Run the actions phase, print its table, and return its rows, misses and skips.
+
+    The app prints a `MEASURE_RUN` line as each run of the script starts; a phase that
+    prints nothing for `ACTIONS_IDLE_S` is killed and fails naming the run it stalled in.
+    """
     proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", "actions"])
     watch_thread = watcher.watch_while(proc, "actions")
     assert proc.stdout is not None
     out: dict[str, Any] = {"actions": [], "frames": [], "misses": [], "skipped": [], "end": {}}
     rc = 0
+    last: list[str] = []
+    stalled = _stall_watchdog(proc, ACTIONS_IDLE_S, last)
     with _proc_watchdog(proc, 3600.0, "actions"):
         for line in proc.stdout:
+            last.append(line.strip())
+            del last[:-1]
             kv = parse_kv_line(line)
             for marker, key in (
                 ("MEASURE_ACTION ", "actions"),
@@ -1172,6 +1204,11 @@ def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
         rc = proc.wait(timeout=60)
     watch_thread.join(timeout=2)
     watcher.finish_phase("actions")
+    if stalled.is_set():
+        where = last[-1] if last else "before its first line"
+        raise RuntimeError(
+            f"actions phase stalled: no line for {ACTIONS_IDLE_S:.0f} s after {where!r}"
+        )
     if not out["end"]:
         raise RuntimeError(f"actions phase missed MEASURE_ACTIONS (rc={rc}): {get_stderr()}")
     if rc != 0:
@@ -1421,6 +1458,9 @@ def _collect_bar_failures(
             failures.append(
                 f"{label} recorded {phase.get('ui_engine_calls')} UI-thread engine calls"
             )
+    if "not_measured" in input_lat:
+        failures.append(f"input-to-paint not measured: {input_lat['not_measured']}")
+        return failures
     if not input_lat.get("sendinput_verified"):
         failures.append(f"SendInput not verified (delivery={input_lat.get('delivery')!r})")
     if int(input_lat.get("samples", 0)) <= 0:
@@ -1514,11 +1554,15 @@ def main() -> int:
         code_scroll = measure_scroll_phase(exe, "code", watcher)
 
         print("==> 6/6 Win32 SendInput latency (200 keys + 100 clicks)...", flush=True)
-        input_lat = measure_input_latency(
-            exe,
-            watcher,
-            allow_fallback=args.allow_postmessage_fallback,
-        )
+        try:
+            input_lat = measure_input_latency(
+                exe,
+                watcher,
+                allow_fallback=args.allow_postmessage_fallback,
+            )
+        except (RuntimeError, TimeoutError) as exc:
+            input_lat = {"not_measured": str(exc)}
+            print(f"    input: not measured: {exc}", flush=True)
 
         print("==> drop of a folder with a context server in its settings...", flush=True)
         folder_drop = measure_folder_drop(exe, watcher)

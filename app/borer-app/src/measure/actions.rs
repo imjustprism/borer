@@ -862,6 +862,9 @@ impl Harness {
                 let Some(next) = run.script.pop_front() else {
                     return false;
                 };
+                if say(&format!("MEASURE_RUN what={:?}", next.what)).is_err() {
+                    return false;
+                }
                 run.what = next.what;
                 run.moves = next.moves;
                 continue;
