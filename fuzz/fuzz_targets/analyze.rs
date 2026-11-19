@@ -159,4 +159,13 @@ fuzz_target!(|data: &[u8]| {
     ] {
         _ = stats_tsv(&program, &analysis, spec, Window::first(LISTED));
     }
+    for uri in [
+        "borer://find/a",
+        "borer://find/0x401000",
+        "borer://find/str:%00%E2%80%AE!limit=3",
+        "borer://stats/strings,window=64!offset=1!limit=2",
+        "borer://encoded!limit=4",
+    ] {
+        _ = borer_engine::answer::listing(&program, Some(&analysis), &overlay, uri);
+    }
 });
