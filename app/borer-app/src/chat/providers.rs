@@ -28,6 +28,7 @@ use language_model::{
     LanguageModelRequest, LanguageModelToolChoiceSupport,
 };
 use open_ai::completion::{ChatCompletionMaxTokensParameter, into_open_ai};
+use ui::IconName;
 
 use super::thread::Chosen;
 
@@ -75,6 +76,19 @@ impl Offered {
             Self::OpenRouter => "OpenRouter",
             Self::Ollama => "Ollama",
             Self::LmStudio => "LM Studio",
+        }
+    }
+
+    /// Returns the provider's icon in Zed's icon set, as Zed's own agent panel shows it.
+    #[must_use]
+    pub const fn icon(self) -> IconName {
+        match self {
+            Self::Anthropic => IconName::AiAnthropic,
+            Self::OpenAi => IconName::AiOpenAi,
+            Self::Google => IconName::AiGoogle,
+            Self::OpenRouter => IconName::AiOpenRouter,
+            Self::Ollama => IconName::AiOllama,
+            Self::LmStudio => IconName::AiLmStudio,
         }
     }
 
