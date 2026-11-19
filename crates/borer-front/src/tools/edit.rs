@@ -174,7 +174,7 @@ pub fn set_name(h: &dyn Held, p: &SetNameParams) -> Result<String, Failure> {
         let (plan, done) =
             s.edit(&edits, force, apply)
                 .map_err(|e| match e.downcast_ref::<edit::Refused>() {
-                    Some(refused) => item(refused.edit, refused.why.clone()),
+                    Some(refused) => item(refused.edit, refused.to_string()),
                     None => e.to_string(),
                 })?;
         let lines: Vec<(String, String)> = plan

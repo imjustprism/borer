@@ -24,12 +24,7 @@ impl Line {
                 number,
             } => {
                 let what = if *function { "function" } else { "data" };
-                let numeric = number.map_or_else(String::new, |n| {
-                    format!(
-                        "
-# note: '{new}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
-                    )
-                });
+                let numeric = number.map_or_else(String::new, |_| self.noted());
                 let line = if dry {
                     format!("set name of {what} {target:#x} ({old}) to '{new}'")
                 } else {
@@ -81,13 +76,39 @@ impl Line {
             }
             Self::Stated { would, .. } if dry => (would.clone(), String::new()),
             Self::Stated { done, .. } => (done.clone(), String::new()),
-            Self::Unknown(types) => (
-                String::new(),
-                format!(
-                    "\n# note: {} names no user type or C type word borer knows, so it passes as a word",
-                    types.join(", ")
-                ),
-            ),
+            Self::Unknown(_) => (String::new(), self.noted()),
         }
+    }
+
+    /// Returns the note a line carries, as a sentence: a name that also
+    /// reads as a number, or a type no word borer knows names; `None` for
+    /// a line with none.
+    #[must_use]
+    pub fn note(&self) -> Option<String> {
+        match self {
+            Self::Named {
+                new,
+                number: Some(n),
+                ..
+            } => Some(format!(
+                "'{new}' also reads as the number {n:#x}; an address argument finds the name first, and 0x-prefixed text is always an address"
+            )),
+            Self::Unknown(types) => Some(format!(
+                "{} names no user type or C type word borer knows, so it passes as a word",
+                types.join(", ")
+            )),
+            Self::Named { number: None, .. }
+            | Self::Commented { .. }
+            | Self::Declared { .. }
+            | Self::Laid { .. }
+            | Self::Stated { .. } => None,
+        }
+    }
+
+    /// Returns the note as the tools append it to an answer: on a line of
+    /// its own after `# note: `, empty for a line with none.
+    fn noted(&self) -> String {
+        self.note()
+            .map_or_else(String::new, |note| format!("\n# note: {note}"))
     }
 }

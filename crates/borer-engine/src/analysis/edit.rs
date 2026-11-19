@@ -113,6 +113,51 @@ impl Change {
         }
     }
 
+    /// Tells whether the change leaves its entry as it found it: an edit to
+    /// the value the entry holds already.
+    #[must_use]
+    pub fn changes_nothing(&self) -> bool {
+        match self {
+            Self::Name(_, s) | Self::Comment(_, s) => s.before() == s.after(),
+            Self::Type(_, s) => s.before() == s.after(),
+            Self::Applied(_, s) => s.before() == s.after(),
+            Self::Proto(_, s) => s.before() == s.after(),
+            Self::Var(_, _, s) => s.before() == s.after(),
+            Self::Field(_, _, s) => s.before() == s.after(),
+        }
+    }
+
+    /// Returns about how many bytes the change holds: its key and both its
+    /// sides, each as many as its spelling, a type as many as the
+    /// fingerprint folds of it.
+    #[must_use]
+    pub fn bytes(&self) -> usize {
+        /// Sums the bytes of both sides of a swap, each measured by `size`.
+        fn sides<V>(s: &Swap<V>, size: impl Fn(&V) -> usize) -> usize {
+            [s.before(), s.after()]
+                .into_iter()
+                .flatten()
+                .map(size)
+                .sum()
+        }
+        let word = size_of::<u64>();
+        match self {
+            Self::Name(_, s) | Self::Comment(_, s) => word + sides(s, String::len),
+            Self::Type(name, s) => {
+                let folded = |t: &UserType| {
+                    let mut n = 0usize;
+                    t.fold(&mut |b: &[u8]| n = n.saturating_add(b.len()));
+                    n
+                };
+                name.len() + sides(s, folded)
+            }
+            Self::Applied(_, s) => word + sides(s, |t| t.spell().len()),
+            Self::Proto(_, s) => word + sides(s, |p| p.spell().len()),
+            Self::Var(_, _, s) => 2 * word + sides(s, |v| v.spell().len()),
+            Self::Field(class, _, s) => class.len() + word + sides(s, |f| f.spell().len()),
+        }
+    }
+
     /// Returns the change that takes this one back: the same entry, from
     /// what this one leaves to what it found.
     #[must_use]
@@ -541,18 +586,41 @@ impl Plan {
     }
 }
 
+/// Who made an edit: kept beside a committed plan in a front end's log of
+/// changes, never in the overlay, so it never enters
+/// [`Overlay::fingerprint`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Author {
+    /// The person at the front end.
+    Person,
+    /// A model whose proposal the person accepted.
+    Model {
+        /// The provider's name, as its registry row gives it.
+        provider: String,
+        /// The model's id at that provider.
+        model: String,
+    },
+}
+
 /// Why [`plan`] refused one edit of its list.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Refused {
     /// The index of the edit refused.
     pub edit: usize,
-    /// Why, as the agent reads it.
+    /// Why, in words any face reads.
     pub why: String,
+    /// Whether the name asked for is another address's, which an agent's
+    /// call takes with `force`; its words say so ([`TAKE_IT`]).
+    pub taken: bool,
 }
 
 impl fmt::Display for Refused {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.why)
+        f.write_str(&self.why)?;
+        if self.taken {
+            f.write_str(TAKE_IT)?;
+        }
+        Ok(())
     }
 }
 
@@ -582,9 +650,34 @@ struct Draft {
     changes: Vec<Change>,
     /// What the edits so far do.
     lines: Vec<Line>,
+    /// Whether the last edit checked was refused a name another address has.
+    taken: bool,
 }
 
 impl Draft {
+    /// Refuses a name `target` takes when another address answers to it
+    /// ([`taken`]), noting the refusal as one a forced edit would take.
+    ///
+    /// # Arguments
+    ///
+    /// * `(p, a)` - The program and its analysis.
+    /// * `target` - The function's entry, or the data address.
+    /// * `name` - The name.
+    ///
+    /// # Errors
+    ///
+    /// [`taken`]'s refusal.
+    fn refuse_taken(
+        &mut self,
+        (p, a): (&Program, &Analysis),
+        target: u64,
+        name: &str,
+    ) -> Result<(), String> {
+        let refused = taken(p, a, &self.overlay, target, name);
+        self.taken = refused.is_err();
+        refused
+    }
+
     /// Writes a change's new side to the draft's overlay and keeps the
     /// change as written.
     ///
@@ -977,7 +1070,7 @@ impl Draft {
         let old = name_of(a, &self.overlay, target);
         self.put(Change::Name(target, to(Some(name.to_owned()))));
         if force == Force::Refuse {
-            taken(p, a, &self.overlay, target, name)?;
+            self.refuse_taken((p, a), target, name)?;
         }
         self.lines.push(Line::Named {
             target,
@@ -1039,7 +1132,7 @@ impl Draft {
         };
         self.put(change);
         if let Some((target, name)) = &named {
-            taken(p, a, &self.overlay, *target, name)?;
+            self.refuse_taken((p, a), *target, name)?;
         }
         if let Some((entry, key, name)) = var {
             var_taken(p, &self.overlay, (entry, key), &name)?;
@@ -1070,6 +1163,11 @@ fn changed(change: &Change) -> String {
     )
 }
 
+/// How an agent reads a refusal of a taken name ([`Refused::taken`]): the
+/// way its call takes the name anyway, which a face with no `force` leaves
+/// off.
+pub const TAKE_IT: &str = ", or force=true to take it";
+
 /// Refuses a name `target` takes when another address answers to it, or
 /// the name reads as something else that is taken ([`resolve`]).
 ///
@@ -1082,16 +1180,14 @@ fn changed(change: &Change) -> String {
 ///
 /// # Errors
 ///
-/// When the name resolves anywhere else; the message says how to take it.
+/// When the name resolves anywhere else; the message names where.
 fn taken(p: &Program, a: &Analysis, o: &Overlay, target: u64, name: &str) -> Result<(), String> {
     match resolve(p, a, o, name) {
         Ok(found) if found == target => Ok(()),
         Ok(found) => Err(format!(
-            "'{name}' already names {found:#x}; pick another name, or force=true to take it"
+            "'{name}' already names {found:#x}; pick another name"
         )),
-        Err(why) => Err(format!(
-            "'{name}' is taken ({why}); pick another name, or force=true to take it"
-        )),
+        Err(why) => Err(format!("'{name}' is taken ({why}); pick another name")),
     }
 }
 
@@ -1422,11 +1518,16 @@ pub fn plan(
         overlay: overlay.clone(),
         changes: Vec::with_capacity(edits.len()),
         lines: Vec::with_capacity(edits.len()),
+        taken: false,
     };
     for (i, edit) in edits.iter().enumerate() {
         draft
             .step((program, analysis), edit, force)
-            .map_err(|why| Refused { edit: i, why })?;
+            .map_err(|why| Refused {
+                edit: i,
+                why,
+                taken: draft.taken,
+            })?;
     }
     project::held(&draft.overlay).map_err(anyhow::Error::msg)?;
     Ok(Plan {
@@ -1529,6 +1630,7 @@ pub fn revert(
         overlay: overlay.clone(),
         changes: Vec::with_capacity(changes.len()),
         lines: Vec::new(),
+        taken: false,
     };
     for change in changes.iter().rev() {
         draft

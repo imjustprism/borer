@@ -149,14 +149,13 @@ fn a_plan_made_before_another_commit_is_stale() {
     let again = plan(&p, &a, &o, &rename(second), Force::Refuse).expect_err("taken");
     let refused = again.downcast_ref::<Refused>().expect("an edit refused");
     assert_eq!(refused.edit, 0);
+    assert!(refused.taken);
+    let said = refused.to_string();
     assert!(
-        refused.why.starts_with("'shared' ")
-            && refused.why.contains(&format!("{first:#x}"))
-            && refused
-                .why
-                .ends_with("pick another name, or force=true to take it"),
-        "{}",
-        refused.why
+        said.starts_with("'shared' ")
+            && said.contains(&format!("{first:#x}"))
+            && said.ends_with("pick another name, or force=true to take it"),
+        "{said}"
     );
 }
 
@@ -622,4 +621,25 @@ fn a_user_name_is_found_whatever_its_case() {
     o.names.insert(0x7777_0008, "Start".to_owned());
     assert_eq!(resolve(&p, &a, &o, "ärger"), Ok(0x7777_0000));
     assert_eq!(resolve(&p, &a, &o, "START"), Ok(0x7777_0008));
+}
+
+/// A plan that writes each entry the value it holds already changes
+/// nothing; one that writes another value does.
+#[test]
+fn a_plan_of_the_value_held_changes_nothing() {
+    let p = fixture();
+    let a = Analysis::compute(&p);
+    let entry = a.functions.first().map(|f| f.entry).expect("a function");
+    let mut o = Overlay::default();
+    o.names.insert(entry, "kept".to_owned());
+    let rename = |name: &str| {
+        vec![Edit::Name {
+            at: entry,
+            name: name.to_owned(),
+        }]
+    };
+    let same = plan(&p, &a, &o, &rename("kept"), Force::Refuse).expect("planned");
+    assert!(same.changes().iter().all(Change::changes_nothing));
+    let other = plan(&p, &a, &o, &rename("moved"), Force::Refuse).expect("planned");
+    assert!(!other.changes().iter().all(Change::changes_nothing));
 }
