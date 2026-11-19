@@ -60,6 +60,8 @@ impl Card {
             .items_center()
             .justify_center()
             .gap_2()
+            .px_4()
+            .text_center()
             .debug_selector(|| CARD_SELECTOR.to_owned())
             .font(ThemeSettings::get_global(cx).ui_font.clone())
             .child(Label::new(first.to_owned()).color(self.tone.color()))

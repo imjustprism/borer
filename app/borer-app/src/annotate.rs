@@ -205,6 +205,11 @@ pub const DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(30);
 /// Most rows a declarations editor grows to.
 const DECLARE_ROWS: usize = 8;
 
+/// Narrowest the inline editor draws in a code tab, in rems, so its text field has room to
+/// type in, unless the tab is narrower; it grows to its longest line and stops at the tab's
+/// width.
+pub(crate) const INPUT_MIN_REMS: f32 = 28.0;
+
 /// The inline editor: the text typed, the engine's plan of it, and where it lands.
 pub struct Annotator {
     /// The window's binary, through which the plan commits.
@@ -693,7 +698,7 @@ impl Render for Annotator {
             Label::new(text::visible(line).into_owned())
                 .size(LabelSize::Small)
                 .color(color)
-                .single_line()
+                .truncate()
                 .into_any_element()
         };
         let mut lines = Vec::new();
@@ -743,7 +748,9 @@ impl Render for Annotator {
             .key_context("Annotating")
             .on_action(cx.listener(|this, _: &menu::Confirm, _, cx| this.confirm(cx)))
             .on_action(cx.listener(|this, _: &menu::Cancel, _, cx| this.cancel(cx)))
-            .w_full()
+            .max_w_full()
+            .overflow_hidden()
+            .font(ThemeSettings::get_global(cx).ui_font.clone())
             .px_2()
             .py_1()
             .gap_0p5()
