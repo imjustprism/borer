@@ -739,26 +739,29 @@ fn literals(program: &Program) -> FxHashMap<Vec<u8>, u64> {
 ///
 /// # Arguments
 ///
-/// * `program` - The loaded image.
-/// * `analysis` - Its analysis, holding the memo.
+/// * `p` - The loaded image.
+/// * `a` - Its analysis, holding the memo.
 /// * `bytes` - The literal's bytes.
-fn literal_address(program: &Program, analysis: &Analysis, bytes: &[u8]) -> Option<u64> {
-    let index = analysis
-        .derived
-        .get_or_build("text_literals", (), || literals(program));
+///
+/// # Returns
+///
+/// The address, or `None` when no such memory holds the bytes.
+///
+/// # Errors
+///
+/// When the search refuses the file ([`crate::search::find_bytes`]).
+fn literal_address(p: &Program, a: &Analysis, bytes: &[u8]) -> Result<Option<u64>, String> {
+    let index = a.derived.get_or_build("text_literals", (), || literals(p));
     if let Some(at) = index.get(bytes) {
-        return Some(*at);
+        return Ok(Some(*at));
     }
-    *analysis
-        .derived
-        .get_or_build("text_literal", bytes.to_vec(), || {
-            let pattern: Vec<Option<u8>> = bytes.iter().map(|b| Some(*b)).collect();
-            crate::search::find_bytes(program, &pattern, 0)
-                .hits
-                .iter()
-                .filter_map(|h| h.va)
-                .find(|va| program.section_at(*va).is_some_and(|s| !s.executable))
-        })
+    let data = |va: &u64| p.section_at(*va).is_some_and(|s| !s.executable);
+    let pattern: Vec<Option<u8>> = bytes.iter().map(|b| Some(*b)).collect();
+    let found = a.derived.get_or_build("text_literal", bytes.to_vec(), || {
+        crate::search::find_bytes(p, &pattern, 0)
+            .map(|f| f.hits.iter().filter_map(|h| h.va).find(data))
+    });
+    found.as_ref().clone()
 }
 
 impl<'p> Script<'p> {
@@ -964,8 +967,8 @@ impl<'p> Script<'p> {
         let known = resolve_names(program, analysis, overlay, entry, &wanted);
         let literals = strings
             .into_iter()
-            .map(|s| (s.to_vec(), literal_address(program, analysis, s)))
-            .collect();
+            .map(|s| Ok((s.to_vec(), literal_address(program, analysis, s)?)))
+            .collect::<Result<_, String>>()?;
         let callees = known
             .values()
             .filter_map(|k| match k {

@@ -544,7 +544,7 @@ pub const TOOLS: &[Tool] = &[
         search,
         SearchParams,
         &[],
-        "Search every byte of the file for a hex pattern with ?? wildcards, or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings)."
+        "Search every byte of the file for hex (?? or 4? wildcards, 4096 bytes max), or text with kind=text, as `function: va ...` rows, paged. Not for listing strings (use strings)."
     ),
     row!(
         set_comment,

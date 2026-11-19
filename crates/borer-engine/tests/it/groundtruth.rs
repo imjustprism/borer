@@ -65,7 +65,7 @@ fn decompiled_serial_check_matches_source_shape() {
     let a = Analysis::compute(&p);
 
     let pat = parse_pattern("b8 ef be ad de").expect("pattern");
-    let hits = find_bytes(&p, &pat, 0).hits;
+    let hits = find_bytes(&p, &pat, 0).expect("the search answers").hits;
     let va = hits
         .iter()
         .find_map(|h| h.va)
@@ -154,6 +154,7 @@ fn the_serial_check_runs_and_its_text_is_read() {
     let a = Analysis::compute(&p);
     let pat = parse_pattern("b8 ef be ad de").expect("pattern");
     let va = find_bytes(&p, &pat, 0)
+        .expect("the search answers")
         .hits
         .iter()
         .find_map(|h| h.va)

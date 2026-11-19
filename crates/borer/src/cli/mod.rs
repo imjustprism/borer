@@ -272,6 +272,40 @@ fn fetch_pdb(word: &str, args: &[String]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Returns a page of a pattern's or a text's hits for `query search`,
+/// stopping at the deadline.
+///
+/// # Arguments
+///
+/// * `program` - The program.
+/// * `pattern` - Hex bytes with wildcards, or the text.
+/// * `kind` - Which the pattern is.
+/// * `offset` - Hits to skip before the page.
+///
+/// # Errors
+///
+/// When the pattern does not read, or the deadline passes.
+fn search_hits(
+    program: &borer_engine::program::Program,
+    pattern: &str,
+    kind: SearchKind,
+    offset: usize,
+) -> anyhow::Result<search::Hits> {
+    let found = match kind {
+        SearchKind::Text => {
+            let text = search::spec::Text::new(pattern)
+                .ok_or_else(|| anyhow!("search needs a non-empty pattern"))?;
+            search::find(program, search::form::Needle::Text(&text), offset)
+        }
+        SearchKind::Bytes => {
+            let lanes =
+                search::parse_masked(pattern).map_err(|why| anyhow!("bad AOB pattern: {why}"))?;
+            search::find(program, search::form::Needle::Bytes(&lanes), offset)
+        }
+    };
+    found.map_err(anyhow::Error::msg)
+}
+
 /// Runs one query against an open binary.
 ///
 /// Every query reads its arguments in the order the usage text lists them
@@ -363,14 +397,7 @@ fn query(cmd: Query, args: &[String], s: &Session) -> anyhow::Result<()> {
                 bail!("search needs a non-empty pattern; an empty one would match nothing");
             }
             let (kind, offset) = search_args(args.get(3..).unwrap_or_default())?;
-            let hits = match kind {
-                SearchKind::Text => search::find_text(&s.program, pattern, offset),
-                SearchKind::Bytes => {
-                    let lanes = search::parse_masked(pattern)
-                        .map_err(|why| anyhow::anyhow!("bad AOB pattern: {why}"))?;
-                    search::find_masked(&s.program, &lanes, offset)
-                }
-            };
+            let hits = search_hits(&s.program, pattern, kind, offset)?;
             let a = s.analysis_or_empty();
             print!("{}", render_hits(&hits, offset, false, (&a, &s.overlay)));
         }

@@ -1075,6 +1075,18 @@ pub struct Insn {
     pub word: u32,
 }
 
+/// What an instruction's operands hold for a constant search and a
+/// literal read ([`Insn::operands`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Operands {
+    /// Immediates, each with its operand's place in assembly order.
+    Imms(smallvec::SmallVec<[(u8, u32); 2]>),
+    /// A memory operand at its place in assembly order.
+    Mem(u8, Addr),
+    /// Neither.
+    Nothing,
+}
+
 /// The registers an instruction reads and writes.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Registers {
@@ -1085,6 +1097,123 @@ pub struct Registers {
 }
 
 impl Insn {
+    /// Hands `f` each constant the instruction's operands state, at 32
+    /// bits ([`Insn::operands`]): a data instruction's immediate (expanded
+    /// as the encoding states), `movw`'s, `movt`'s moved up into the high
+    /// half it writes ([`crate::isa::Part::Shifted`]), `svc`'s, a
+    /// saturation's width, a bitfield's
+    /// lsb and width, and the nonzero immediate offset of a load or store
+    /// off any base but the program counter (a literal-pool load is an
+    /// address, and the value in the pool is not read). A float immediate
+    /// is not an integer constant.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Called with each constant, in operand order.
+    pub fn constants(&self, mut f: impl FnMut(crate::isa::Constant)) {
+        use crate::isa::{Constant, Part};
+        match self.operands() {
+            Operands::Imms(imms) => {
+                let high = matches!(self.op, Op::Movt { .. });
+                for (at, value) in imms {
+                    let (part, value) = if high {
+                        (Part::Shifted, u64::from(value) << 16)
+                    } else {
+                        (Part::Immediate, u64::from(value))
+                    };
+                    f(Constant::new(usize::from(at), part, value, 32));
+                }
+            }
+            Operands::Mem(at, addr) => {
+                if let Offset::Imm(d) = addr.offset
+                    && d != 0
+                    && addr.base != PC
+                {
+                    let d = u64::from(d.cast_unsigned());
+                    f(Constant::new(usize::from(at), Part::Displacement, d, 32));
+                }
+            }
+            Operands::Nothing => {}
+        }
+    }
+
+    /// Returns what the instruction's operands hold for a constant search
+    /// and a literal read: its immediates, its memory operand, or neither.
+    pub(crate) fn operands(&self) -> Operands {
+        let imms = |list: &[(u8, u32)]| Operands::Imms(list.iter().copied().collect());
+        match self.op {
+            Op::Dp {
+                kind,
+                src: Operand::Imm { value, .. },
+                ..
+            } => imms(&[(
+                if kind.compares() || kind.moves() {
+                    1
+                } else {
+                    2
+                },
+                value,
+            )]),
+            Op::Movw { imm, .. } | Op::Movt { imm, .. } => imms(&[(1, u32::from(imm))]),
+            Op::Svc { imm } => imms(&[(0, imm)]),
+            Op::Sat { bits, .. } => imms(&[(1, u32::from(bits))]),
+            Op::Bfx { lsb, width, .. } => imms(&[(2, u32::from(lsb)), (3, u32::from(width))]),
+            Op::Bfi { rn, lsb, width, .. } => {
+                let at = if rn.is_some() { 2 } else { 1 };
+                imms(&[(at, u32::from(lsb)), (at + 1, u32::from(width))])
+            }
+            Op::Load { addr, .. }
+            | Op::Store { addr, .. }
+            | Op::LoadEx { addr, .. }
+            | Op::VLoad { addr, .. }
+            | Op::VStore { addr, .. } => Operands::Mem(1, addr),
+            Op::StoreEx { addr, .. } | Op::LoadDual { addr, .. } | Op::StoreDual { addr, .. } => {
+                Operands::Mem(2, addr)
+            }
+            Op::Dp { .. }
+            | Op::Adr { .. }
+            | Op::Mul { .. }
+            | Op::MulLong { .. }
+            | Op::Div { .. }
+            | Op::Clz { .. }
+            | Op::Rbit { .. }
+            | Op::Rev { .. }
+            | Op::Rev16 { .. }
+            | Op::Revsh { .. }
+            | Op::Smmul { .. }
+            | Op::Smulxy { .. }
+            | Op::Extend { .. }
+            | Op::Ldm { .. }
+            | Op::Stm { .. }
+            | Op::B { .. }
+            | Op::Bl { .. }
+            | Op::Blx { .. }
+            | Op::BlxReg { .. }
+            | Op::Bx { .. }
+            | Op::Cbz { .. }
+            | Op::Tb { .. }
+            | Op::It { .. }
+            | Op::Trap
+            | Op::Nop
+            | Op::Mrs { .. }
+            | Op::Msr { .. }
+            | Op::VLdm { .. }
+            | Op::VStm { .. }
+            | Op::FpBin { .. }
+            | Op::FpUn { .. }
+            | Op::FpImm { .. }
+            | Op::FpCmp { .. }
+            | Op::Vcvt { .. }
+            | Op::VmovCore { .. }
+            | Op::VmovPair { .. }
+            | Op::Vmrs { .. }
+            | Op::Vmsr { .. }
+            | Op::Neon { .. }
+            | Op::Unknown
+            | Op::Invalid => Operands::Nothing,
+        }
+    }
+
     /// Returns the address after it.
     #[must_use]
     pub fn next(&self) -> u64 {
@@ -1109,63 +1238,16 @@ impl Insn {
     /// The address, or `None` when the instruction has no literal operand.
     #[must_use]
     pub fn literal(&self) -> Option<u64> {
-        let addr = match self.op {
-            Op::Load { addr, .. }
-            | Op::Store { addr, .. }
-            | Op::LoadDual { addr, .. }
-            | Op::VLoad { addr, .. }
-            | Op::VStore { addr, .. } => addr,
-            Op::Dp { .. }
-            | Op::Movw { .. }
-            | Op::Movt { .. }
-            | Op::Adr { .. }
-            | Op::Mul { .. }
-            | Op::MulLong { .. }
-            | Op::Div { .. }
-            | Op::Clz { .. }
-            | Op::Rbit { .. }
-            | Op::Rev { .. }
-            | Op::Rev16 { .. }
-            | Op::Revsh { .. }
-            | Op::Smmul { .. }
-            | Op::Smulxy { .. }
-            | Op::Bfx { .. }
-            | Op::Sat { .. }
-            | Op::Bfi { .. }
-            | Op::Extend { .. }
-            | Op::LoadEx { .. }
-            | Op::StoreEx { .. }
-            | Op::StoreDual { .. }
-            | Op::Ldm { .. }
-            | Op::Stm { .. }
-            | Op::B { .. }
-            | Op::Bl { .. }
-            | Op::Blx { .. }
-            | Op::BlxReg { .. }
-            | Op::Bx { .. }
-            | Op::Cbz { .. }
-            | Op::Tb { .. }
-            | Op::It { .. }
-            | Op::Svc { .. }
-            | Op::Trap
-            | Op::Nop
-            | Op::Mrs { .. }
-            | Op::Msr { .. }
-            | Op::VLdm { .. }
-            | Op::VStm { .. }
-            | Op::FpBin { .. }
-            | Op::FpUn { .. }
-            | Op::FpImm { .. }
-            | Op::FpCmp { .. }
-            | Op::Vcvt { .. }
-            | Op::VmovCore { .. }
-            | Op::VmovPair { .. }
-            | Op::Vmrs { .. }
-            | Op::Vmsr { .. }
-            | Op::Neon { .. }
-            | Op::Unknown
-            | Op::Invalid => return None,
+        let addr = match self.operands() {
+            Operands::Mem(_, addr) => addr,
+            Operands::Imms(_) | Operands::Nothing => return None,
         };
+        if matches!(
+            self.op,
+            Op::LoadEx { .. } | Op::StoreEx { .. } | Op::StoreDual { .. }
+        ) {
+            return None;
+        }
         match (addr.base, addr.offset, addr.index) {
             (PC, Offset::Imm(d), Index::Offset) => {
                 Some((self.pc() & !3).wrapping_add_signed(i64::from(d)) & 0xffff_ffff)

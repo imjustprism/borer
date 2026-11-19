@@ -602,6 +602,38 @@ fn escaped(text: &str, max: usize) -> String {
     }
 }
 
+/// Returns the number a text writes: decimal or `0x`-hex, with an
+/// optional leading `-`, of at most 64 bits.
+///
+/// # Arguments
+///
+/// * `text` - The number.
+///
+/// # Returns
+///
+/// The number, or `None` for any other text (a float, a register, a sign
+/// inside the digits).
+#[must_use]
+pub fn number(text: &str) -> Option<i128> {
+    let (neg, digits) = text.strip_prefix('-').map_or((false, text), |d| (true, d));
+    let magnitude = match digits
+        .strip_prefix("0x")
+        .or_else(|| digits.strip_prefix("0X"))
+    {
+        Some(hex) if hex.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            u64::from_str_radix(hex, 16).ok()?
+        }
+        Some(_) => return None,
+        None if digits.bytes().all(|b| b.is_ascii_digit()) => digits.parse::<u64>().ok()?,
+        None => return None,
+    };
+    Some(if neg {
+        -i128::from(magnitude)
+    } else {
+        i128::from(magnitude)
+    })
+}
+
 /// Quotes outside text for an error message, bounded and on one line.
 ///
 /// An error that says which name failed is worth much more than one that does

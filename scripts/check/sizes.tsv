@@ -28,7 +28,7 @@ crates/borer-engine/src/analysis/decompile/fields.rs::apply_layouts#1	110
 crates/borer-engine/src/analysis/decompile/format.rs::arguments#1	115
 crates/borer-engine/src/analysis/decompile/guarded.rs::plan#1	130
 crates/borer-engine/src/analysis/decompile/helper.rs::define#1	151
-crates/borer-engine/src/analysis/decompile/interp.rs	2402
+crates/borer-engine/src/analysis/decompile/interp.rs	2397
 crates/borer-engine/src/analysis/decompile/interp.rs::binary#1	111
 crates/borer-engine/src/analysis/decompile/interp.rs::read_as#1	178
 crates/borer-engine/src/analysis/decompile/interp.rs::solve_for#1	177
@@ -141,7 +141,7 @@ crates/borer-engine/src/macho.rs::image#1	135
 crates/borer-engine/src/pdb.rs::gather#1	145
 crates/borer-engine/src/program/mod.rs::from_bytes_with#1	492
 crates/borer-engine/src/program/mod.rs::summary#1	164
-crates/borer-engine/src/script.rs::register#1	297
+crates/borer-engine/src/script.rs::register#1	283
 crates/borer-engine/src/unwind.rs::cxx4#1	109
 crates/borer-engine/tests/common/code.rs	2230
 crates/borer-engine/tests/common/code.rs::code_bytes#1	2229
@@ -166,7 +166,7 @@ crates/borer-engine/tests/it/decompile/rounding.rs::a_scalar_lane_move_and_round
 crates/borer-engine/tests/it/elf.rs::elf_bytes#1	254
 crates/borer-engine/tests/it/objc.rs::image#1	182
 crates/borer/src/cli/mod.rs::cli#1	145
-crates/borer/src/cli/mod.rs::query#1	700
+crates/borer/src/cli/mod.rs::query#1	693
 crates/borer/src/index.rs	1564
 crates/borer/src/main.rs::call_tool#1	106
 crates/borer/src/tools/annotate/tests.rs::set_type_defines_applies_and_refuses#1	117

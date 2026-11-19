@@ -10,6 +10,8 @@ use std::fmt::Write as _;
 use borer_engine::analysis::{Analysis, Overlay, parse_off, render, stated};
 use borer_engine::answer::Need;
 use borer_engine::program::Feature;
+use borer_engine::search::form::{Needle, page};
+use borer_engine::search::spec::Text;
 use borer_engine::strings::walk::string_rows;
 use borer_engine::{disasm, entropy, hexdump as hexfmt, memory, num};
 
@@ -388,8 +390,11 @@ pub fn symbols(h: &dyn Held, p: &SymbolsParams) -> Result<String, Failure> {
     .map(|text| page.limit.noted(text))
 }
 
+/// The refusal of an empty `search` query.
+const EMPTY_QUERY: &str = "the query is empty: give hex bytes with ?? wildcards and 4? or ?8 nibbles (4096 at most), or kind=text and a substring";
+
 /// Searches every section, then the bytes no section maps, for a byte
-/// pattern or a text substring.
+/// pattern or a text substring, stopping at the request's deadline.
 ///
 /// A text query of spaces or a tab is text to find; only a byte pattern
 /// with no token is empty.
@@ -414,23 +419,25 @@ pub fn search(h: &dyn Held, p: &SearchParams) -> Result<String, Failure> {
         SearchKind::Text => query.is_empty(),
     };
     if empty {
-        return Err(Failure::asked(
-            "the query is empty: give hex bytes with ?? wildcards, or kind=text and a substring",
-        ));
+        return Err(Failure::asked(EMPTY_QUERY));
     }
     run(h, Need::Best(Feature::Discover), |s| {
         let prog = s.program();
+        let stop = &mut |_: usize| borer_engine::cancel::Cancel::raised();
         let mut hits = match kind {
             SearchKind::Bytes => {
-                let lanes = borer_engine::search::parse_masked(query).map_err(|why| {
+                let pattern = borer_engine::search::parse_masked(query).map_err(|why| {
                     format!(
                         "bad byte pattern {}: {why}",
                         borer_engine::text::quoted(query)
                     )
                 })?;
-                borer_engine::search::find_masked(prog, &lanes, offset)
+                page(prog, Needle::Bytes(&pattern), offset, stop)?
             }
-            SearchKind::Text => borer_engine::search::find_text(prog, query, offset),
+            SearchKind::Text => {
+                let text = Text::new(query).ok_or(EMPTY_QUERY)?;
+                page(prog, Needle::Text(&text), offset, stop)?
+            }
         };
         hits.hits.truncate(limit.n);
         Ok(render_hits(

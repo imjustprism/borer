@@ -246,7 +246,7 @@ pub fn signature(p: &Program, va: u64, end: Option<u64>) -> Result<Signature, St
         while trimmed.last().is_some_and(Option::is_none) {
             trimmed.pop();
         }
-        let matches = search::find_bytes(p, &trimmed, 0).total;
+        let matches = search::find_bytes(p, &trimmed, 0)?.total;
         best = Signature {
             pattern: trimmed,
             matches,
@@ -262,7 +262,7 @@ pub fn signature(p: &Program, va: u64, end: Option<u64>) -> Result<Signature, St
         if pattern.is_empty() {
             return Err(format!("no instruction decodes at {va:#x}"));
         }
-        let matches = search::find_bytes(p, &pattern, 0).total;
+        let matches = search::find_bytes(p, &pattern, 0)?.total;
         return Ok(Signature { pattern, matches });
     }
     Ok(best)
@@ -862,7 +862,7 @@ fn yara_signature(p: &Program, f: &Function) -> Result<String, String> {
         if trimmed.is_empty() {
             continue;
         }
-        let matches = search::find_bytes(p, trimmed, 0).total;
+        let matches = search::find_bytes(p, trimmed, 0)?.total;
         last_matches = Some(matches);
         if matches == 1 {
             let sig = Signature {
@@ -1524,13 +1524,13 @@ mod tests {
         let patterns = rule_code_patterns(&rule);
         assert_eq!(patterns.len(), 1, "{rule}");
         assert_eq!(
-            crate::search::find_bytes(&a2_prog, &patterns[0], 0).total,
-            1,
+            crate::search::find_bytes(&a2_prog, &patterns[0], 0).map(|h| h.total),
+            Ok(1),
             "{rule}"
         );
         assert_eq!(
-            crate::search::find_bytes(&b2_prog, &patterns[0], 0).total,
-            0,
+            crate::search::find_bytes(&b2_prog, &patterns[0], 0).map(|h| h.total),
+            Ok(0),
             "{rule}"
         );
 
@@ -1552,12 +1552,12 @@ mod tests {
         let c_patterns = rule_code_patterns(&c_rule);
         assert_eq!(c_patterns.len(), 1, "{c_rule}");
         assert_eq!(
-            crate::search::find_bytes(&c_prog, &c_patterns[0], 0).total,
-            1
+            crate::search::find_bytes(&c_prog, &c_patterns[0], 0).map(|h| h.total),
+            Ok(1)
         );
         assert_eq!(
-            crate::search::find_bytes(&b_prog, &c_patterns[0], 0).total,
-            0,
+            crate::search::find_bytes(&b_prog, &c_patterns[0], 0).map(|h| h.total),
+            Ok(0),
             "{c_rule}"
         );
     }

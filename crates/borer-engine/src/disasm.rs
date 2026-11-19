@@ -309,6 +309,66 @@ pub(crate) fn lengths(
     max_instrs: usize,
     mut visit: impl FnMut(u64, usize),
 ) {
+    walk(program, code, va, isa, (stop, max_instrs), |at, len, _| {
+        visit(at, len);
+    });
+}
+
+/// One instruction a [`walk`] decoded, in its instruction set's own type.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Decoded<'a> {
+    /// An x86 instruction and the decoder's bitness.
+    X86(&'a Instruction, u32),
+    /// An AArch64 word and its address, decoded only when asked.
+    A64(u32, u64),
+    /// An ARM32 instruction.
+    A32(&'a a32::Insn),
+    /// A RISC-V instruction and the register width.
+    Rv(&'a rv::Insn, rv::Xlen),
+    /// Bytes that decode to no instruction.
+    Bad,
+}
+
+impl Decoded<'_> {
+    /// Hands `f` each constant the instruction's operands state, in
+    /// operand order ([`crate::isa::Constant`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Called with each constant.
+    pub(crate) fn constants(self, f: impl FnMut(crate::isa::Constant)) {
+        match self {
+            Decoded::X86(i, bits) => crate::isa::x86::constants(i, bits, f),
+            Decoded::A64(word, at) => a64::decode(word, at).constants(f),
+            Decoded::A32(i) => i.constants(f),
+            Decoded::Rv(i, xlen) => i.constants(xlen, f),
+            Decoded::Bad => {}
+        }
+    }
+}
+
+/// Visits each instruction as [`disassemble_program`] decodes it, without
+/// formatting any text.
+///
+/// # Arguments
+///
+/// * `program` - The image the bytes come from, for ARM32's modes.
+/// * `code` - The bytes to decode.
+/// * `va` - Virtual address of `code[0]`.
+/// * `isa` - The program's instruction set.
+/// * `bound` - No instruction starting at or past the address is
+///   visited, nor more than the count.
+/// * `visit` - Called with each instruction's address, length and
+///   decoding.
+pub(crate) fn walk(
+    program: &Program,
+    code: &[u8],
+    va: u64,
+    isa: Isa,
+    bound: (u64, usize),
+    mut visit: impl FnMut(u64, usize, Decoded<'_>),
+) {
+    let (stop, max_instrs) = bound;
     let mut it = a32::ItState::default();
     let mut off = 0usize;
     let mut decoder = match isa {
@@ -322,22 +382,58 @@ pub(crate) fn lengths(
             return;
         }
         let len = match (isa, decoder.as_mut()) {
-            (Isa::X86 { .. }, Some(d)) => {
-                visit(at, d.decode().len());
+            (Isa::X86 { bits }, Some(d)) => {
+                let i = d.decode();
+                visit(at, i.len(), Decoded::X86(&i, bits));
                 off = d.position();
                 continue;
             }
-            (Isa::A64, _) => rest.len().min(a64::INSN_LEN),
-            (Isa::A32, _) => a32::decode(rest, at, program.modes.at(at), &mut it)
-                .map_or(rest.len().min(2), |i| usize::from(i.len)),
-            (Isa::Rv(xlen), _) => {
-                rv::decode(rest, at, xlen).map_or(rest.len().min(2), |i| usize::from(i.len))
+            (Isa::A64, _) => {
+                let len = rest.len().min(a64::INSN_LEN);
+                let word = rest.first_chunk::<{ a64::INSN_LEN }>();
+                visit(
+                    at,
+                    len,
+                    word.map_or(Decoded::Bad, |w| Decoded::A64(u32::from_le_bytes(*w), at)),
+                );
+                len
             }
+            (Isa::A32, _) => match a32::decode(rest, at, program.modes.at(at), &mut it) {
+                Some(i) => {
+                    visit(at, usize::from(i.len), Decoded::A32(&i));
+                    usize::from(i.len)
+                }
+                None => bad(rest, at, &mut visit),
+            },
+            (Isa::Rv(xlen), _) => match rv::decode(rest, at, xlen) {
+                Some(i) => {
+                    visit(at, usize::from(i.len), Decoded::Rv(&i, xlen));
+                    usize::from(i.len)
+                }
+                None => bad(rest, at, &mut visit),
+            },
             (Isa::X86 { .. }, None) => return,
         };
-        visit(at, len);
         off = off.saturating_add(len.max(1));
     }
+}
+
+/// Visits two bytes that decode to nothing as one bad instruction, the
+/// way a two- and four-byte instruction set's listing shows them.
+///
+/// # Arguments
+///
+/// * `rest` - The bytes from the bad one on.
+/// * `at` - Their address.
+/// * `visit` - The walk's visitor.
+///
+/// # Returns
+///
+/// The bytes visited: two, or the one left.
+fn bad(rest: &[u8], at: u64, visit: &mut impl FnMut(u64, usize, Decoded<'_>)) -> usize {
+    let len = rest.len().min(2);
+    visit(at, len, Decoded::Bad);
+    len
 }
 
 /// Disassembles ARM32 code in the instruction sets `modes` names.

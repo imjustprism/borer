@@ -623,6 +623,43 @@ pub fn run_with(
     out
 }
 
+/// Returns the addresses of a masked byte pattern's first page of hits,
+/// for a script's `find_bytes`.
+///
+/// # Arguments
+///
+/// * `program` - The program.
+/// * `pattern` - The pattern, as [`crate::search::parse_masked`] reads it.
+///
+/// # Errors
+///
+/// When the pattern does not read, or the request's deadline passes.
+fn find_bytes(program: &Program, pattern: &str) -> Result<Array, Box<EvalAltResult>> {
+    let pattern =
+        crate::search::parse_masked(pattern).map_err(|why| format!("find_bytes: {why}"))?;
+    let hits = crate::search::find(program, crate::search::form::Needle::Bytes(&pattern), 0)?;
+    Ok(addrs(hits.hits.iter().filter_map(|hit| hit.va)))
+}
+
+/// Returns the addresses of a text's first page of hits, for a script's
+/// `find_text`; none for an empty text.
+///
+/// # Arguments
+///
+/// * `program` - The program.
+/// * `text` - The text, ASCII case folded, as UTF-8 and as UTF-16LE.
+///
+/// # Errors
+///
+/// When the request's deadline passes.
+fn find_text(program: &Program, text: &str) -> Result<Array, Box<EvalAltResult>> {
+    let Some(text) = crate::search::spec::Text::new(text) else {
+        return Ok(Array::new());
+    };
+    let hits = crate::search::find(program, crate::search::form::Needle::Text(&text), 0)?;
+    Ok(addrs(hits.hits.iter().filter_map(|hit| hit.va)))
+}
+
 /// Registers every function a script can call.
 ///
 /// # Arguments
@@ -751,25 +788,11 @@ fn register(engine: &mut Engine, host: &Rc<Host>) {
             .map_or(Dynamic::UNIT, |(_, text)| text.into())
     });
     let h = Rc::clone(host);
-    engine.register_fn("find_bytes", move |pattern: &str| -> Array {
-        crate::search::parse_pattern(pattern).map_or_else(Array::new, |p| {
-            addrs(
-                crate::search::find_bytes(&h.program, &p, 0)
-                    .hits
-                    .iter()
-                    .filter_map(|hit| hit.va),
-            )
-        })
+    engine.register_fn("find_bytes", move |pattern: &str| {
+        find_bytes(&h.program, pattern)
     });
     let h = Rc::clone(host);
-    engine.register_fn("find_text", move |text: &str| -> Array {
-        addrs(
-            crate::search::find_text(&h.program, text, 0)
-                .hits
-                .iter()
-                .filter_map(|hit| hit.va),
-        )
-    });
+    engine.register_fn("find_text", move |text: &str| find_text(&h.program, text));
     let h = Rc::clone(host);
     engine.register_fn(
         "decompile",

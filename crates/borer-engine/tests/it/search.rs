@@ -51,7 +51,8 @@ fn parse_pattern_refuses_signed_tokens() {
 #[test]
 fn find_bytes_with_wildcard() {
     let p = fixture();
-    let hits = find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 0);
+    let hits =
+        find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 0).expect("the search answers");
     let vas: Vec<u64> = hits.hits.iter().filter_map(|h| h.va).collect();
     assert_eq!(vas, vec![0x1000, 0x1010]);
     assert_eq!(hits.total, 2);
@@ -62,11 +63,13 @@ fn find_bytes_with_wildcard() {
 #[test]
 fn find_bytes_pages_from_an_offset() {
     let p = fixture();
-    let page = find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 1);
+    let page =
+        find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 1).expect("the search answers");
     let vas: Vec<u64> = page.hits.iter().filter_map(|h| h.va).collect();
     assert_eq!(vas, vec![0x1010]);
     assert_eq!(page.total, 2);
-    let past = find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 5);
+    let past =
+        find_bytes(&p, &parse_pattern("48 8b ?? 05").unwrap(), 5).expect("the search answers");
     assert!(past.hits.is_empty());
     assert_eq!(past.total, 2);
 }
@@ -75,7 +78,9 @@ fn find_bytes_pages_from_an_offset() {
 #[test]
 fn find_bytes_exact() {
     let p = fixture();
-    let hits = find_bytes(&p, &parse_pattern("48 8b 41 05").unwrap(), 0).hits;
+    let hits = find_bytes(&p, &parse_pattern("48 8b 41 05").unwrap(), 0)
+        .expect("the search answers")
+        .hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].va, Some(0x1000));
     assert_eq!(hits[0].file_off, 0);
@@ -85,7 +90,7 @@ fn find_bytes_exact() {
 #[test]
 fn find_bytes_all_wildcards() {
     let p = fixture();
-    let hits = find_bytes(&p, &parse_pattern("? ? ? ?").unwrap(), 0);
+    let hits = find_bytes(&p, &parse_pattern("? ? ? ?").unwrap(), 0).expect("the search answers");
     assert_eq!(hits.total, 0x40 - 3);
     assert_eq!(hits.hits.len(), 0x40 - 3);
 }
@@ -95,7 +100,8 @@ fn find_bytes_all_wildcards() {
 #[test]
 fn find_bytes_leading_wildcards() {
     let p = fixture();
-    let hits = find_bytes(&p, &parse_pattern("? 8b 99 05").unwrap(), 0);
+    let hits =
+        find_bytes(&p, &parse_pattern("? 8b 99 05").unwrap(), 0).expect("the search answers");
     let vas: Vec<u64> = hits.hits.iter().filter_map(|h| h.va).collect();
     assert_eq!(vas, vec![0x1010]);
     assert_eq!(hits.total, 1);
@@ -110,20 +116,23 @@ fn find_bytes_long_pattern_with_tail_chunk() {
         &p,
         &parse_pattern("48 8b 41 05 00 00 00 00 00 00 10").unwrap(),
         0,
-    );
+    )
+    .expect("the search answers");
     assert_eq!(hits.total, 0);
     let near = find_bytes(
         &p,
         &parse_pattern("48 8b 41 05 00 00 00 00 00 00 00").unwrap(),
         0,
-    );
+    )
+    .expect("the search answers");
     let vas: Vec<u64> = near.hits.iter().filter_map(|h| h.va).collect();
     assert_eq!(vas, vec![0x1000]);
     let wild = find_bytes(
         &p,
         &parse_pattern("48 8b ?? 05 ?? 00 ?? 00 ?? 00 00").unwrap(),
         0,
-    );
+    )
+    .expect("the search answers");
     assert_eq!(wild.total, 2);
 }
 
@@ -131,7 +140,7 @@ fn find_bytes_long_pattern_with_tail_chunk() {
 #[test]
 fn find_bytes_single_byte() {
     let p = fixture();
-    let hits = find_bytes(&p, &parse_pattern("8b").unwrap(), 0);
+    let hits = find_bytes(&p, &parse_pattern("8b").unwrap(), 0).expect("the search answers");
     assert_eq!(hits.total, 2);
     let vas: Vec<u64> = hits.hits.iter().filter_map(|h| h.va).collect();
     assert_eq!(vas, vec![0x1001, 0x1011]);
@@ -150,7 +159,7 @@ fn find_bytes_anchor_in_tail() {
         Some(0x1000),
         vec![Section::mapped(".text", 0x1000, 0, 9, false, true)],
     );
-    let hits = find_bytes(&p, &parse_pattern("41").unwrap(), 0);
+    let hits = find_bytes(&p, &parse_pattern("41").unwrap(), 0).expect("the search answers");
     assert_eq!(hits.total, 1);
     assert_eq!(hits.hits[0].va, Some(0x1008));
 }
@@ -159,10 +168,15 @@ fn find_bytes_anchor_in_tail() {
 #[test]
 fn find_text_hits() {
     let p = fixture();
-    let hits = find_text(&p, "needle", 0).hits;
+    let hits = find_text(&p, "needle", 0).expect("the search answers").hits;
     assert_eq!(hits.len(), 1);
     assert_eq!(hits[0].va, Some(0x1020));
-    assert!(find_text(&p, "absent", 0).hits.is_empty());
+    assert!(
+        find_text(&p, "absent", 0)
+            .expect("the search answers")
+            .hits
+            .is_empty()
+    );
 }
 
 /// Text search folds case and finds the UTF-16LE spelling, like `strings`.
@@ -175,15 +189,27 @@ fn find_text_folds_case_and_finds_wide() {
     }
     let mut p = fixture();
     p.bytes = bytes;
-    let n = find_text(&p, "needle", 0);
+    let n = find_text(&p, "needle", 0).expect("the search answers");
     assert_eq!(n.total, 1);
     assert_eq!(n.hits[0].va, Some(0x1000));
     assert_eq!(
-        find_text(&p, "wide", 0).hits.first().and_then(|h| h.va),
+        find_text(&p, "wide", 0)
+            .expect("the search answers")
+            .hits
+            .first()
+            .and_then(|h| h.va),
         Some(0x1010)
     );
-    assert_eq!(find_text(&p, "WIDE", 0).total, 1);
-    assert!(find_text(&p, "absent", 0).hits.is_empty());
+    assert_eq!(
+        find_text(&p, "WIDE", 0).expect("the search answers").total,
+        1
+    );
+    assert!(
+        find_text(&p, "absent", 0)
+            .expect("the search answers")
+            .hits
+            .is_empty()
+    );
 }
 
 /// Text search answers what a compare at every window answers, on data built
@@ -234,7 +260,7 @@ fn find_text_matches_the_naive_scan_on_adversarial_data() {
     let needles: [&str; 6] = ["a", "Nee", "needle", "Needle", "7", "0123456789abcdef"];
     for needle in needles {
         let want = naive_text_hits(&bytes, needle.as_bytes());
-        let got = find_text(&p, needle, 0);
+        let got = find_text(&p, needle, 0).expect("the search answers");
         let offs: Vec<u64> = got.hits.iter().map(|h| h.file_off).collect();
         assert_eq!(offs, want, "needle {needle:?}");
         assert_eq!(got.total, want.len(), "needle {needle:?}");
@@ -287,6 +313,7 @@ fn find_text_finds_the_wide_spelling_of_non_ascii_text() {
     p.bytes = bytes;
     let found = |needle: &str| -> Vec<u64> {
         find_text(&p, needle, 0)
+            .expect("the search answers")
             .hits
             .iter()
             .map(|h| h.file_off)
@@ -315,10 +342,11 @@ fn a_match_across_a_section_boundary_is_found() {
             Section::mapped(".data", 0x2000, 0x20, 0x20, true, false),
         ],
     );
-    let aob = find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0);
+    let aob =
+        find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0).expect("the search answers");
     assert_eq!(aob.total, 1);
     assert_eq!((aob.hits[0].va, aob.hits[0].file_off), (None, 0x0e));
-    let text = find_text(&p, "needle", 0);
+    let text = find_text(&p, "needle", 0).expect("the search answers");
     assert_eq!(text.total, 1);
     assert_eq!(
         (text.hits[0].va, text.hits[0].file_off),
@@ -399,16 +427,17 @@ fn bytes_no_section_maps_are_searched() {
     let mut bytes = vec![0u8; 0x40];
     bytes[0x30..0x36].copy_from_slice(b"needle");
     let raw = Program::raw(bytes, Arch::Unknown, 0, None, Vec::new());
-    let hits = find_text(&raw, "needle", 0);
+    let hits = find_text(&raw, "needle", 0).expect("the search answers");
     assert_eq!(hits.total, 1);
     assert_eq!((hits.hits[0].va, hits.hits[0].file_off), (None, 0x30));
 
     let mut p = fixture();
     p.bytes.extend_from_slice(b"\0\0overlay needle\0");
-    let hits = find_text(&p, "needle", 0).hits;
+    let hits = find_text(&p, "needle", 0).expect("the search answers").hits;
     let found: Vec<_> = hits.iter().map(|h| (h.va, h.file_off)).collect();
     assert_eq!(found, [(Some(0x1020), 0x20), (None, 0x4a)]);
-    let aob = find_bytes(&raw, &parse_pattern("6e 65 ?? 64").unwrap(), 0);
+    let aob =
+        find_bytes(&raw, &parse_pattern("6e 65 ?? 64").unwrap(), 0).expect("the search answers");
     assert_eq!(
         aob.hits.iter().map(|h| h.file_off).collect::<Vec<_>>(),
         [0x30]
@@ -484,10 +513,13 @@ fn naive_byte_hits(p: &Program, pattern: &[Option<u8>]) -> Vec<(Option<u64>, u64
 ///
 /// # Panics
 ///
-/// When the scan's page or total differs from the reference.
+/// When the scan refuses, or its page or total differs from the
+/// reference.
 fn assert_naive(p: &Program, pattern: &[Option<u8>]) {
     let want = naive_byte_hits(p, pattern);
     let got = find_bytes(p, pattern, 0);
+    assert!(got.is_ok(), "{got:?}");
+    let got = got.unwrap_or_default();
     assert_eq!(got.total, want.len());
     let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
     let page = &want[..want.len().min(HITS_MAX)];
@@ -519,7 +551,7 @@ fn all_wildcard_patterns_match_at_every_offset_by_length() {
     let p = fixture();
     for len in [1usize, 2, 3, 5, 0x40] {
         let pattern = vec![None; len];
-        let hits = find_bytes(&p, &pattern, 0);
+        let hits = find_bytes(&p, &pattern, 0).expect("the search answers");
         let n = 0x40 - len + 1;
         assert_eq!(hits.total, n, "len {len}");
         assert_eq!(hits.hits.len(), n, "len {len}");
@@ -538,9 +570,12 @@ fn all_wildcard_patterns_match_at_every_offset_by_length() {
 fn find_bytes_answers_nothing_when_the_pattern_outgrows_the_file() {
     let p = fixture();
     let fixed = vec![Some(0x48u8); 0x41];
-    assert_eq!(find_bytes(&p, &fixed, 0).total, 0);
+    assert_eq!(
+        find_bytes(&p, &fixed, 0).expect("the search answers").total,
+        0
+    );
     let wild = vec![None; 0x41];
-    let walked = find_bytes(&p, &wild, 0);
+    let walked = find_bytes(&p, &wild, 0).expect("the search answers");
     assert_eq!(walked.total, 0);
     assert!(walked.hits.is_empty());
 }
@@ -568,7 +603,7 @@ fn find_bytes_match_ending_at_the_last_byte_of_the_file() {
         ("05", 0x11),
     ] {
         let pattern = parse_pattern(spec).unwrap();
-        let got = find_bytes(&p, &pattern, 0);
+        let got = find_bytes(&p, &pattern, 0).expect("the search answers");
         assert_eq!(got.total, 1, "spec {spec}");
         assert_eq!(got.hits[0].file_off, off, "spec {spec}");
         assert_eq!(got.hits[0].va, Some(0x1000 + off), "spec {spec}");
@@ -596,7 +631,7 @@ fn find_bytes_anchor_on_the_most_common_byte_stays_exact() {
     );
     for spec in ["? 00 ? 00", "00 ?? 00", "?? 00 ?? 00 ?? 00"] {
         let pattern = parse_pattern(spec).unwrap();
-        let got = find_bytes(&p, &pattern, 0);
+        let got = find_bytes(&p, &pattern, 0).expect("the search answers");
         assert_naive(&p, &pattern);
         assert!(
             got.total > 0x80,
@@ -640,7 +675,7 @@ fn find_bytes_long_patterns_across_chunk_boundaries() {
             vec![Section::mapped(".text", 0x1000, 0, 0x120, false, true)],
         );
         assert_naive(&p, &pattern);
-        let got = find_bytes(&p, &pattern, 0);
+        let got = find_bytes(&p, &pattern, 0).expect("the search answers");
         for at in planted {
             assert!(
                 got.hits
@@ -670,7 +705,7 @@ fn find_bytes_alternating_pattern_at_every_word_phase() {
         vec![Section::mapped(".text", 0x1000, 0, 0x80, false, true)],
     );
     assert_naive(&p, &pattern);
-    let got = find_bytes(&p, &pattern, 0);
+    let got = find_bytes(&p, &pattern, 0).expect("the search answers");
     for phase in 0..8 {
         assert!(
             got.hits
@@ -704,7 +739,7 @@ fn find_bytes_across_sections_gaps_and_the_file_end() {
     );
     for spec in ["de ad be ef", "de ?? be ef"] {
         let pattern = parse_pattern(spec).unwrap();
-        let got = find_bytes(&p, &pattern, 0);
+        let got = find_bytes(&p, &pattern, 0).expect("the search answers");
         assert_eq!(got.total, 4, "spec {spec}");
         let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
         assert_eq!(
@@ -732,7 +767,8 @@ fn find_bytes_across_sections_gaps_and_the_file_end() {
             Section::mapped(".data", 0x2000, 0x10, 0x30, true, false),
         ],
     );
-    let got = find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0);
+    let got =
+        find_bytes(&p, &parse_pattern("de ad be ef").unwrap(), 0).expect("the search answers");
     assert_eq!(got.total, 1);
     assert_eq!((got.hits[0].va, got.hits[0].file_off), (Some(0x100e), 0x0e));
 }
@@ -762,7 +798,7 @@ fn find_bytes_at_the_end_of_a_short_file_extent() {
     };
     let p = Program::raw(bytes, Arch::X86_64, 0, Some(0x1000), vec![text]);
     let pattern = parse_pattern("12 34 56 78").unwrap();
-    let got = find_bytes(&p, &pattern, 0);
+    let got = find_bytes(&p, &pattern, 0).expect("the search answers");
     let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
     assert_eq!(list, [(Some(0x101d), 0x1d), (None, 0x25)]);
     assert_eq!(got.total, 2);
@@ -786,10 +822,10 @@ fn find_bytes_pages_at_and_beyond_the_total_and_caps_the_page() {
     );
     for spec in ["aa", "?"] {
         let pattern = parse_pattern(spec).unwrap();
-        let all = find_bytes(&p, &pattern, 0);
+        let all = find_bytes(&p, &pattern, 0).expect("the search answers");
         assert_eq!(all.total, 600, "spec {spec}");
         assert_eq!(all.hits.len(), HITS_MAX, "spec {spec}");
-        let tail = find_bytes(&p, &pattern, HITS_MAX);
+        let tail = find_bytes(&p, &pattern, HITS_MAX).expect("the search answers");
         assert_eq!(tail.hits.len(), 100, "spec {spec}");
         assert_eq!(tail.total, 600, "spec {spec}");
         assert_eq!(
@@ -797,11 +833,11 @@ fn find_bytes_pages_at_and_beyond_the_total_and_caps_the_page() {
             Some(500),
             "spec {spec}"
         );
-        let last = find_bytes(&p, &pattern, 599);
+        let last = find_bytes(&p, &pattern, 599).expect("the search answers");
         assert_eq!(last.hits.len(), 1, "spec {spec}");
         assert_eq!(last.hits[0].file_off, 599, "spec {spec}");
         for offset in [600, 601, 9999] {
-            let page = find_bytes(&p, &pattern, offset);
+            let page = find_bytes(&p, &pattern, offset).expect("the search answers");
             assert!(page.hits.is_empty(), "spec {spec} offset {offset}");
             assert_eq!(page.total, 600, "spec {spec} offset {offset}");
         }
@@ -860,7 +896,7 @@ fn find_bytes_equals_the_naive_scan_on_planted_random_patterns() {
     let mut found = 0;
     for pattern in &patterns {
         let want = naive_byte_hits(&p, pattern);
-        let got = find_bytes(&p, pattern, 0);
+        let got = find_bytes(&p, pattern, 0).expect("the search answers");
         assert_eq!(got.total, want.len());
         let list: Vec<(Option<u64>, u64)> = got.hits.iter().map(|h| (h.va, h.file_off)).collect();
         let page = &want[..want.len().min(HITS_MAX)];

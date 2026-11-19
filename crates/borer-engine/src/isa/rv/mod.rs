@@ -614,6 +614,19 @@ pub enum Flow {
     Invalid,
 }
 
+/// What an instruction's operands hold ([`Insn::operands`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Operands {
+    /// A direct branch or call target.
+    Target(u64),
+    /// An immediate at its operand's place, sign-extended as decoded.
+    Imm(u8, i64),
+    /// A memory offset at its operand's place.
+    Mem(u8, i64),
+    /// None of these.
+    Nothing,
+}
+
 /// One decoded instruction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Insn {
@@ -629,6 +642,65 @@ pub struct Insn {
 }
 
 impl Insn {
+    /// Hands `f` each constant the instruction's operands state, at the
+    /// register width ([`Insn::operands`]): the immediate of `lui` (shifted
+    /// up 12 as it is written to the register), of the immediate forms and
+    /// of a CSR instruction's `i` form, and the nonzero offset of a load, a
+    /// store (float ones too) or `jalr`.
+    ///
+    /// # Arguments
+    ///
+    /// * `xlen` - The register width.
+    /// * `f` - Called with each constant, in operand order.
+    pub fn constants(&self, xlen: Xlen, mut f: impl FnMut(crate::isa::Constant)) {
+        use crate::isa::{Constant, Part};
+        let (operand, part, value) = match self.operands() {
+            Operands::Imm(at, imm) if matches!(self.op, Op::Lui { .. }) => (at, Part::Shifted, imm),
+            Operands::Imm(at, imm) => (at, Part::Immediate, imm),
+            Operands::Mem(at, off) if off != 0 => (at, Part::Displacement, off),
+            Operands::Mem(..) | Operands::Target(_) | Operands::Nothing => return,
+        };
+        f(Constant::new(
+            usize::from(operand),
+            part,
+            value.cast_unsigned(),
+            xlen.bits(),
+        ));
+    }
+
+    /// Returns what the instruction's operands hold: a direct target, an
+    /// immediate, a memory offset, or nothing of these.
+    pub(crate) fn operands(&self) -> Operands {
+        match self.op {
+            Op::Jal { target, .. } | Op::Branch { target, .. } => Operands::Target(target),
+            Op::Lui { imm, .. } => Operands::Imm(1, imm),
+            Op::Imm { imm, .. } => Operands::Imm(2, imm),
+            Op::Csr {
+                src: CsrSrc::Imm(imm),
+                ..
+            } => Operands::Imm(2, i64::from(imm)),
+            Op::Load { off, .. } | Op::Store { off, .. } | Op::Jalr { off, .. } => {
+                Operands::Mem(1, off)
+            }
+            Op::Float(FOp::Load { off, .. } | FOp::Store { off, .. }) => Operands::Mem(1, off),
+            Op::Auipc { .. }
+            | Op::Reg3 { .. }
+            | Op::Fence { .. }
+            | Op::FenceI
+            | Op::Ecall
+            | Op::Ebreak
+            | Op::Csr { .. }
+            | Op::Lr { .. }
+            | Op::Sc { .. }
+            | Op::Amo { .. }
+            | Op::Float(_)
+            | Op::TrapRet
+            | Op::System
+            | Op::Unknown
+            | Op::Invalid => Operands::Nothing,
+        }
+    }
+
     /// Returns the address after it.
     #[must_use]
     pub fn next(&self) -> u64 {
@@ -643,28 +715,9 @@ impl Insn {
     /// else.
     #[must_use]
     pub fn target(&self) -> Option<u64> {
-        match self.op {
-            Op::Jal { target, .. } | Op::Branch { target, .. } => Some(target),
-            Op::Lui { .. }
-            | Op::Auipc { .. }
-            | Op::Jalr { .. }
-            | Op::Load { .. }
-            | Op::Store { .. }
-            | Op::Imm { .. }
-            | Op::Reg3 { .. }
-            | Op::Fence { .. }
-            | Op::FenceI
-            | Op::Ecall
-            | Op::Ebreak
-            | Op::Csr { .. }
-            | Op::Lr { .. }
-            | Op::Sc { .. }
-            | Op::Amo { .. }
-            | Op::Float(_)
-            | Op::TrapRet
-            | Op::System
-            | Op::Unknown
-            | Op::Invalid => None,
+        match self.operands() {
+            Operands::Target(target) => Some(target),
+            Operands::Imm(..) | Operands::Mem(..) | Operands::Nothing => None,
         }
     }
 

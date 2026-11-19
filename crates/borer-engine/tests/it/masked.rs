@@ -6,7 +6,7 @@
 )]
 
 use borer_engine::program::{Arch, Program, Section};
-use borer_engine::search::{HITS_MAX, Lane, PATTERN_MAX, find_masked, parse_masked};
+use borer_engine::search::{HITS_MAX, Lane, PATTERN_MAX, Pattern, find_masked, parse_masked};
 
 /// Builds a one-section program at 0x1000 holding `48 8b` at 0x00, `41 8b`
 /// at 0x10, `58 8b` at 0x20 and `49 8b` at 0x30, zeros elsewhere.
@@ -27,11 +27,17 @@ fn opcodes() -> Program {
 
 /// Returns the addresses of a masked pattern's hits; none for a pattern
 /// that does not parse.
+///
+/// # Panics
+///
+/// When the search refuses the pattern instead of answering.
 fn vas(p: &Program, pattern: &str) -> Vec<u64> {
     let Ok(lanes) = parse_masked(pattern) else {
         return Vec::new();
     };
-    find_masked(p, &lanes, 0)
+    let got = find_masked(p, &lanes, 0);
+    assert!(got.is_ok(), "{got:?}");
+    got.unwrap_or_default()
         .hits
         .iter()
         .filter_map(|h| h.va)
@@ -64,8 +70,8 @@ fn a_pattern_without_a_whole_byte_walks_every_window() {
 fn tokens_read_as_lanes() {
     let lane = |value, mask| Lane { value, mask };
     assert_eq!(
-        parse_masked("8b 4? ?8 ?? ?").expect("lanes"),
-        vec![
+        parse_masked("8b 4? ?8 ?? ?").expect("lanes").lanes(),
+        [
             lane(0x8b, 0xff),
             lane(0x40, 0xf0),
             lane(0x08, 0x0f),
@@ -139,7 +145,8 @@ fn find_masked_equals_the_naive_scan() {
             })
             .map(|i| 0x1000 + u64::try_from(i).expect("small"))
             .collect();
-        let got = find_masked(&p, &lanes, 0);
+        let pattern = Pattern::new(lanes.clone()).expect("one to eleven lanes");
+        let got = find_masked(&p, &pattern, 0).expect("the search answers");
         assert_eq!(got.total, want.len(), "{lanes:?}");
         let page: Vec<u64> = got.hits.iter().filter_map(|h| h.va).collect();
         assert_eq!(page, want[..want.len().min(HITS_MAX)], "{lanes:?}");

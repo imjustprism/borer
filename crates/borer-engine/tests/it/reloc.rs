@@ -354,3 +354,19 @@ fn a_riscv_callback_keeps_the_cases_of_its_relocated_switch() {
         );
     }
 }
+
+/// A value search reads data words from the image as relocated: the
+/// `RELATIVE` slot, zeros on disk, holds its target.
+#[test]
+fn a_value_search_reads_the_relocated_slot() {
+    let p = applied();
+    let a = Analysis::compute(&p);
+    let spec = borer_engine::search::spec::parse("value:0x1010,width=8 and in=.data.rel.ro")
+        .expect("reads");
+    let hits =
+        borer_engine::search::form::search(&p, &a, &Overlay::default(), &spec).expect("answers");
+    assert_eq!(
+        hits.iter().filter_map(|h| h.va).collect::<Vec<_>>(),
+        vec![SLOT]
+    );
+}

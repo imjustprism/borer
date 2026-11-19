@@ -72,3 +72,70 @@ pub use iced_x86::{
 pub(crate) use regbank::{
     as_xmm, gpr_bank_index, sized_register, st_depth, st_depth_mod8, st_register, xmm_slot,
 };
+
+/// Hands `f` each constant an x86 instruction's operands state.
+///
+/// An immediate comes at the width the operand reads it (one the encoding
+/// sign-extends at the operand's width), a memory operand's displacement
+/// at the address width (a RIP-relative one as the address it reaches); a
+/// branch target is no constant.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+/// * `bits` - The decoder's bitness: the width of an address without an
+///   address-size prefix.
+/// * `f` - Called with each constant, in operand order.
+pub(crate) fn constants(i: &Instruction, bits: u32, mut f: impl FnMut(super::Constant)) {
+    for n in 0..i.op_count() {
+        let operand = usize::try_from(n).unwrap_or(usize::MAX);
+        let width = match i.op_kind(n) {
+            OpKind::Immediate8 | OpKind::Immediate8_2nd => 8,
+            OpKind::Immediate16 | OpKind::Immediate8to16 => 16,
+            OpKind::Immediate32 | OpKind::Immediate8to32 => 32,
+            OpKind::Immediate64 | OpKind::Immediate8to64 | OpKind::Immediate32to64 => 64,
+            OpKind::Memory => {
+                if i.memory_displ_size() > 0 {
+                    let part = if i.is_ip_rel_memory_operand() {
+                        super::Part::Address
+                    } else {
+                        super::Part::Displacement
+                    };
+                    f(super::Constant::new(
+                        operand,
+                        part,
+                        i.memory_displacement64(),
+                        address_bits(i, bits),
+                    ));
+                }
+                continue;
+            }
+            _ => continue,
+        };
+        f(super::Constant::new(
+            operand,
+            super::Part::Immediate,
+            i.immediate(n),
+            width,
+        ));
+    }
+}
+
+/// Returns the width in bits of a memory operand's address: its base's or
+/// index's width (an address-size prefix makes them 32-bit in 64-bit
+/// code), `bits` for an absolute or RIP-relative one.
+///
+/// # Arguments
+///
+/// * `i` - The instruction, with a memory operand.
+/// * `bits` - The decoder's bitness.
+fn address_bits(i: &Instruction, bits: u32) -> u32 {
+    [i.memory_base(), i.memory_index()]
+        .into_iter()
+        .find(|r| *r != Register::None)
+        .map_or(bits, |r| match r {
+            Register::RIP => 64,
+            Register::EIP => 32,
+            r => u32::try_from(r.size()).map_or(bits, |n| n * 8),
+        })
+}

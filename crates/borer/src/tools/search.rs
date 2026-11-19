@@ -105,6 +105,31 @@ mod tests {
         assert_eq!(search(true), "# 256 hits\n");
     }
 
+    /// The search tool reads the request's deadline before each chunk of
+    /// its walk: under a raised flag it refuses instead of answering.
+    ///
+    /// # Panics
+    ///
+    /// When the search answers under the raised flag.
+    #[test]
+    fn a_byte_search_stops_at_the_deadline() {
+        use crate::params::SearchParams;
+        let server = raw_server();
+        let flag = borer_engine::cancel::Cancel::new();
+        flag.raise();
+        let got = flag.within(|| {
+            borer_front::tools::search(
+                &server,
+                &SearchParams {
+                    query: "c3".to_owned(),
+                    ..SearchParams::default()
+                },
+            )
+            .map_err(crate::errors::failed)
+        });
+        assert!(format!("{got:?}").contains("deadline"), "{got:?}");
+    }
+
     /// The bytes kind takes nibbles, answering what the whole byte answers
     /// where the nibble agrees, and refuses a bad token at its column.
     ///

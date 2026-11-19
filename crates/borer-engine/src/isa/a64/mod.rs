@@ -749,4 +749,119 @@ impl Insn {
             | Op::Other => None,
         }
     }
+    /// Hands `f` each constant the instruction's operands state: each
+    /// immediate as the listing prints it ([`text`]: a `movn` inverted, a
+    /// bitfield move as the shift or width its alias names, a logical
+    /// immediate as its bitmask, an `lsl #n` after it folded in), at the
+    /// width of the instruction's first register (64 without one), and
+    /// each memory operand's nonzero displacement. A PC-relative operand
+    /// is an address, not a constant.
+    ///
+    /// # Arguments
+    ///
+    /// * `f` - Called with each constant, in operand order.
+    pub fn constants(&self, mut f: impl FnMut(super::Constant)) {
+        let bits = self
+            .operands
+            .iter()
+            .find_map(|o| match o {
+                Opnd::Reg { bits, .. } | Opnd::Shifted { bits, .. } => Some(u32::from(*bits)),
+                Opnd::None
+                | Opnd::Imm(_)
+                | Opnd::PcRel(_)
+                | Opnd::Mem(_)
+                | Opnd::Cond(_)
+                | Opnd::Other => None,
+            })
+            .unwrap_or(64);
+        let wide_shift = (self.word >> 23) & 0x3f == 0b10_0101 && (self.word >> 21) & 3 != 0;
+        for (k, (n, value, shifted)) in printed_immediates(&text(self)).into_iter().enumerate() {
+            let shifted = shifted || (wide_shift && k == 0);
+            let raw = u64::try_from(value)
+                .or_else(|_| i64::try_from(value).map(i64::cast_unsigned))
+                .unwrap_or(0);
+            let part = if shifted {
+                super::Part::Shifted
+            } else {
+                super::Part::Immediate
+            };
+            f(super::Constant::new(n, part, raw, bits));
+        }
+        for (n, o) in self.operands.iter().enumerate() {
+            if let Opnd::Mem(m) = o
+                && m.disp != 0
+            {
+                f(super::Constant::new(
+                    n,
+                    super::Part::Displacement,
+                    m.disp.cast_unsigned(),
+                    64,
+                ));
+            }
+        }
+    }
+}
+
+/// Returns the integer immediates a listing line prints, each with its
+/// operand's place and whether an `lsl #n` or `msl #n` after it was
+/// folded in (`msl` shifting ones in).
+///
+/// They are the `#` operands outside a memory operand's brackets and not
+/// the post-index after them, an `lsl #n` operand after one shifting it.
+///
+/// # Arguments
+///
+/// * `line` - The instruction's text ([`text`]).
+fn printed_immediates(line: &str) -> Vec<(usize, i128, bool)> {
+    let operands = line.split_once(' ').map_or("", |(_, o)| o);
+    let (mut parts, mut depth, mut from) = (Vec::new(), 0usize, 0);
+    for (i, c) in operands.char_indices() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(operands.get(from..i).unwrap_or_default().trim());
+                from = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(operands.get(from..).unwrap_or_default().trim());
+    let mut out: Vec<(usize, i128, bool)> = Vec::new();
+    for (n, part) in parts.iter().enumerate() {
+        let after_memory = n
+            .checked_sub(1)
+            .and_then(|k| parts.get(k))
+            .is_some_and(|p| p.ends_with(']') || p.ends_with("]!"));
+        if let Some(shift) = part.strip_prefix("lsl #").and_then(crate::text::number)
+            && let Some(last) = out.last_mut().filter(|l| l.0 + 1 == n)
+        {
+            last.1 = u32::try_from(shift)
+                .ok()
+                .and_then(|sh| last.1.checked_shl(sh))
+                .unwrap_or(last.1);
+            last.2 = shift != 0;
+            continue;
+        }
+        if let Some(shift) = part.strip_prefix("msl #").and_then(crate::text::number)
+            && let Some(last) = out.last_mut().filter(|l| l.0 + 1 == n)
+        {
+            let ones = u32::try_from(shift)
+                .ok()
+                .and_then(|sh| 1i128.checked_shl(sh))
+                .map_or(0, |b| b - 1);
+            last.1 = u32::try_from(shift)
+                .ok()
+                .and_then(|sh| last.1.checked_shl(sh))
+                .map_or(last.1, |v| v | ones);
+            last.2 = true;
+            continue;
+        }
+        if let Some(v) = part.strip_prefix('#').and_then(crate::text::number)
+            && !after_memory
+        {
+            out.push((n, v, false));
+        }
+    }
+    out
 }

@@ -479,12 +479,17 @@ impl BorerServer {
                 .read_va_upto(va, 4)
                 .and_then(|b| b.first_chunk::<4>().copied())
                 .or_else(|| p.bytes.as_slice().first_chunk::<4>().copied());
-            if let Some([a, b, _, _]) = head {
-                let pattern = [Some(a), Some(b), None, None];
+            let lanes = head.and_then(|[a, b, _, _]| {
+                let lanes = [Some(a), Some(b), None, None].map(borer_engine::search::Lane::from);
+                Some((a, b, borer_engine::search::Pattern::new(lanes.to_vec())?))
+            });
+            if let Some((a, b, pattern)) = lanes {
+                let needle = borer_engine::search::form::Needle::Bytes(&pattern);
+                let found = std::cell::RefCell::new(Ok(borer_engine::search::Hits::default()));
                 let scan = fastest(3, || {
-                    let _ = borer_engine::search::find_bytes(p, &pattern, 0);
+                    *found.borrow_mut() = borer_engine::search::find(p, needle, 0);
                 });
-                let total = borer_engine::search::find_bytes(p, &pattern, 0).total;
+                let total = found.into_inner()?.total;
                 let gb =
                     borer_engine::num::as_f64(u64::try_from(p.bytes.len()).unwrap_or(u64::MAX))
                         / scan.as_secs_f64()
