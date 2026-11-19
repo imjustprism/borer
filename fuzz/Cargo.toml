@@ -17,6 +17,8 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4.13"
 borer-engine = { path = "../crates/borer-engine" }
+# The `edits` target plans a person's edits through the catalog's rows.
+borer-front = { path = "../crates/borer-front" }
 # The `project` target reads its input as the JSON a project file holds.
 serde_json = "1.0.151"
 
@@ -65,6 +67,13 @@ bench = false
 [[bin]]
 name = "find"
 path = "fuzz_targets/find.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "edits"
+path = "fuzz_targets/edits.rs"
 test = false
 doc = false
 bench = false
