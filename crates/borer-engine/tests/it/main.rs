@@ -83,6 +83,7 @@ mod negfields;
 mod next;
 mod noise;
 mod objc;
+mod offers;
 mod opcodes;
 mod param_types;
 mod progress;

@@ -17,7 +17,10 @@
 //! project's caps and its types validate. Anything else it refuses, with
 //! nothing written.
 
+mod offers;
 mod said;
+
+pub use offers::{Form, Kind, Offer, VarValue, offer};
 
 use std::collections::{BTreeMap, BTreeSet, btree_map};
 use std::fmt;
