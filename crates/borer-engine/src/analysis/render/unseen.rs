@@ -425,12 +425,181 @@ fn trampolines(p: &Program, a: &Analysis, slots: &BTreeMap<u64, u64>) -> BTreeSe
     through
 }
 
-/// Says what a call or reference answer could not see: the indirect calls
-/// and jumps borer did not resolve among the functions it read, whose
-/// targets are missing from the answer.
+/// What a call or reference answer says of the indirect calls and jumps
+/// it could not see, whose targets would be missing from it ([`unseen()`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unseen {
+    /// Every call and jump among the functions counted was resolved.
+    Resolved(Among),
+    /// Some were left unresolved, so what they reach may be missing.
+    Missed(Missed),
+    /// They were not counted, for this reason.
+    Uncounted(Uncounted),
+}
+
+/// The calls and jumps an answer counted that were resolved to no
+/// target: at least one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Missed {
+    /// Calls and jumps resolved to no target; at least 1.
+    sites: usize,
+    /// Functions making them; at least 1.
+    functions: usize,
+    /// Which functions were counted.
+    among: Among,
+}
+
+/// Which functions an [`Unseen`] counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Among {
+    /// Every function of the program.
+    Program,
+    /// The functions the answer walked.
+    Walked,
+}
+
+/// Why an answer did not count the calls and jumps it could not see.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Uncounted {
+    /// The target has four or more known callers, or calls and jumps to
+    /// it, so the note on what an unresolved call may add is left off.
+    ManyCallers,
+    /// No known call or jump reaches the target and no function holds it
+    /// (a global, or code outside every function), so the note is left
+    /// off.
+    Uncalled,
+    /// The answer holds no calls: a class graph.
+    NoCalls,
+}
+
+impl Missed {
+    /// Returns how many calls and jumps were resolved to no target, at
+    /// least 1.
+    #[must_use]
+    pub fn sites(&self) -> usize {
+        self.sites
+    }
+
+    /// Returns how many functions make them, at least 1.
+    #[must_use]
+    pub fn functions(&self) -> usize {
+        self.functions
+    }
+
+    /// Returns which functions were counted.
+    #[must_use]
+    pub fn among(&self) -> Among {
+        self.among
+    }
+
+    /// Returns the note a text answer gives.
+    ///
+    /// # Arguments
+    ///
+    /// * `lead` - The comment mark the line starts with: `#`, or `%%` in a
+    ///   mermaid graph.
+    ///
+    /// # Returns
+    ///
+    /// The line, newline-terminated.
+    fn line(&self, lead: &str) -> String {
+        let scope = match self.among {
+            Among::Program => "in the program",
+            Among::Walked => "among the functions walked",
+        };
+        let (sites, functions) = (self.sites, self.functions);
+        format!(
+            "{lead} not seen: {sites} indirect call{} or jump{} in {functions} function{} {scope} were not resolved to a target, so what they reach is not in this answer\n",
+            plural(sites),
+            plural(sites),
+            plural(functions)
+        )
+    }
+}
+
+impl Unseen {
+    /// Returns which functions were counted.
+    ///
+    /// # Returns
+    ///
+    /// `None` when none were ([`Unseen::Uncounted`]).
+    #[must_use]
+    pub fn among(&self) -> Option<Among> {
+        match self {
+            Unseen::Resolved(among) => Some(*among),
+            Unseen::Missed(m) => Some(m.among),
+            Unseen::Uncounted(_) => None,
+        }
+    }
+
+    /// Returns the note a text answer gives.
+    ///
+    /// # Arguments
+    ///
+    /// * `lead` - The comment mark the line starts with: `#`, or `%%` in a
+    ///   mermaid graph.
+    ///
+    /// # Returns
+    ///
+    /// The line, newline-terminated, when calls or jumps were left
+    /// unresolved; `None` otherwise.
+    #[must_use]
+    pub fn line(&self, lead: &str) -> Option<String> {
+        match self {
+            Unseen::Missed(m) => Some(m.line(lead)),
+            Unseen::Resolved(_) | Unseen::Uncounted(_) => None,
+        }
+    }
+}
+
+/// Counts what a call or reference answer could not see: the indirect
+/// calls and jumps borer did not resolve among the functions it read,
+/// whose targets are missing from the answer.
 ///
 /// A trampoline's own jump counts only when the answer read none of its
 /// callers, which count it where they call it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `reach` - The functions the answer read the calls of.
+///
+/// # Returns
+///
+/// [`Unseen::Missed`] with the count, or [`Unseen::Resolved`] when every
+/// call and jump there was resolved.
+#[must_use]
+pub fn unseen(p: &Program, a: &Analysis, reach: Reach<'_>) -> Unseen {
+    let found = blind_blocks(p, a);
+    let own = |e: &u64, walked: &BTreeSet<u64>| {
+        let callers = a.function(*e).map_or(&[][..], |f| f.callers.as_slice());
+        (found.through.contains(e) && !callers.iter().any(|c| walked.contains(c))).then_some(1)
+    };
+    let (sites, functions, among) = match reach {
+        Reach::Program => (
+            found.counts.values().sum(),
+            found.counts.len(),
+            Among::Program,
+        ),
+        Reach::Walked(walked) => walked
+            .iter()
+            .filter_map(|e| found.counts.get(e).copied().or_else(|| own(e, walked)))
+            .fold((0usize, 0usize, Among::Walked), |(s, f, w), n| {
+                (s + n, f + 1, w)
+            }),
+    };
+    if sites == 0 {
+        return Unseen::Resolved(among);
+    }
+    Unseen::Missed(Missed {
+        sites,
+        functions,
+        among,
+    })
+}
+
+/// Says what a call or reference answer could not see ([`unseen()`]).
 ///
 /// # Arguments
 ///
@@ -446,42 +615,59 @@ fn trampolines(p: &Program, a: &Analysis, slots: &BTreeMap<u64, u64>) -> BTreeSe
 /// was resolved.
 #[must_use]
 pub fn unseen_line(p: &Program, a: &Analysis, reach: Reach<'_>, lead: &str) -> Option<String> {
-    let found = blind_blocks(p, a);
-    let own = |e: &u64, walked: &BTreeSet<u64>| {
-        let callers = a.function(*e).map_or(&[][..], |f| f.callers.as_slice());
-        (found.through.contains(e) && !callers.iter().any(|c| walked.contains(c))).then_some(1)
-    };
-    let (sites, functions, scope) = match reach {
-        Reach::Program => (
-            found.counts.values().sum(),
-            found.counts.len(),
-            "in the program",
-        ),
-        Reach::Walked(walked) => walked
-            .iter()
-            .filter_map(|e| found.counts.get(e).copied().or_else(|| own(e, walked)))
-            .fold(
-                (0usize, 0usize, "among the functions walked"),
-                |(s, f, w), n| (s + n, f + 1, w),
-            ),
-    };
-    (sites > 0).then(|| {
-        format!(
-            "{lead} not seen: {sites} indirect call{} or jump{} in {functions} function{} {scope} were not resolved to a target, so what they reach is not in this answer\n",
-            plural(sites),
-            plural(sites),
-            plural(functions)
-        )
-    })
+    unseen(p, a, reach).line(lead)
+}
+
+/// Counts what a call graph could not see: over callees, the unresolved
+/// calls of its drawn functions; over callers, those anywhere, when the
+/// root has few callers, since any of them may reach it.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `walk` - Which way the graph was walked.
+/// * `root_callers` - How many callers the root has.
+/// * `drawn` - The graph's nodes.
+pub(super) fn graph_unseen(
+    p: &Program,
+    a: &Analysis,
+    walk: Walk,
+    root_callers: usize,
+    drawn: &BTreeSet<u64>,
+) -> Unseen {
+    match walk {
+        Walk::Callers if root_callers >= SHORT_CALLERS => Unseen::Uncounted(Uncounted::ManyCallers),
+        Walk::Callers => unseen(p, a, Reach::Program),
+        Walk::Callees => unseen(p, a, Reach::Walked(drawn)),
+    }
+}
+
+/// Counts what an answer on the references to a target could not see:
+/// the unresolved calls anywhere, since any may reach it, while few calls
+/// and jumps reach it and a function holds it or one does.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image.
+/// * `a` - The analysis.
+/// * `target` - The referenced address.
+/// * `sites` - The references the answer counts.
+pub(super) fn xref_unseen(p: &Program, a: &Analysis, target: u64, sites: &[RefSite]) -> Unseen {
+    let callers = sites.iter().filter(|s| s.is_branch()).count();
+    if callers >= SHORT_CALLERS {
+        Unseen::Uncounted(Uncounted::ManyCallers)
+    } else if callers == 0 && a.function_at(target).is_none() {
+        Unseen::Uncounted(Uncounted::Uncalled)
+    } else {
+        unseen(p, a, Reach::Program)
+    }
 }
 
 /// Appends the incomplete-walk warning and what a call graph could not see
-/// ([`unseen_line`]) as mermaid comments.
+/// ([`graph_unseen`]) as mermaid comments.
 ///
-/// An incomplete walk writes [`INCOMPLETE_NOTE`] under `%%`. A graph of
-/// callees also notes what the unresolved calls of its drawn functions
-/// reach; a graph of callers notes the callers that reach the root through
-/// an unresolved call anywhere, said when the root has few callers.
+/// An incomplete walk writes [`INCOMPLETE_NOTE`] under `%%`.
 ///
 /// # Arguments
 ///
@@ -502,11 +688,7 @@ pub(super) fn graph_line(
     if a.incomplete {
         let _ = writeln!(out, "%%{}", INCOMPLETE_NOTE.trim_start_matches('#'));
     }
-    let reach = match walk {
-        Walk::Callers => (root_callers < SHORT_CALLERS).then_some(Reach::Program),
-        Walk::Callees => Some(Reach::Walked(drawn)),
-    };
-    if let Some(line) = reach.and_then(|r| unseen_line(p, a, r, "%%")) {
+    if let Some(line) = graph_unseen(p, a, walk, root_callers, drawn).line("%%") {
         out.push_str(&line);
     }
 }

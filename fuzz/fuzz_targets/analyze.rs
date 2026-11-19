@@ -9,9 +9,10 @@
 //! band of a cell count the input names, spells the typed triage, for a .NET
 //! assembly lists its first IL methods and its obfuscator markers, and reads
 //! every chart series table, a hostile spec among them: the path every agent
-//! request takes after a load. The first functions' call graphs and call
-//! tree levels are walked both ways too, and the callers of the first
-//! imports, which have no body.
+//! request takes after a load. The first functions' call graphs, typed
+//! and mermaid, and call tree levels are walked both ways too, with their
+//! reference graphs, and the callers of the first imports, which have no
+//! body.
 
 #![no_main]
 
@@ -20,9 +21,9 @@ use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::decompile::{decompile, unit_of};
 use borer_engine::analysis::modsdk::{self, header::class_headers};
 use borer_engine::analysis::render::{
-    Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, callgraph, cfg,
+    Bytes, Dir, Level, Walk, asserted_fields_tsv, band, call_children, call_graph, callgraph, cfg,
     disasm_function_with, disasm_view, linear, next_steps, propose, source_tree_tsv,
-    source_vocabulary_tsv, triage,
+    source_vocabulary_tsv, triage, xref_graph,
 };
 use borer_engine::analysis::split::{sources, split_map};
 use borer_engine::analysis::stats::stats_tsv;
@@ -73,7 +74,11 @@ fuzz_target!(|data: &[u8]| {
         }
         for walk in [Walk::Callees, Walk::Callers] {
             _ = callgraph(&program, &analysis, &overlay, f.entry, LISTED, walk);
+            let g = call_graph(&program, &analysis, &overlay, f.entry, walk, 4, LISTED);
+            assert_eq!(g.layout().at.len(), g.nodes.len());
         }
+        let g = xref_graph(&program, &analysis, &overlay, f.entry, 4, LISTED);
+        assert_eq!(g.layout().routes.len(), g.edges.len());
         for level in [Level::Callees, Level::CalleesAndVirtuals, Level::Callers] {
             _ = call_children(&program, &analysis, &overlay, f.entry, level);
         }

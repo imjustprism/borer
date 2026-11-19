@@ -125,7 +125,7 @@ pub fn call_path(
 }
 
 /// Which way a call graph is walked from its root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Walk {
     /// What the root calls, transitively.
     Callees,
@@ -169,9 +169,10 @@ pub fn callgraph_mermaid(
 ///
 /// The node budget is spent in two rounds so a wide root neither starves
 /// depth nor wastes the budget: the first walks breadth-first with at most
-/// [`CallGraph::FANOUT`] callees per node, which reserves nodes for what
-/// the callees call; the second gives the callees held back whatever is
-/// left, in the same order. An import called through its slot is a leaf,
+/// [`CallWalk::FANOUT`] callees per node ([`call_walk`], one pass), which
+/// reserves nodes for what the callees call; the second gives the callees
+/// held back whatever is left, in the same order, and draws none of their
+/// callees. An import called through its slot is a leaf,
 /// drawn as a stadium and named after the import: on a framework program
 /// the imports are most of what a function does.
 ///
@@ -208,51 +209,18 @@ pub fn callgraph(
     max_nodes: usize,
     walk: Walk,
 ) -> String {
-    let slots = import_slots(p);
-    let mut g = CallGraph {
-        nodes: vec![root],
-        imports: BTreeMap::new(),
-        edges: Vec::new(),
-        max_nodes,
-        walk,
+    let budget = CallBudget {
+        nodes: max_nodes,
+        depth: usize::MAX,
+        passes: 1,
     };
-    if a.function(root).is_none()
-        && let Some(raw) = slots.get(&root)
-    {
-        let name = crate::search::demangled_name(raw);
-        g.imports.insert(root, bare_name(&name).to_owned());
-    }
-    let targets_of = |cur: u64| call_targets(a, &slots, cur, walk);
-    let far = |targets: &[Callee]| -> Vec<u64> { targets.iter().map(|t| t.target).collect() };
-    let mut reached: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    let mut held: Vec<(u64, Vec<Callee>)> = Vec::new();
-    let mut head = 0;
-    while head < g.nodes.len() {
-        let cur = g.nodes[head];
-        head += 1;
-        let mut targets = targets_of(cur);
-        reached.insert(cur, far(&targets));
-        let rest = targets.split_off(targets.len().min(CallGraph::FANOUT));
-        for t in &targets {
-            g.link(cur, t);
-        }
-        if !rest.is_empty() {
-            held.push((cur, rest));
-        }
-    }
-    for (cur, rest) in held {
-        for t in rest {
-            g.link(cur, &t);
-        }
-    }
-    for &n in &g.nodes {
-        reached.entry(n).or_insert_with(|| far(&targets_of(n)));
-    }
+    let g = call_walk(p, a, root, walk, budget);
     let drawn: BTreeSet<u64> = g.nodes.iter().copied().collect();
-    let hidden: BTreeSet<u64> = reached
+    let hidden: BTreeSet<u64> = g
+        .reached
         .values()
         .flatten()
-        .copied()
+        .map(|t| t.target)
         .filter(|t| !drawn.contains(t))
         .collect();
     let mut out = String::from("graph TD\n");
@@ -293,7 +261,7 @@ pub fn callgraph(
         g.nodes.len(),
         g.imports.len()
     );
-    let from_root = reached.get(&root).map_or(0, Vec::len);
+    let from_root = g.reached.get(&root).map_or(0, Vec::len);
     unseen::graph_line(&mut out, p, a, walk, from_root, &drawn);
     out
 }
@@ -308,14 +276,22 @@ pub fn callgraph(
 /// * `a` - The analysis.
 /// * `o` - User names.
 /// * `n` - The node's address.
-fn node_label(p: &Program, a: &Analysis, o: &Overlay, n: u64) -> String {
+pub(super) fn node_label(p: &Program, a: &Analysis, o: &Overlay, n: u64) -> String {
     if o.names.contains_key(&n) || a.function(n).is_some() {
         return name_of(a, o, n);
     }
-    a.symbol_at(p, n).map_or_else(
-        || format!("{n:#x}"),
-        |s| bare_name(&crate::search::demangled_name(&s.name)).to_owned(),
-    )
+    a.symbol_at(p, n)
+        .map_or_else(|| format!("{n:#x}"), |s| graph_name(&s.name))
+}
+
+/// Returns a symbol's name as a graph shows it: demangled, without its
+/// module.
+///
+/// # Arguments
+///
+/// * `raw` - The name as the file states it.
+pub(super) fn graph_name(raw: &str) -> String {
+    bare_name(&crate::search::demangled_name(raw)).to_owned()
 }
 
 /// A neighbor a call graph walk takes from a node, with the instructions
@@ -336,50 +312,166 @@ pub(super) struct Callee {
     pub(super) called: bool,
 }
 
-/// The callgraph under construction: its nodes in the order they were
-/// reached, which import each leaf is, and its edges.
-pub(super) struct CallGraph {
-    /// Function entries and import slots, the root first.
+/// A walk of the call graph from a root, as [`call_walk`] makes it: the
+/// one walk the mermaid graph ([`callgraph`]) and the typed one
+/// ([`call_graph`]) are drawn from.
+pub(super) struct CallWalk {
+    /// Function entries and import slots in the order the walk reached
+    /// them, the root first.
     pub(super) nodes: Vec<u64>,
     /// The import name of every node that is an import slot.
     pub(super) imports: BTreeMap<u64, String>,
-    /// `(from, to)` pairs in the order they were drawn.
+    /// The edges the walk drew, `(from, to)` the way calls go, in the order
+    /// it drew them.
     pub(super) edges: Vec<(u64, u64)>,
-    /// Most nodes the graph may hold.
-    pub(super) max_nodes: usize,
-    /// Which way the walk goes. Over callers, an edge runs from the node
-    /// just added into the one it was reached from: arrows still point the
-    /// way calls go.
-    pub(super) walk: Walk,
+    /// Each node but the root, with the node the walk reached it from.
+    pub(super) came_from: BTreeMap<u64, u64>,
+    /// Every node's neighbours ([`call_targets`]), drawn or not.
+    pub(super) reached: BTreeMap<u64, Vec<Callee>>,
 }
 
-impl CallGraph {
-    /// Most callees expanded per node in the first round, so one wide
+/// How far a call walk ([`call_walk`]) may go.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct CallBudget {
+    /// Most nodes, the root included.
+    pub(super) nodes: usize,
+    /// Levels whose nodes draw their neighbours; `usize::MAX` for no limit.
+    pub(super) depth: usize,
+    /// Most passes: 1 leaves the nodes the second round adds unexpanded,
+    /// as the mermaid graph does; `usize::MAX` walks on until nothing is
+    /// added.
+    pub(super) passes: usize,
+}
+
+/// Walks the call graph from a root, spending a node budget in two rounds
+/// so a wide root neither starves depth nor wastes the budget.
+///
+/// The first round walks breadth-first with at most
+/// [`CallWalk::FANOUT`] neighbours per node, which reserves nodes for what
+/// the neighbours call; the second gives the neighbours held back whatever
+/// is left, in the same order. A pass is the two rounds; each further pass
+/// walks on from the nodes the last one's second round added, while the
+/// budget lasts. A node `depth` levels from the root draws none of its
+/// neighbours. An import called through its slot is a leaf
+/// named after the import; a root with no body that is an import slot is
+/// named after the import too.
+///
+/// # Arguments
+///
+/// * `p` - The loaded image, for the import names.
+/// * `a` - The analysis.
+/// * `root` - The root: a function entry, an import slot or a data
+///   address.
+/// * `walk` - Which way to walk from the root.
+/// * `budget` - How far the walk may go.
+pub(super) fn call_walk(
+    p: &Program,
+    a: &Analysis,
+    root: u64,
+    walk: Walk,
+    budget: CallBudget,
+) -> CallWalk {
+    let slots = import_slots(p);
+    let mut g = CallWalk {
+        nodes: vec![root],
+        imports: BTreeMap::new(),
+        edges: Vec::new(),
+        came_from: BTreeMap::new(),
+        reached: BTreeMap::new(),
+    };
+    if a.function(root).is_none()
+        && let Some(raw) = slots.get(&root)
+    {
+        g.imports.insert(root, graph_name(raw));
+    }
+    let mut level: BTreeMap<u64, usize> = BTreeMap::from([(root, 0)]);
+    let mut head = 0;
+    for _ in 0..budget.passes {
+        let mut held: Vec<(u64, usize)> = Vec::new();
+        while let Some(&cur) = g.nodes.get(head) {
+            head += 1;
+            let targets = call_targets(a, &slots, cur, walk);
+            let Some(&at) = level.get(&cur) else {
+                continue;
+            };
+            if at < budget.depth {
+                let first = targets.len().min(CallWalk::FANOUT);
+                for t in &targets[..first] {
+                    if g.link(cur, t, walk, budget.nodes) {
+                        level.insert(t.target, at + 1);
+                    }
+                }
+                if first < targets.len() {
+                    held.push((cur, first));
+                }
+            }
+            g.reached.insert(cur, targets);
+        }
+        for (cur, first) in held {
+            let Some(&at) = level.get(&cur) else {
+                continue;
+            };
+            let Some(targets) = g.reached.remove(&cur) else {
+                continue;
+            };
+            for t in targets.get(first..).unwrap_or_default() {
+                if g.link(cur, t, walk, budget.nodes) {
+                    level.insert(t.target, at + 1);
+                }
+            }
+            g.reached.insert(cur, targets);
+        }
+        if head == g.nodes.len() {
+            break;
+        }
+    }
+    for &n in &g.nodes {
+        g.reached
+            .entry(n)
+            .or_insert_with(|| call_targets(a, &slots, n, walk));
+    }
+    g
+}
+
+impl CallWalk {
+    /// Most neighbours expanded per node in the first round, so one wide
     /// function cannot spend the whole node budget on its own children and
     /// leave none for depth.
     pub(super) const FANOUT: usize = 6;
 
     /// Draws an edge, adding the target as a node when the budget allows;
-    /// a new target past the budget is left out, edge and all.
+    /// a new target past the budget is left out, edge and all. Over
+    /// callers the edge runs from the target into `from`: arrows point the
+    /// way calls go.
     ///
     /// # Arguments
     ///
     /// * `from` - The node the walk reached the target from.
     /// * `to` - The target: a function entry or an import slot.
-    pub(super) fn link(&mut self, from: u64, to: &Callee) {
-        if !self.nodes.contains(&to.target) {
-            if self.nodes.len() >= self.max_nodes {
-                return;
+    /// * `walk` - Which way the walk goes.
+    /// * `max_nodes` - Most nodes the graph may hold.
+    ///
+    /// # Returns
+    ///
+    /// Whether the target was added.
+    fn link(&mut self, from: u64, to: &Callee, walk: Walk, max_nodes: usize) -> bool {
+        let added =
+            self.nodes.first() != Some(&to.target) && !self.came_from.contains_key(&to.target);
+        if added {
+            if self.nodes.len() >= max_nodes {
+                return false;
             }
             self.nodes.push(to.target);
+            self.came_from.insert(to.target, from);
             if let Some(n) = &to.import {
                 self.imports.insert(to.target, n.clone());
             }
         }
-        match self.walk {
+        match walk {
             Walk::Callers => self.edges.push((to.target, from)),
             Walk::Callees => self.edges.push((from, to.target)),
         }
+        added
     }
 }
 
@@ -510,10 +602,9 @@ pub(super) fn callees_of(a: &Analysis, slots: &BTreeMap<u64, &str>, entry: u64) 
         .collect();
     for target in first {
         if let Some(raw) = slots.get(&target) {
-            let name = crate::search::demangled_name(raw);
             out.push(Callee {
                 target,
-                import: Some(bare_name(&name).to_owned()),
+                import: Some(graph_name(raw)),
                 sites: by.remove(&target).unwrap_or_default(),
                 called: true,
             });
@@ -797,7 +888,7 @@ fn has_edges(
 ///   callers, a data address.
 /// * `called` - Some site calls or jumps to `end`, rather than only
 ///   referencing it.
-fn via_of(a: &Analysis, slots: &BTreeMap<u64, &str>, end: u64, called: bool) -> Via {
+pub(super) fn via_of(a: &Analysis, slots: &BTreeMap<u64, &str>, end: u64, called: bool) -> Via {
     match a.function(end) {
         Some(f) => match (f.thunk, f.bound) {
             (Some(slot), _) => Via::Thunk { slot },

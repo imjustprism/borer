@@ -308,11 +308,7 @@ fn rows_of_sites(
     ordered.extend(families.into_values());
     ordered.sort_by_key(|g| (std::cmp::Reverse(g.total), g.sites.first().map(|s| s.va)));
     let target = targets.first().copied().unwrap_or_default();
-    let callers = sites.iter().filter(|s| s.is_branch()).count();
-    let short = callers < unseen::SHORT_CALLERS && (callers > 0 || a.function_at(target).is_some());
-    let unseen = short
-        .then(|| unseen_line(p, a, Reach::Program, "#"))
-        .flatten();
+    let unseen = unseen::xref_unseen(p, a, target, sites).line("#");
     let (offset, rows) = match view {
         XrefView::Count => (None, Vec::new()),
         XrefView::Page { offset, limit } => {

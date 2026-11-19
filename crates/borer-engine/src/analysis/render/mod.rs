@@ -70,8 +70,8 @@ pub use triage_view::*;
 pub use typed::*;
 pub use unpack::*;
 pub use unseen::{
-    CANDIDATES_MAX, Candidate, Census, Form, Reach, Rule, Site, Why, census, indirect_check,
-    indirect_tsv, unseen_line,
+    Among, CANDIDATES_MAX, Candidate, Census, Form, Missed, Reach, Rule, Site, Uncounted, Unseen,
+    Why, census, indirect_check, indirect_tsv, unseen, unseen_line,
 };
 pub use xrefs::*;
 

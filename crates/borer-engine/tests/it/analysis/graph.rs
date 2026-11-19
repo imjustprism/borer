@@ -665,3 +665,371 @@ fn a_call_tree_level_lists_a_virtual_call_only_when_asked() {
         [(0x1200, Via::Virtual { slot: 1 }, vec![0x1773])]
     );
 }
+
+/// Returns the graph a typed graph was laid out from: each node a box one
+/// row high and its name wide, plus a cell on every side, and each edge
+/// down from its `from` to its `to`, a back edge up the side.
+///
+/// # Arguments
+///
+/// * `g` - The typed graph.
+/// * `name` - Each node's name.
+fn laid_from<N, E>(
+    g: &borer_engine::analysis::render::TypedGraph<N, E>,
+    name: impl Fn(&N) -> &str,
+) -> borer_engine::analysis::render::Graph {
+    use borer_engine::analysis::render::{Graph, GraphEdge, Route};
+    let cells = |n: &N| u32::try_from(name(n).chars().count() + 2).unwrap_or(u32::MAX);
+    Graph {
+        sizes: g.nodes.iter().map(|n| (cells(n), 3)).collect(),
+        edges: g
+            .edges
+            .iter()
+            .map(|e| GraphEdge {
+                from: e.from,
+                to: e.to,
+                route: if e.back { Route::Up } else { Route::Down },
+            })
+            .collect(),
+        root: g.root,
+    }
+}
+
+/// Checks a typed graph's drawing: the drawing rules hold over its edges
+/// from `from` to `to`, and every edge but a back edge goes down.
+///
+/// # Arguments
+///
+/// * `g` - The typed graph.
+/// * `name` - Each node's name.
+fn drawn_down<N, E>(
+    g: &borer_engine::analysis::render::TypedGraph<N, E>,
+    name: impl Fn(&N) -> &str,
+) {
+    let l = g.layout();
+    assert_eq!(crate::drawn::check(&laid_from(g, name), &l), Ok(()));
+    for e in g.edges.iter().filter(|e| !e.back) {
+        assert!(
+            l.at[e.from].1 < l.at[e.to].1,
+            "edge {}->{} goes up",
+            e.from,
+            e.to
+        );
+    }
+}
+
+/// The calls around a function are a typed graph: each node an address
+/// with its kind, each edge how the call is known and where it is made,
+/// laid out under the drawing rules, built once.
+///
+/// One level under 0x401000 holds the thunk's call of `ExitProcess`, past
+/// the depth, as an open node; two levels hold the import too.
+#[test]
+fn the_calls_around_a_function_are_a_typed_graph() {
+    use borer_engine::analysis::render::{AddrKind, Via, Walk, call_graph};
+    let p = call_tree_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let g = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 2, 16);
+    let nodes: Vec<(u64, &str, AddrKind, bool)> = g
+        .nodes
+        .iter()
+        .map(|n| (n.addr, &*n.name, n.kind, n.open))
+        .collect();
+    let function = AddrKind::Function;
+    assert_eq!(
+        nodes,
+        [
+            (0x401000, "sub_401000", function, false),
+            (0x401020, "sub_401020", function, false),
+            (0x401030, "KERNEL32.dll!ExitProcess", function, false),
+            (0x402000, "Sleep", AddrKind::Import, false),
+            (0x402008, "ExitProcess", AddrKind::Import, false),
+        ],
+        "{g:?}"
+    );
+    let edges: Vec<(usize, usize, Via, &[u64])> = g
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to, e.kind.kind, e.kind.sites.as_slice()))
+        .collect();
+    assert_eq!(
+        edges,
+        [
+            (0, 1, Via::Direct, &[0x401000][..]),
+            (0, 2, Via::Thunk { slot: 0x402008 }, &[0x40100b][..]),
+            (0, 3, Via::Import, &[0x401005][..]),
+            (2, 4, Via::Import, &[0x401030][..]),
+        ],
+        "{g:?}"
+    );
+    assert_eq!((g.root, g.cut, g.incomplete), (0, None, false));
+    drawn_down(&g, |n| &n.name);
+    let again = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 2, 16);
+    assert!(std::sync::Arc::ptr_eq(&g, &again), "built once");
+    let one = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 1, 16);
+    let open: Vec<(u64, bool)> = one.nodes.iter().map(|n| (n.addr, n.open)).collect();
+    assert_eq!(
+        open,
+        [
+            (0x401000, false),
+            (0x401020, false),
+            (0x401030, true),
+            (0x402000, false)
+        ],
+        "{one:?}"
+    );
+    let cut = one.cut.expect("the import past the depth is counted");
+    let counts = (cut.shown, cut.total, cut.edges_shown, cut.edges_total);
+    assert_eq!(counts, (4, 5, 3, 4));
+}
+
+/// Over callers every edge still points the way calls go, down the drawing
+/// to the root at the bottom; a cap cuts the nodes with a stated count;
+/// a rename in force names the node anew.
+#[test]
+fn a_call_graph_over_callers_points_at_the_root_and_a_cap_says_what_it_cut() {
+    use borer_engine::analysis::render::{Cut, Via, Walk, call_graph};
+    let p = call_tree_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let g = call_graph(&p, &a, &o, 0x402000, Walk::Callers, 3, 16);
+    let addrs: Vec<u64> = g.nodes.iter().map(|n| n.addr).collect();
+    assert_eq!(addrs, [0x401000, 0x402000], "{g:?}");
+    assert_eq!(g.root, 1);
+    let edges: Vec<(usize, usize, Via)> = g
+        .edges
+        .iter()
+        .map(|e| (e.from, e.to, e.kind.kind))
+        .collect();
+    assert_eq!(edges, [(0, 1, Via::Import)], "{g:?}");
+    drawn_down(&g, |n| &n.name);
+    let cut = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 1, 2);
+    let addrs: Vec<u64> = cut.nodes.iter().map(|n| n.addr).collect();
+    assert_eq!(addrs, [0x401000, 0x401020], "{cut:?}");
+    let want = Cut {
+        shown: 2,
+        total: 4,
+        edges_shown: 1,
+        edges_total: 3,
+        shortened: 0,
+    };
+    assert_eq!(cut.cut, Some(want));
+    drawn_down(&cut, |n| &n.name);
+    let mut renamed = Overlay::default();
+    renamed.names.insert(0x401020, "one".to_owned());
+    let g = call_graph(&p, &a, &renamed, 0x401000, Walk::Callees, 1, 16);
+    assert_eq!(&*g.nodes[1].name, "one", "{g:?}");
+}
+
+/// What references an address is a typed graph of what references it.
+///
+/// Each edge has its kind and sites and points at the target at the
+/// bottom; an address inside a function, an import slot and one no section
+/// maps say what they are.
+#[test]
+fn what_references_an_address_is_a_typed_graph() {
+    use borer_engine::analysis::render::{AddrKind, xref_graph};
+    let p = call_tree_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let g = xref_graph(&p, &a, &o, 0x401020, 2, 16);
+    let nodes: Vec<(u64, AddrKind)> = g.nodes.iter().map(|n| (n.addr, n.kind)).collect();
+    let function = AddrKind::Function;
+    assert_eq!(nodes, [(0x401000, function), (0x401020, function)], "{g:?}");
+    let edges: Vec<(usize, usize, RefKind, &[u64], usize)> = g
+        .edges
+        .iter()
+        .map(|e| {
+            let k = &e.kind;
+            (e.from, e.to, k.kind, k.sites.as_slice(), k.site_count)
+        })
+        .collect();
+    assert_eq!(edges, [(0, 1, RefKind::Call, &[0x401000][..], 1)], "{g:?}");
+    assert_eq!((g.root, g.cut), (1, None));
+    drawn_down(&g, |n| &n.name);
+    let kind = |va: u64| {
+        let g = xref_graph(&p, &a, &o, va, 1, 4);
+        g.nodes.iter().find(|n| n.addr == va).map(|n| n.kind)
+    };
+    let alone = xref_graph(&p, &a, &o, 0x401020, 2, 1);
+    let cut = alone.cut.expect("the referrer past the cap is counted");
+    let counts = (alone.nodes.len(), cut.total, cut.edges_total);
+    assert_eq!(counts, (1, 2, 1), "{alone:?}");
+    assert_eq!(kind(0x401005), Some(AddrKind::Code));
+    assert_eq!(kind(0x90_0000), Some(AddrKind::Unmapped));
+    assert_eq!(kind(0x402000), Some(AddrKind::Import));
+}
+
+/// A call graph, a reference graph and their drawings come out the same
+/// over two analyses and with the analysis run on one worker or sixteen.
+#[test]
+fn typed_graphs_draw_the_same_at_any_worker_count() {
+    use borer_engine::analysis::render::{Walk, call_graph, xref_graph};
+    use borer_engine::progress::Workers;
+    let p = call_tree_image();
+    let o = Overlay::default();
+    let digests = |a: &Analysis| {
+        let calls = call_graph(&p, a, &o, 0x401000, Walk::Callees, 4, 64);
+        let refs = xref_graph(&p, a, &o, 0x402000, 4, 64);
+        (
+            crate::drawn::digest(&laid_from(&calls, |n| &n.name), &calls.layout()),
+            crate::drawn::digest(&laid_from(&refs, |n| &n.name), &refs.layout()),
+            format!("{:?}{:?}", calls.nodes, refs.edges),
+        )
+    };
+    let want = digests(&Analysis::compute(&p));
+    assert_eq!(digests(&Analysis::compute(&p)), want);
+    for n in [1, 16] {
+        let count = std::num::NonZeroUsize::new(n).unwrap_or(std::num::NonZeroUsize::MIN);
+        let a = Workers(count).within(|| Analysis::compute(&p));
+        assert_eq!(digests(&a), want, "{n} workers");
+    }
+}
+
+/// Builds a raw x86-64 image whose calls pass the edge limit: the entry
+/// at 0x401000 calls 64 functions, and each calls the same 64 helpers and
+/// one helper of its own, 4,224 calls among 193 functions.
+fn wide_calls() -> Program {
+    use borer_engine::num::lo32;
+    let at = |k: usize| 0x401000 + from_usize(k);
+    let mut code = vec![0xccu8; 0x8000];
+    let mut calls = |from: usize, to: &[usize]| {
+        for (i, &t) in to.iter().enumerate() {
+            let site = from + 5 * i;
+            code[site] = 0xe8; // ASM: call rel32
+            let rel = lo32(at(t).wrapping_sub(at(site + 5)));
+            code[site + 1..site + 5].copy_from_slice(&rel.to_le_bytes());
+        }
+        code[from + 5 * to.len()] = 0xc3; // ASM: ret
+    };
+    let middle = |i: usize| 0x200 + 0x150 * i;
+    let helper = |j: usize| 0x6000 + 0x10 * j;
+    let own = |i: usize| 0x7000 + 0x10 * i;
+    calls(0, &(0..64).map(middle).collect::<Vec<_>>());
+    for i in 0..64 {
+        let to: Vec<usize> = (0..64).map(helper).chain([own(i)]).collect();
+        calls(middle(i), &to);
+        calls(helper(i), &[]);
+        calls(own(i), &[]);
+    }
+    let text = Section::mapped(".text", 0x401000, 0, 0x8000, false, true);
+    Program::raw(code, Arch::X86_64, 0x400000, Some(0x401000), vec![text])
+}
+
+/// Past the edge limit every node keeps the edge the walk reached it by,
+/// the edges left out are counted, and their ends are open.
+///
+/// The walk spends its budget in rounds of six callees a node and walks on
+/// from the callees its second round adds while the depth and the cap
+/// leave room, so every function is drawn, its own helper too.
+#[test]
+fn past_the_edge_limit_every_node_keeps_the_edge_that_reached_it() {
+    use borer_engine::analysis::render::{GRAPH_EDGES_MAX, Walk, call_graph};
+    let p = wide_calls();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let g = call_graph(&p, &a, &o, 0x401000, Walk::Callees, 3, 1024);
+    assert_eq!(g.nodes.len(), 193, "{:?}", g.cut);
+    assert!(
+        g.nodes
+            .iter()
+            .any(|n| n.addr == 0x401000 + 0x7000 + 0x10 * 6)
+    );
+    let cut = g.cut.expect("edges are cut");
+    assert_eq!((cut.shown, cut.total, cut.edges_total), (193, 193, 4224));
+    assert_eq!(
+        (g.edges.len(), cut.edges_shown),
+        (GRAPH_EDGES_MAX, GRAPH_EDGES_MAX)
+    );
+    let reached: std::collections::BTreeSet<usize> = g.edges.iter().map(|e| e.to).collect();
+    for k in (0..g.nodes.len()).filter(|&k| k != g.root) {
+        assert!(reached.contains(&k), "{:#x} has no edge", g.nodes[k].addr);
+    }
+    assert!(g.nodes.iter().any(|n| n.open));
+    drawn_down(&g, |n| &n.name);
+}
+
+/// Builds a raw x86-64 image with one unresolved call.
+///
+/// `sub_401000` calls `sub_401040`, calls through `rax` and reads the
+/// global 0x403000 twice; `sub_401040` calls `sub_401080` twice and takes
+/// its address five times.
+fn unseen_image() -> Program {
+    use borer_engine::num::lo32;
+    let mut code = vec![0xccu8; 0x100];
+    let rel = |site: usize, len: usize, to: u64| {
+        lo32(to.wrapping_sub(0x401000 + from_usize(site + len))).to_le_bytes()
+    };
+    let mut put = |site: usize, head: &[u8], len: usize, to: u64| {
+        code[site..site + head.len()].copy_from_slice(head);
+        code[site + head.len()..site + len].copy_from_slice(&rel(site, len, to));
+    };
+    put(0x00, &[0xe8], 5, 0x401040); // ASM: call sub_401040
+    put(0x07, &[0x8b, 0x05], 6, 0x403000); // ASM: mov eax,[rip+0x403000]
+    put(0x0d, &[0x8b, 0x05], 6, 0x403000); // ASM: mov eax,[rip+0x403000]
+    for k in 0..2 {
+        put(0x40 + 5 * k, &[0xe8], 5, 0x401080); // ASM: call sub_401080
+    }
+    for k in 0..5 {
+        put(0x4a + 7 * k, &[0x48, 0x8d, 0x0d], 7, 0x401080); // ASM: lea rcx,[rip+sub_401080]
+    }
+    code[0x05..0x07].copy_from_slice(&[0xff, 0xd0]); // ASM: call rax
+    code[0x13] = 0xc3; // ASM: ret
+    code[0x6d] = 0xc3; // ASM: ret
+    code[0x80] = 0xc3; // ASM: ret
+    code.extend([0u8; 0x10]);
+    let sections = vec![
+        Section::mapped(".text", 0x401000, 0, 0x100, false, true),
+        Section::mapped(".data", 0x403000, 0x100, 0x10, true, false),
+    ];
+    Program::raw(code, Arch::X86_64, 0x400000, Some(0x401000), sections)
+}
+
+/// A reference graph says what it could not see by the rule the xrefs
+/// listing follows.
+///
+/// That is the unresolved calls anywhere while few calls or jumps reach a
+/// target that is code or called, and nothing for a global only read.
+///
+/// The global 0x403000, read by two `mov`s, has no note in the listing
+/// and none in the graph. `sub_401080`, with two calls and five data
+/// references, has the listing's note in the graph too.
+#[test]
+fn a_reference_graph_notes_what_it_missed_as_the_listing_does() {
+    use borer_engine::analysis::render::{XrefView, xref_graph, xref_rows};
+    let p = unseen_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let listed = |target: u64| {
+        let text = xref_rows(&p, &a, &o, target, XrefView::Count).spell();
+        text.lines()
+            .find(|l| l.starts_with("# not seen:"))
+            .map(|l| format!("{l}\n"))
+    };
+    let drawn = |target: u64| xref_graph(&p, &a, &o, target, 1, 16).unseen.line("#");
+    assert_eq!(listed(0x403000), None);
+    assert_eq!(drawn(0x403000), None);
+    let note = listed(0x401080);
+    assert!(note.is_some(), "the listing notes the call through rax");
+    assert_eq!(drawn(0x401080), note);
+}
+
+/// An address no function holds is code when an executable section maps
+/// it and data when only a data section does.
+#[test]
+fn an_address_in_no_function_is_code_only_in_an_executable_section() {
+    use borer_engine::analysis::render::{AddrKind, xref_graph};
+    let p = unseen_image();
+    let a = Analysis::compute(&p);
+    let o = Overlay::default();
+    let kind = |va: u64| {
+        xref_graph(&p, &a, &o, va, 1, 4)
+            .nodes
+            .iter()
+            .find(|n| n.addr == va)
+            .map(|n| n.kind)
+    };
+    assert_eq!(kind(0x4010f0), Some(AddrKind::Code));
+    assert_eq!(kind(0x403000), Some(AddrKind::Data));
+}
