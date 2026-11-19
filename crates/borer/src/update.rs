@@ -42,15 +42,9 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, bail};
-
-/// The repository releases are published from.
-const REPO: &str = "imjustprism/borer";
-
-/// This build's version.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The environment variable that turns the daily check off when set to `1`.
-const OPT_OUT: &str = "BORER_NO_UPDATE_CHECK";
+use borer_front::release::{
+    LATEST_URL, OPT_OUT, REPO, VERSION, Version, is_newer, opted_out, user_agent,
+};
 
 /// How long a checked answer is trusted before the next check.
 const CHECK_EVERY: Duration = Duration::from_hours(24);
@@ -85,25 +79,7 @@ fn target() -> Option<(&'static str, &'static str)> {
 ///
 /// Major, minor and patch, or `None` when the text is not such a version.
 fn parse_version(text: &str) -> Option<(u64, u64, u64)> {
-    let core = text
-        .trim()
-        .trim_start_matches('v')
-        .split(['-', '+'])
-        .next()?;
-    let mut parts = core.split('.');
-    let major = parts.next()?.parse().ok()?;
-    let minor = parts.next()?.parse().ok()?;
-    let patch = parts.next()?.parse().ok()?;
-    parts.next().is_none().then_some((major, minor, patch))
-}
-
-/// Whether `tag` names a release newer than this build.
-///
-/// # Arguments
-///
-/// * `tag` - The release's tag.
-fn is_newer(tag: &str) -> bool {
-    matches!((parse_version(tag), parse_version(VERSION)), (Some(theirs), Some(ours)) if theirs > ours)
+    Version::parse_tag(text).map(|v| (v.major, v.minor, v.patch))
 }
 
 /// The null device, where `curl` writes a body nobody reads.
@@ -230,7 +206,7 @@ fn curl_command(req: &Request<'_>, token: Option<&Token>) -> (Command, Option<St
         .args(["--max-time", &req.secs.to_string()])
         .args(["--retry", &RETRIES.to_string()])
         .args(["--retry-max-time", &RETRY_WINDOW.to_string()])
-        .args(["-A", &format!("borer/{VERSION}")]);
+        .args(["-A", &user_agent("borer")]);
     cmd.arg(if req.follow && header.is_none() {
         "-L"
     } else {
@@ -572,9 +548,8 @@ fn release_of(json: &str) -> Option<Release> {
 /// When GitHub cannot be reached ([`curl`]), or names no release.
 fn latest(token: Option<&Token>) -> anyhow::Result<Release> {
     if token.is_some() {
-        let url = format!("https://api.github.com/repos/{REPO}/releases/latest");
         let req = Request {
-            url: &url,
+            url: LATEST_URL,
             out: None,
             follow: false,
             secs: ANSWER_SECS,
@@ -1076,7 +1051,7 @@ fn recalled() -> Option<(String, bool)> {
 ///
 /// True only for a person at a terminal who has not opted out.
 fn check_wanted(opt_out: Option<&str>, ci: bool, terminal: bool) -> bool {
-    opt_out != Some("1") && !ci && terminal
+    !opted_out(opt_out) && !ci && terminal
 }
 
 /// The environment variable that starts this binary as the daily check
@@ -1275,6 +1250,17 @@ mod tests {
         assert_eq!(aside(&exe), dir.join("borer.1.old"));
         assert!(!dir.join("borer.1.old").exists());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The version the CLI reports and compares is its own package's, read through
+    /// `borer-front`, which the CLI pins to the same release.
+    ///
+    /// # Panics
+    ///
+    /// When the two differ.
+    #[test]
+    fn the_shared_version_is_this_packages() {
+        assert_eq!(VERSION, env!("CARGO_PKG_VERSION"));
     }
 
     /// Tags parse to three numbers and order against this build.

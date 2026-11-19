@@ -24,9 +24,9 @@ on:
   workflow_dispatch:
     inputs:
       target:
-        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested, project, edits, pdb and find in turn
+        description: The target to fuzz; all fuzzes load, analyze, il, carve, nested, project, edits, pdb, find and release in turn
         type: choice
-        options: [all, load, analyze, il, carve, nested, project, edits, pdb, find]
+        options: [all, load, analyze, il, carve, nested, project, edits, pdb, find, release]
         default: all
       seed:
         description: libFuzzer's -seed; empty lets libFuzzer pick one
@@ -100,7 +100,7 @@ jobs:
           RUNS: ${{ inputs.runs }}
         run: |
           [[ "$SEED$RUNS" =~ ^[0-9]*$ ]] || { echo "seed and runs take digits only"; exit 1; }
-          targets="load analyze il carve nested project edits pdb find"
+          targets="load analyze il carve nested project edits pdb find release"
           if [ "${TARGET:-all}" != all ]; then targets=$TARGET; fi
           stop=(-max_total_time="$SECONDS_PER_TARGET")
           if [ -n "$RUNS" ]; then stop=(-runs="$RUNS"); fi
