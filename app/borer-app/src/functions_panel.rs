@@ -312,23 +312,28 @@ mod tests {
         assert_eq!(panel.read_with(cx, |panel, _| panel.selected_place()), None);
     }
 
-    /// With the open function not in the list, the list highlights no row and Enter opens
-    /// none, not the row highlighted before.
-    #[gpui::test]
-    fn enter_opens_no_row_when_none_is_highlighted(cx: &mut TestAppContext) {
-        enter_opens_no_row_when_none_is_highlighted_steps(cx);
-    }
-
-    /// Runs the steps of [`enter_opens_no_row_when_none_is_highlighted`].
+    /// Lists the sample's functions, opens the caller, highlights the callee's row, then
+    /// opens a function the list does not show, so no row is highlighted, and focuses the
+    /// rows.
     ///
     /// # Panics
     ///
-    /// Panics if Enter opens a row.
-    fn enter_opens_no_row_when_none_is_highlighted_steps(cx: &mut TestAppContext) {
+    /// Panics if the list lacks the callee.
+    fn unlit(
+        cx: &mut TestAppContext,
+    ) -> (
+        crate::app_view::AppWindow,
+        Entity<FunctionsPanel>,
+        &mut VisualTestContext,
+    ) {
         let (app, panel, cx) = listed(cx);
-
-        let place = Place::decompile(CALLER);
-        open_place(&app.workspace, &sample(), place, TabMode::Permanent, cx);
+        open_place(
+            &app.workspace,
+            &sample(),
+            Place::decompile(CALLER),
+            TabMode::Permanent,
+            cx,
+        );
         cx.run_until_parked();
         let callee = panel.read_with(cx, |panel, _| {
             let rows = panel.rows().unwrap().rows();
@@ -342,11 +347,54 @@ mod tests {
                 window.focus(panel.rows_focus(), cx);
             });
         });
+        (app, panel, cx)
+    }
+
+    /// With the open function not in the list, the list highlights no row and Enter opens
+    /// none, not the row highlighted before.
+    #[gpui::test]
+    fn enter_opens_no_row_when_none_is_highlighted(cx: &mut TestAppContext) {
+        enter_opens_no_row_when_none_is_highlighted_steps(cx);
+    }
+
+    /// Runs the steps of [`enter_opens_no_row_when_none_is_highlighted`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if Enter opens a row.
+    fn enter_opens_no_row_when_none_is_highlighted_steps(cx: &mut TestAppContext) {
+        let (app, _, cx) = unlit(cx);
         cx.dispatch_action(menu::Confirm);
         cx.run_until_parked();
         assert_eq!(
             shown(&app.workspace, cx).map(|(entry, _)| entry),
             Some(CALLER)
+        );
+    }
+
+    /// With no row highlighted, Down highlights the first row and Up the last, not the rows
+    /// next to the one highlighted before.
+    #[gpui::test]
+    fn the_arrows_start_at_the_ends_when_no_row_is_highlighted(cx: &mut TestAppContext) {
+        the_arrows_start_at_the_ends_when_no_row_is_highlighted_steps(cx);
+    }
+
+    /// Runs the steps of [`the_arrows_start_at_the_ends_when_no_row_is_highlighted`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if an arrow key highlights another row.
+    fn the_arrows_start_at_the_ends_when_no_row_is_highlighted_steps(cx: &mut TestAppContext) {
+        let (_, panel, cx) = unlit(cx);
+        let len = panel.read_with(cx, |panel, _| panel.rows().unwrap().rows().len());
+        cx.dispatch_action(menu::SelectNext);
+        assert_eq!(panel.read_with(cx, |panel, _| panel.selected()), Some(0));
+        let unlisted = Ref::Function(0xdead_beef);
+        panel.update(cx, |panel, cx| panel.select_subject(&unlisted, cx));
+        cx.dispatch_action(menu::SelectPrevious);
+        assert_eq!(
+            panel.read_with(cx, |panel, _| panel.selected()),
+            Some(len - 1)
         );
     }
 

@@ -1447,8 +1447,8 @@ impl<K: RowKind> Render for RowsPanel<K> {
 
 /// A view with a highlighted row, which the menu's next and previous keys move.
 pub(crate) trait Rows: Sized + 'static {
-    /// Returns the index of the highlighted row.
-    fn selected(&self) -> usize;
+    /// Returns the index of the highlighted row, `None` while no row is highlighted.
+    fn selected(&self) -> Option<usize>;
 
     /// Moves the highlight to row `row`, held to the rows shown.
     ///
@@ -1459,7 +1459,8 @@ pub(crate) trait Rows: Sized + 'static {
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>);
 }
 
-/// Returns `element` with the menu's next and previous keys moving `T`'s highlight.
+/// Returns `element` with the menu's next and previous keys moving `T`'s highlight; with no
+/// row highlighted, next highlights the first and previous the last.
 ///
 /// # Arguments
 ///
@@ -1468,18 +1469,22 @@ pub(crate) trait Rows: Sized + 'static {
 pub(crate) fn row_keys<T: Rows>(element: Stateful<Div>, cx: &Context<'_, T>) -> Stateful<Div> {
     element
         .on_action(cx.listener(|this: &mut T, _: &menu::SelectNext, _, cx| {
-            this.select(this.selected().saturating_add(1), cx);
+            let next = this.selected().map_or(0, |row| row.saturating_add(1));
+            this.select(next, cx);
         }))
         .on_action(
             cx.listener(|this: &mut T, _: &menu::SelectPrevious, _, cx| {
-                this.select(this.selected().saturating_sub(1), cx);
+                let previous = this
+                    .selected()
+                    .map_or(usize::MAX, |row| row.saturating_sub(1));
+                this.select(previous, cx);
             }),
         )
 }
 
 impl<K: RowKind> Rows for RowsPanel<K> {
-    fn selected(&self) -> usize {
-        self.selected
+    fn selected(&self) -> Option<usize> {
+        self.lit.then_some(self.selected)
     }
 
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {
@@ -1845,7 +1850,7 @@ pub(crate) mod tests {
         panel.update(cx, |panel, cx| {
             panel.request(false, cx);
             for _ in 0..2 {
-                panel.select(panel.selected() + 1, cx);
+                panel.select(panel.selected().map_or(0, |row| row + 1), cx);
             }
         });
         cx.run_until_parked();

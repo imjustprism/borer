@@ -401,8 +401,8 @@ pub(crate) fn small(text: impl Into<SharedString>, color: Color) -> Label {
 }
 
 impl Rows for StartItem {
-    fn selected(&self) -> usize {
-        self.selected
+    fn selected(&self) -> Option<usize> {
+        Some(self.selected)
     }
 
     fn select(&mut self, row: usize, cx: &mut Context<'_, Self>) {

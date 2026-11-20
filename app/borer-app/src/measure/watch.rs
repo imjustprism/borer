@@ -32,7 +32,7 @@ pub(super) struct Stamp {
     /// The top line of the active code tab.
     pub(super) top: Option<usize>,
     /// The functions panel's highlighted row and its filter's text.
-    pub(super) panel: Option<(usize, String)>,
+    pub(super) panel: Option<(Option<usize>, String)>,
     /// The go-to picker's query and its line count, while it is open.
     pub(super) picker: Option<(String, usize)>,
     /// The xrefs panel's referent and the rows it shows, by identity: the rows change when
