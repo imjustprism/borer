@@ -12,6 +12,10 @@ use borer_live::process_cpu_ticks;
 /// Turns of the spin loop each measured piece of work runs.
 const TURNS: u64 = 50_000_000;
 
+/// Times each piece of work is measured; the least reading is kept, the one
+/// a busy machine disturbed least.
+const RUNS: usize = 9;
+
 /// Spins `turns` times.
 ///
 /// # Arguments
@@ -27,16 +31,19 @@ fn spin(turns: u64) {
 /// the reading thread, and twice the work counts about twice the time.
 ///
 /// The reading thread only waits while the other spins, so a count that
-/// left out ended threads would read near nothing for it.
+/// left out ended threads would read near nothing for it. Each piece of
+/// work is measured [`RUNS`] times and its least reading compared, since one
+/// reading on a shared machine carries what else ran beside it.
 #[test]
 fn an_ended_thread_counts_by_its_work() {
-    let spent = |work: &dyn Fn()| {
+    let once = |work: &dyn Fn()| {
         let before = process_cpu_ticks().expect("processor time");
         work();
         process_cpu_ticks()
             .expect("processor time")
             .saturating_sub(before)
     };
+    let spent = |work: &dyn Fn()| (0..RUNS).map(|_| once(work)).min().unwrap_or_default();
     let on_a_thread = |turns: u64| {
         std::thread::spawn(move || spin(turns))
             .join()
