@@ -496,3 +496,43 @@ fn a_code_block_keeps_its_scroll_across_frames(cx: &mut TestAppContext) {
     let after = cx.debug_bounds(CODE_SELECTOR).unwrap();
     assert_eq!(after.left(), scrolled.left());
 }
+
+/// Hiding the panel does not stop a turn: a reply streamed while it is hidden is whole
+/// when it is shown again, with no stopped receipt; and a message held for agreement stays
+/// held while hidden and sends nothing.
+#[gpui::test]
+fn hiding_the_panel_keeps_the_turn(cx: &mut TestAppContext) {
+    use language_model::LanguageModelCompletionEvent::Text;
+    use workspace::dock::Panel as _;
+    let (_app, panel, _, cx) = docked(cx);
+    let (thread, fake, model) = talking(&panel, cx);
+    thread.update(cx, |t, cx| t.send("Go".to_owned(), cx));
+    cx.run_until_parked();
+    fake.send_last_event(&model, Text("first ".to_owned()));
+    cx.run_until_parked();
+    panel.update_in(cx, |p, window, cx| p.set_active(false, window, cx));
+    assert!(panel.read_with(cx, |p, cx| p.is_running(cx)));
+    fake.send_last_event(&model, Text("second".to_owned()));
+    fake.end_last(&model);
+    cx.run_until_parked();
+    panel.update_in(cx, |p, window, cx| p.set_active(true, window, cx));
+    let entries = thread.read_with(cx, |t, _| t.entries().to_vec());
+    assert!(
+        entries.contains(&Entry::Model("first second".to_owned())),
+        "{entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| matches!(e, Entry::Error(_))),
+        "{entries:?}"
+    );
+    thread.update(cx, |t, cx| t.clear(cx));
+    let mut other = remote(&fake, &model);
+    other.endpoint.url = "https://proxy.example.com".into();
+    thread.update(cx, |t, cx| t.choose(other, cx));
+    thread.update(cx, |t, cx| t.send("Held".to_owned(), cx));
+    cx.run_until_parked();
+    panel.update_in(cx, |p, window, cx| p.set_active(false, window, cx));
+    cx.run_until_parked();
+    assert!(fake.pending_completions().is_empty(), "sent while held");
+    assert!(thread.read_with(cx, |t, _| t.held_notice().is_some()));
+}

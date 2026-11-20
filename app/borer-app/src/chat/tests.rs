@@ -652,9 +652,10 @@ fn a_hidden_panel_sends_nothing(cx: &mut TestAppContext) {
     assert_eq!(thread.read_with(cx, |t, _| t.entries().len()), before);
 }
 
-/// Hiding the chat panel stops its running turn, so none runs unseen.
+/// Closing the chat panel's dock hides it and keeps its running turn: hiding is not
+/// stopping.
 #[gpui::test]
-fn hiding_the_panel_stops_its_turn(cx: &mut TestAppContext) {
+fn closing_the_panel_keeps_its_turn(cx: &mut TestAppContext) {
     let (app, panel, _, cx) = docked(cx);
     let (thread, _, _) = talking(&panel, cx);
     thread.update(cx, |t, cx| t.send("Look".to_owned(), cx));
@@ -664,7 +665,7 @@ fn hiding_the_panel_stops_its_turn(cx: &mut TestAppContext) {
         workspace.close_panel::<ChatPanel>(window, cx);
     });
     cx.run_until_parked();
-    assert!(!thread.read_with(cx, |t, _| t.is_running()));
+    assert!(thread.read_with(cx, |t, _| t.is_running()));
 }
 
 /// Picking a provider behind another endpoint, or opening another binary, clears the

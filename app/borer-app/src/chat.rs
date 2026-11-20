@@ -368,6 +368,17 @@ impl ChatPanel {
         }
     }
 
+    /// Returns whether a turn is running, whether the panel is shown or hidden: hiding it
+    /// does not stop one, so the status bar can mark the chat while a turn runs hidden.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - App context.
+    #[must_use]
+    pub fn is_running(&self, cx: &App) -> bool {
+        self.thread.read(cx).is_running()
+    }
+
     /// Returns the conversation.
     #[must_use]
     pub const fn thread(&self) -> &Entity<Thread> {
@@ -777,11 +788,8 @@ impl Panel for ChatPanel {
         self.input.focus_handle(cx)
     }
 
-    fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<'_, Self>) {
+    fn set_active(&mut self, active: bool, _window: &mut Window, _cx: &mut Context<'_, Self>) {
         self.shown = active;
-        if !active {
-            self.thread.update(cx, Thread::stop);
-        }
     }
 }
 
