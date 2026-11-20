@@ -27,7 +27,7 @@ use crate::app_view::open_dropped;
 use crate::binary::{Binary, reading_label};
 use crate::recent::{RecentBinary, SHOWN_MAX};
 use crate::rows_panel::{Rows, row_keys};
-use crate::status::{gauge, progress_words, spinner};
+use crate::status::{Work, gauge, spinner};
 use crate::title_bar::MARK_CELL_PX;
 
 /// Side in logical pixels of the borer mark beside the greeting.
@@ -71,8 +71,11 @@ pub struct StartItem {
     /// How far the tab sits from the window's left and right edges, as laid out last frame:
     /// the rail and any docks, which a resize of the window does not move.
     pane: Edges,
-    /// Repaints the tab when the binary starts or ends a load.
-    _observe: Subscription,
+    /// The status bar's work item, whose progress words the tab shows while a load runs.
+    work: Option<Entity<Work>>,
+    /// Repaints the tab when the binary starts or ends a load and when the work item's
+    /// progress words change.
+    _observe: Vec<Subscription>,
 }
 
 impl std::fmt::Debug for StartItem {
@@ -95,18 +98,20 @@ impl std::fmt::Debug for StartItem {
 ///
 /// * `pane` - The pane to keep filled.
 /// * `binary` - The window's binary.
+/// * `work` - The status bar's work item, `None` when the bar has none.
 /// * `window` - Window the pane is in.
 /// * `cx` - Application context.
 pub fn keep_filled(
     pane: &Entity<Pane>,
     binary: &Entity<Binary>,
+    work: Option<Entity<Work>>,
     window: &mut Window,
     cx: &mut App,
 ) {
     pane.update(cx, |pane, cx| {
         pane.set_render_tab_bar_buttons(cx, |_, _, _| (None, None));
     });
-    fill(pane, binary, window, cx);
+    fill(pane, binary, work.as_ref(), window, cx);
     let binary = binary.clone();
     window
         .subscribe(
@@ -114,7 +119,7 @@ pub fn keep_filled(
             cx,
             move |pane, event: &workspace::pane::Event, window, cx| match event {
                 workspace::pane::Event::RemovedItem { .. } => {
-                    fill(&pane, &binary, window, cx);
+                    fill(&pane, &binary, work.as_ref(), window, cx);
                     pane.update(cx, show_tab_bar_for_code);
                 }
                 workspace::pane::Event::AddItem { item }
@@ -157,9 +162,16 @@ fn show_tab_bar_for_code(pane: &mut Pane, cx: &mut Context<'_, Pane>) {
 ///
 /// * `pane` - The pane.
 /// * `binary` - The window's binary.
+/// * `work` - The status bar's work item, `None` when the bar has none.
 /// * `window` - Window the pane is in.
 /// * `cx` - Application context.
-fn fill(pane: &Entity<Pane>, binary: &Entity<Binary>, window: &mut Window, cx: &mut App) {
+fn fill(
+    pane: &Entity<Pane>,
+    binary: &Entity<Binary>,
+    work: Option<&Entity<Work>>,
+    window: &mut Window,
+    cx: &mut App,
+) {
     if pane.read(cx).items_len() > 0 {
         return;
     }
@@ -169,7 +181,10 @@ fn fill(pane: &Entity<Pane>, binary: &Entity<Binary>, window: &mut Window, cx: &
         focus_handle: cx.focus_handle(),
         selected: first_selected(recent),
         pane: Edges::BESIDE_RAIL,
-        _observe: cx.observe(binary, |_, _, cx| cx.notify()),
+        work: work.cloned(),
+        _observe: std::iter::once(cx.observe(binary, |_, _, cx| cx.notify()))
+            .chain(work.map(|work| cx.observe(work, |_, _, cx| cx.notify())))
+            .collect(),
     });
     pane.update(cx, |pane, cx| {
         pane.add_item(Box::new(item), false, false, None, window, cx);
@@ -450,7 +465,8 @@ impl Render for StartItem {
         let column = v_flex().w(px(COLUMN_PX)).max_w_full().gap_6();
         let binary = self.binary.read(cx);
         let column = if let Some(busy) = binary.busy() {
-            let (phase, percent) = progress_words(&binary.load_progress().snapshot());
+            let words = self.work.as_ref().map(|work| work.read(cx).load_words(cx));
+            let (phase, percent) = words.unwrap_or_default();
             let reading = v_flex()
                 .items_center()
                 .gap_2()

@@ -360,6 +360,9 @@ fn as_f32(n: usize) -> f32 {
     u16::try_from(n).map_or(f32::MAX, f32::from)
 }
 
+/// The debug selector of a gauge, followed by `-` and its percent.
+pub(crate) const GAUGE_SELECTOR: &str = "gauge";
+
 /// Returns how far a work is: a slim bar and the percent when the engine counts the
 /// phase's items, else a spinner that only says the work runs.
 ///
@@ -371,8 +374,10 @@ pub(crate) fn gauge(percent: Option<u8>, cx: &App) -> AnyElement {
     let Some(percent) = percent else {
         return spinner();
     };
-    let bar = ProgressBar::new("work-progress", f32::from(percent), 100.0, cx);
+    let bar = ProgressBar::new("work-progress", f32::from(percent), 100.0, cx)
+        .bg_color(cx.theme().colors().border);
     h_flex()
+        .debug_selector(move || format!("{GAUGE_SELECTOR}-{percent}"))
         .gap_1p5()
         .child(div().w(px(PROGRESS_BAR_PX)).child(bar))
         .child(status_label(format!("{percent}%"), Color::Muted))
@@ -399,8 +404,11 @@ pub struct Work {
     binary: Entity<Binary>,
     /// The oldest engine request seen running and when the item first saw it.
     job: Option<(u64, Instant)>,
-    /// What the item last drew of the work's progress, so a poll redraws on a change only.
+    /// What the item last drew of the work's progress, so a poll redraws on a change only;
+    /// cleared when the work ends.
     words: ProgressWords,
+    /// When the work [`Self::words`] are of started, so they show for no other work.
+    words_of: Option<Instant>,
     /// Whether the item last drew the work.
     drawn: bool,
     /// When the elapsed time was last redrawn.
@@ -434,6 +442,7 @@ impl Work {
             binary,
             job: None,
             words: (None, None),
+            words_of: None,
             drawn: false,
             redrawn: None,
             tick: None,
@@ -467,6 +476,20 @@ impl Work {
             progress,
             load: false,
         })
+    }
+
+    /// Returns the engine's phase and percent of the window's running load as the item
+    /// draws them, for the load page to show the same; none before the item shows the
+    /// load, and for any other work.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Application context reading the binary.
+    #[must_use]
+    pub fn load_words(&self, cx: &App) -> ProgressWords {
+        self.running(cx)
+            .filter(|running| running.load && self.drawn && self.words_of == Some(running.since))
+            .map_or((None, None), |_| self.words)
     }
 
     /// Starts polling the work every [`PROGRESS_POLL`] while one runs, unless a poll runs.
@@ -518,6 +541,7 @@ impl Work {
                 cx.notify();
             }
             (self.drawn, self.redrawn, self.tick) = (false, None, None);
+            (self.words, self.words_of) = ((None, None), None);
             return false;
         };
         let shown = shown_for(running.since, now).is_some();
@@ -530,11 +554,22 @@ impl Work {
             if !self.drawn || second {
                 self.redrawn = Some(now);
             }
-            (self.drawn, self.words) = (true, words);
+            (self.drawn, self.words, self.words_of) = (true, words, Some(running.since));
             cx.notify();
         }
         true
     }
+}
+
+/// Returns the work item in `workspace`'s status bar, `None` before it is added.
+///
+/// # Arguments
+///
+/// * `workspace` - The window's workspace.
+/// * `cx` - Application context reading the status bar.
+#[must_use]
+pub fn work_item(workspace: &workspace::Workspace, cx: &App) -> Option<Entity<Work>> {
+    workspace.status_bar().read(cx).item_of_type::<Work>()
 }
 
 /// Returns how long a work started at `since` has run at `now` once the work item shows
@@ -558,7 +593,7 @@ impl Render for Work {
         let Some(elapsed) = shown_for(running.since, cx.background_executor().now()) else {
             return div().into_any_element();
         };
-        let (phase, percent) = progress_words(&running.progress.snapshot());
+        let (phase, percent) = self.words;
         let binary = self.binary.clone();
         let shrinks =
             |label: Label, by: f32| div().min_w_0().flex_shrink(by).child(label.truncate());
@@ -991,8 +1026,8 @@ mod tests {
     use workspace::Workspace;
 
     use super::{
-        Address, DockSwitch, DockToggle, Grades, PROGRESS_POLL, WORK_SHOWN_AFTER, Work, grade_text,
-        progress_words, shown_for,
+        Address, DockSwitch, DockToggle, GAUGE_SELECTOR, Grades, PROGRESS_POLL, WORK_SHOWN_AFTER,
+        Work, grade_text, progress_words, shown_for,
     };
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{
@@ -1362,6 +1397,97 @@ mod tests {
             cx.run_until_parked();
             assert_eq!(states(cx)[1], Some(want));
         }
+    }
+
+    /// While a load runs, the load page shows the progress the work item draws, and moves
+    /// on with it.
+    #[gpui::test]
+    fn the_load_page_shows_the_work_items_progress(cx: &mut TestAppContext) {
+        the_load_page_shows_the_work_items_progress_steps(cx);
+    }
+
+    /// Runs the steps of [`the_load_page_shows_the_work_items_progress`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the load page shows another percent than the work item's.
+    fn the_load_page_shows_the_work_items_progress_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let work = start_load(&app, "a", cx);
+        for percent in [40, 71] {
+            report(&work, percent, cx);
+            assert!(
+                page_shows(percent, cx),
+                "the load page does not show {percent}%"
+            );
+        }
+    }
+
+    /// A load that starts as another ends shows no percent of the one before, until it
+    /// reports its own.
+    #[gpui::test]
+    fn a_new_load_shows_none_of_the_last_ones_progress(cx: &mut TestAppContext) {
+        a_new_load_shows_none_of_the_last_ones_progress_steps(cx);
+    }
+
+    /// Runs the steps of [`a_new_load_shows_none_of_the_last_ones_progress`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the second load's page shows the first one's percent.
+    fn a_new_load_shows_none_of_the_last_ones_progress_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let work = start_load(&app, "a", cx);
+        report(&work, 97, cx);
+        assert!(page_shows(97, cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(PROGRESS_POLL);
+        start_load(&app, "b", cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(
+            !page_shows(97, cx),
+            "the second load shows the first one's percent"
+        );
+        report(&work, 10, cx);
+        assert!(page_shows(10, cx));
+    }
+
+    /// Starts a load of a file that is not there, named after `name`, which runs until the
+    /// executor runs its answer, and returns the window's work item.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the status bar has no work item.
+    fn start_load(app: &AppWindow, name: &str, cx: &mut VisualTestContext) -> gpui::Entity<Work> {
+        let missing = std::env::temp_dir().join(format!("borer-app-no-such-{name}.exe"));
+        app.binary.update(cx, |binary, cx| {
+            binary.open_path(missing, cx);
+        });
+        app.workspace.read_with(cx, super::work_item).unwrap()
+    }
+
+    /// Has the work item draw `percent` of the running load, as a poll does, and draws.
+    fn report(work: &gpui::Entity<Work>, percent: u8, cx: &mut VisualTestContext) {
+        work.update(cx, |work, cx| {
+            let since = work.binary.read(cx).reading().map(|loading| loading.since);
+            work.words = (Some("analysis vtables"), Some(percent));
+            (work.words_of, work.drawn) = (since, true);
+            cx.notify();
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    /// Returns whether the load page draws a gauge at `percent`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if no start tab is drawn.
+    fn page_shows(percent: u8, cx: &mut VisualTestContext) -> bool {
+        let start = cx.debug_bounds("start-item").unwrap();
+        let gauge = cx.debug_bounds(format!("{GAUGE_SELECTOR}-{percent}").leak());
+        gauge.is_some_and(|gauge| start.contains(&gauge.center()))
     }
 
     /// The work item shows a percent only of the items the engine counts.

@@ -493,7 +493,8 @@ pub fn new_workspace(
     let app = AppWindow { workspace, binary };
     let center = app.workspace.read(cx).active_pane().clone();
     center.update(cx, |pane, _| pane.set_should_display_welcome_page(false));
-    keep_filled(&center, &app.binary, window, cx);
+    let work = crate::status::work_item(app.workspace.read(cx), cx);
+    keep_filled(&center, &app.binary, work, window, cx);
     add_search_bar(&center, window, cx);
     center.update(cx, |pane, cx| pane.focus_active_item(window, cx));
     let pane_binary = app.binary.clone();
@@ -501,9 +502,10 @@ pub fn new_workspace(
         .subscribe(
             &app.workspace,
             cx,
-            move |_, event: &workspace::Event, window, cx| {
+            move |workspace, event: &workspace::Event, window, cx| {
                 if let workspace::Event::PaneAdded(pane) = event {
-                    keep_filled(pane, &pane_binary, window, cx);
+                    let work = crate::status::work_item(workspace.read(cx), cx);
+                    keep_filled(pane, &pane_binary, work, window, cx);
                     add_search_bar(pane, window, cx);
                 }
             },
