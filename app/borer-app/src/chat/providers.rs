@@ -555,10 +555,9 @@ pub fn http(cx: &mut App) -> anyhow::Result<Arc<dyn HttpClient>> {
     if let Some(ChatHttp(http)) = cx.try_global::<ChatHttp>() {
         return Ok(http.clone());
     }
-    let http: Arc<dyn HttpClient> = Arc::new(reqwest_client::ReqwestClient::user_agent(concat!(
-        "borer-app/",
-        env!("CARGO_PKG_VERSION")
-    ))?);
+    let http: Arc<dyn HttpClient> = Arc::new(reqwest_client::ReqwestClient::user_agent(
+        &borer_front::release::user_agent("borer-app"),
+    )?);
     cx.set_global(ChatHttp(http.clone()));
     Ok(http)
 }
