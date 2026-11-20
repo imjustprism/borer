@@ -926,8 +926,8 @@ impl<K: RowKind> RowsPanel<K> {
     }
 
     /// Returns where the highlighted row is among `rows`, as the panel highlights it now:
-    /// the row of its place, the first when no row has it; a highlighted row that opens
-    /// nothing keeps its index while `rows` reach it.
+    /// the row of its place, the first when no row has it or none is highlighted; a
+    /// highlighted row that opens nothing keeps its index while `rows` reach it.
     ///
     /// # Arguments
     ///
@@ -939,7 +939,7 @@ impl<K: RowKind> RowsPanel<K> {
                 .iter()
                 .position(|row| K::place(row).as_ref() == Some(&kept))
                 .unwrap_or(0),
-            None if self.selected < rows.len() => self.selected,
+            None if self.lit && self.selected < rows.len() => self.selected,
             None => 0,
         }
     }
@@ -1417,7 +1417,9 @@ impl<K: RowKind> Render for RowsPanel<K> {
                 this.select(usize::MAX, cx);
             }))
             .on_action(cx.listener(|this, _: &menu::Confirm, window, cx| {
-                this.open_row(this.selected, TabMode::Permanent, window, cx);
+                if let Some(place) = this.selected_place() {
+                    this.open_place(place, TabMode::Permanent, window, cx);
+                }
             }))
             .size_full()
             .flex()

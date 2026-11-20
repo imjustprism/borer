@@ -253,8 +253,31 @@ mod tests {
     use crate::places::Place;
     use crate::rows_panel::Answer;
     use crate::rows_panel::RowKind as _;
+    use crate::rows_panel::Rows as _;
     use crate::rows_panel::{ENTRY_SELECTOR, HEADER_SELECTOR, ROW_SELECTOR};
     use crate::worker::Jobs;
+
+    /// Opens a window over the sample and returns it and its functions panel.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the load docks no functions panel.
+    fn listed(
+        cx: &mut TestAppContext,
+    ) -> (
+        crate::app_view::AppWindow,
+        Entity<FunctionsPanel>,
+        &mut VisualTestContext,
+    ) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        let panel = app
+            .workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
+            .unwrap();
+        (app, panel, cx)
+    }
 
     /// Opening a function in a tab highlights its row in the list, and the tab of another
     /// function highlights that one's; a function the list does not show highlights none.
@@ -269,13 +292,8 @@ mod tests {
     ///
     /// Panics if the highlighted row is not the active tab's function.
     fn the_list_selects_the_open_function_steps(cx: &mut TestAppContext) {
-        let app_state = init(cx);
-        let (app, cx) = open(&app_state, cx);
-        load_sample(&app, cx);
-        let panel = app
-            .workspace
-            .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
-            .unwrap();
+        let (app, panel, cx) = listed(cx);
+
         for entry in [CALLEE, CALLER] {
             let place = Place::decompile(entry);
             open_place(
@@ -292,6 +310,44 @@ mod tests {
         let unlisted = Ref::Function(0xdead_beef);
         panel.update(cx, |panel, cx| panel.select_subject(&unlisted, cx));
         assert_eq!(panel.read_with(cx, |panel, _| panel.selected_place()), None);
+    }
+
+    /// With the open function not in the list, the list highlights no row and Enter opens
+    /// none, not the row highlighted before.
+    #[gpui::test]
+    fn enter_opens_no_row_when_none_is_highlighted(cx: &mut TestAppContext) {
+        enter_opens_no_row_when_none_is_highlighted_steps(cx);
+    }
+
+    /// Runs the steps of [`enter_opens_no_row_when_none_is_highlighted`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if Enter opens a row.
+    fn enter_opens_no_row_when_none_is_highlighted_steps(cx: &mut TestAppContext) {
+        let (app, panel, cx) = listed(cx);
+
+        let place = Place::decompile(CALLER);
+        open_place(&app.workspace, &sample(), place, TabMode::Permanent, cx);
+        cx.run_until_parked();
+        let callee = panel.read_with(cx, |panel, _| {
+            let rows = panel.rows().unwrap().rows();
+            rows.iter().position(|row| row.entry == CALLEE).unwrap()
+        });
+        let unlisted = Ref::Function(0xdead_beef);
+        cx.update(|window, cx| {
+            panel.update(cx, |panel, cx| {
+                panel.select(callee, cx);
+                panel.select_subject(&unlisted, cx);
+                window.focus(panel.rows_focus(), cx);
+            });
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            shown(&app.workspace, cx).map(|(entry, _)| entry),
+            Some(CALLER)
+        );
     }
 
     /// The count line says how many functions show and, apart, how many are hidden.
