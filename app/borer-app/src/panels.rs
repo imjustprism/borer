@@ -21,7 +21,7 @@ pub struct PanelSpec {
     pub title: &'static str,
     /// Icon of its rail cell and dock button.
     pub icon: Glyph,
-    /// The action that shows the panel and focuses it, or moves focus back.
+    /// The action that shows the panel and focuses it, or moves focus back (the chat's hides it).
     pub toggle: &'static dyn Action,
     /// Dock the panel starts in before the person moves it.
     pub dock: DockPosition,
@@ -36,7 +36,8 @@ pub struct PanelSpec {
         fn(&mut Workspace, &Entity<Binary>, DockPosition, &mut Window, &mut Context<'_, Workspace>),
     /// Takes the panel out of its dock, when it is docked.
     pub remove: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
-    /// Shows the panel and focuses it, or moves focus back: what [`Self::toggle`] does.
+    /// What [`Self::toggle`] does: shows the panel and focuses it, or moves focus back; the
+    /// chat's hides it.
     pub focus: fn(&mut Workspace, &mut Window, &mut Context<'_, Workspace>),
     /// Returns whether the panel shows nothing older than the binary state of the given
     /// fingerprint; true while it is not docked.

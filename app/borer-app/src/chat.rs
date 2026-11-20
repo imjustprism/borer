@@ -43,7 +43,7 @@ use thread::{Chosen, Entry, Thread};
 gpui::actions!(
     borer,
     [
-        /// Shows the chat panel and focuses it, or moves focus back to the center pane.
+        /// Opens the chat panel and focuses it, or hides it when it is open; a turn keeps running.
         ToggleChat,
         /// Stops the chat's running turn: its stream and its tool calls are dropped.
         StopChat,

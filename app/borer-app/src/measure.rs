@@ -436,7 +436,8 @@ fn say(line: &str) -> anyhow::Result<()> {
 /// non-Unicode paths.
 ///
 /// `--park` opens a measurement or demo window off-screen without taking focus, so a
-/// capture never steals a keystroke from the person at the machine.
+/// capture does not take a keystroke from the person at the machine as it opens; the scroll
+/// measurements still activate their window.
 ///
 /// # Returns
 ///

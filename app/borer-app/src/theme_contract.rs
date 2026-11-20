@@ -1,7 +1,8 @@
 //! The theme contract, held by borer's own themes and checked on any theme a person imports.
 //!
-//! Text roles read on the editor and on a panel, the check grades rise with evidence and
-//! stay apart under color-vision deficiency, and every `borer.*` key is set.
+//! Text roles read on the editor and on a panel, the chrome's text also on the status bar,
+//! the title bar and a popover; the check grades rise with evidence and stay apart under
+//! color-vision deficiency; and every `borer.*` key is set.
 //!
 //! The one copy of the color maths: WCAG 2 contrast, `OKLab` distance, and the Machado
 //! (2009) simulation of deuteranopia, protanopia and tritanopia at severity 1.0.

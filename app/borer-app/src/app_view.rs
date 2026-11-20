@@ -171,7 +171,7 @@ pub fn window_options(cx: &App) -> WindowOptions {
 }
 
 /// Parks a measurement or demo window: shown at once off every screen, without taking
-/// focus, so a capture of it never steals a keystroke.
+/// focus, so opening it takes no keystroke from the person at the machine.
 ///
 /// # Arguments
 ///
