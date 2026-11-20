@@ -284,6 +284,18 @@ pub fn cycled<R>(sort: Option<Sort>, columns: &[Column<R>]) -> Option<Sort> {
     }
 }
 
+/// Where a rows panel's highlight goes when the rows it asked for come.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Then {
+    /// It stays on the place of the row highlighted then ([`RowsPanel::kept_row`]).
+    Kept,
+    /// It goes back to the first row, highlighted only if a row was.
+    First,
+    /// It goes to the first row and highlights it, as the person typed a filter, so Enter
+    /// opens the top match; none while no row matches.
+    Typed,
+}
+
 /// Why the panel shows no table, each case from what the binary and the shown rows say.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Empty {
@@ -491,7 +503,7 @@ impl<K: RowKind> RowsPanel<K> {
             cx.subscribe(&filter, |this, _, event: &EditorEvent, cx| {
                 if matches!(event, EditorEvent::BufferEdited) {
                     this.limit = PAGE_ROWS;
-                    this.request(true, cx);
+                    this.request(Then::Typed, cx);
                 }
             }),
             cx.subscribe_in(
@@ -607,7 +619,7 @@ impl<K: RowKind> RowsPanel<K> {
     pub fn toggle_columns(&mut self, cx: &mut Context<'_, Self>) {
         self.columns = self.columns.toggled();
         if self.sort.take().is_some() {
-            self.request(true, cx);
+            self.request(Then::First, cx);
         }
         self.relayout(cx);
     }
@@ -626,7 +638,7 @@ impl<K: RowKind> RowsPanel<K> {
     /// * `cx` - Panel context.
     pub fn set_sort(&mut self, sort: Option<Sort>, cx: &mut Context<'_, Self>) {
         self.sort = sort;
-        self.request(true, cx);
+        self.request(Then::First, cx);
     }
 
     /// Returns what the rows are of.
@@ -645,7 +657,7 @@ impl<K: RowKind> RowsPanel<K> {
     pub fn set_target(&mut self, target: K::Target, cx: &mut Context<'_, Self>) {
         self.target = target;
         self.limit = PAGE_ROWS;
-        self.refresh(true, cx);
+        self.refresh(Then::First, cx);
     }
 
     /// Keeps only the rows `text` filters, as typing it into the filter does.
@@ -826,7 +838,7 @@ impl<K: RowKind> RowsPanel<K> {
                         self.filter
                             .update(cx, |editor, cx| editor.set_text("", window, cx));
                     }
-                    self.refresh(true, cx);
+                    self.refresh(Then::First, cx);
                 }
                 if K::PREVIEWS {
                     self.open_row(0, TabMode::Preview, window, cx);
@@ -854,7 +866,7 @@ impl<K: RowKind> RowsPanel<K> {
         self.shown = Some(loaded);
         let held = self.rows().map_or(0, |rows| rows.rows().len());
         self.limit = self.limit.max(held);
-        self.refresh(false, cx);
+        self.refresh(Then::Kept, cx);
     }
 
     /// Asks the engine for the rows the panel's state shows now when the panel is open,
@@ -862,11 +874,11 @@ impl<K: RowKind> RowsPanel<K> {
     ///
     /// # Arguments
     ///
-    /// * `reset` - Whether the highlight goes back to the first row when the answer comes.
+    /// * `then` - Where the highlight goes when the answer comes.
     /// * `cx` - Panel context.
-    fn refresh(&mut self, reset: bool, cx: &mut Context<'_, Self>) {
+    fn refresh(&mut self, then: Then, cx: &mut Context<'_, Self>) {
         if self.active {
-            self.request(reset, cx);
+            self.request(then, cx);
         } else {
             self.filter_job.stop();
             self.stale = true;
@@ -879,10 +891,9 @@ impl<K: RowKind> RowsPanel<K> {
     ///
     /// # Arguments
     ///
-    /// * `reset` - Whether the highlight goes back to the first row when the answer comes,
-    ///   else it stays on the place of the row highlighted then ([`Self::kept_row`]).
+    /// * `then` - Where the highlight goes when the answer comes.
     /// * `cx` - Panel context spawning the request.
-    fn request(&mut self, reset: bool, cx: &mut Context<'_, Self>) {
+    fn request(&mut self, then: Then, cx: &mut Context<'_, Self>) {
         let Some(loaded) = self.shown.clone() else {
             return;
         };
@@ -913,13 +924,16 @@ impl<K: RowKind> RowsPanel<K> {
         };
         self.filter_job
             .run(K::FILTERING, cx, work, move |panel, rows, cx| {
-                let selected = if reset { 0 } else { panel.kept_row(&rows) };
+                match then {
+                    Then::Kept => panel.selected = panel.kept_row(&rows),
+                    Then::First => panel.selected = 0,
+                    Then::Typed => (panel.selected, panel.lit) = (0, !rows.rows().is_empty()),
+                }
                 panel.rows = Some(Filtered {
                     query,
                     rows,
                     revision,
                 });
-                panel.selected = selected;
                 panel.scroll_to_selected(cx);
                 panel.relayout(cx);
             });
@@ -959,7 +973,7 @@ impl<K: RowKind> RowsPanel<K> {
         let more = len < shown.total() && len == self.limit && self.sort.is_none();
         if more && !self.filter_job.is_running() && end.saturating_add(PAGE_ROWS / 4) >= len {
             self.limit = self.limit.saturating_add(PAGE_ROWS);
-            self.request(false, cx);
+            self.request(Then::Kept, cx);
         }
     }
 
@@ -1582,7 +1596,7 @@ impl<K: RowKind> Panel for RowsPanel<K> {
             self.filter_job.stop();
             self.stale = true;
         } else if active && self.stale {
-            self.request(true, cx);
+            self.request(Then::First, cx);
         }
     }
 }
@@ -1848,7 +1862,7 @@ pub(crate) mod tests {
         let (app, cx) = open(&app_state, cx);
         let panel = panel_of::<Exports>(&app.workspace, &sample(), cx);
         panel.update(cx, |panel, cx| {
-            panel.request(false, cx);
+            panel.request(super::Then::Kept, cx);
             for _ in 0..2 {
                 panel.select(panel.selected().map_or(0, |row| row + 1), cx);
             }

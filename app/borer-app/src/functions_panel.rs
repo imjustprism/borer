@@ -398,6 +398,41 @@ mod tests {
         );
     }
 
+    /// With no row highlighted, typing a filter highlights the first match, so Enter opens
+    /// it, as in any picker.
+    #[gpui::test]
+    fn enter_after_typing_a_filter_opens_the_first_match(cx: &mut TestAppContext) {
+        enter_after_typing_a_filter_opens_the_first_match_steps(cx);
+    }
+
+    /// Runs the steps of [`enter_after_typing_a_filter_opens_the_first_match`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if Enter opens anything but the first match.
+    fn enter_after_typing_a_filter_opens_the_first_match_steps(cx: &mut TestAppContext) {
+        let (app, panel, cx) = unlit(cx);
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_filter(CALLEE_FILTER, window, cx);
+        });
+        cx.run_until_parked();
+        let first = panel.read_with(cx, |panel, _| panel.rows().unwrap().rows()[0].entry);
+        assert_eq!(first, CALLEE);
+        cx.update(|window, cx| {
+            let rows = panel.read(cx).rows_focus().clone();
+            window.focus(&rows, cx);
+        });
+        cx.dispatch_action(menu::Confirm);
+        cx.run_until_parked();
+        assert_eq!(
+            shown(&app.workspace, cx).map(|(entry, _)| entry),
+            Some(CALLEE)
+        );
+    }
+
+    /// A filter the sample's callee matches first.
+    const CALLEE_FILTER: &str = "1030";
+
     /// The count line says how many functions show and, apart, how many are hidden.
     ///
     /// The hidden count's tooltip names the import thunks and exception funclets and the
