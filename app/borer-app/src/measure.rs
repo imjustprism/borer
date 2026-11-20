@@ -14,6 +14,7 @@ mod drop;
 mod input;
 mod scroll;
 mod stage;
+mod start_demo;
 mod tree;
 mod watch;
 
@@ -255,6 +256,9 @@ pub enum CliMode {
     /// Opens `<path>` (default notepad) and opens each inline editor over it, printing
     /// `ANNOTATE_STAGE <name>` at each state worth a screenshot, then `ANNOTATE_DONE`.
     AnnotateDemo(PathBuf),
+    /// Opens a few system binaries one after another so the recent list holds them, closes
+    /// the last, and shows the start page, printing `START_STAGE start`, then `START_DONE`.
+    StartDemo,
 }
 
 impl CliMode {
@@ -270,7 +274,8 @@ impl CliMode {
             | Self::Measure(_)
             | Self::MeasureDrop(..)
             | Self::ChatDemo(_)
-            | Self::AnnotateDemo(_) => false,
+            | Self::AnnotateDemo(_)
+            | Self::StartDemo => false,
         }
     }
 }
@@ -339,7 +344,8 @@ pub fn evaluate_one_shot(
         | CliMode::Measure(_)
         | CliMode::MeasureDrop(..)
         | CliMode::ChatDemo(_)
-        | CliMode::AnnotateDemo(_) => OneShotAction::Wait,
+        | CliMode::AnnotateDemo(_)
+        | CliMode::StartDemo => OneShotAction::Wait,
     }
 }
 
@@ -515,6 +521,7 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
         Some("--chat-demo") => Ok(CliMode::ChatDemo(path_or_notepad())),
         Some("--measure-memory") => Ok(CliMode::MeasureMemory(path_or_notepad())),
         Some("--annotate-demo") => Ok(CliMode::AnnotateDemo(path_or_notepad())),
+        Some("--start-demo") => Ok(CliMode::StartDemo),
         Some("--measure-drop") => {
             let p = args
                 .get(1)
@@ -888,7 +895,8 @@ impl Harness {
             CliMode::FirstFrame
             | CliMode::Headless(_)
             | CliMode::Measure(_)
-            | CliMode::MeasureDrop(..) => None,
+            | CliMode::MeasureDrop(..)
+            | CliMode::StartDemo => None,
         };
         cx.set_global(FixedSources::default());
         let app = new_workspace(app_state, path, window, cx);
@@ -924,7 +932,8 @@ impl Harness {
             | CliMode::MeasureMemory(_)
             | CliMode::MeasureDrop(..)
             | CliMode::ChatDemo(_)
-            | CliMode::AnnotateDemo(_) => None,
+            | CliMode::AnnotateDemo(_)
+            | CliMode::StartDemo => None,
         };
         let mut harness = Self {
             root,
@@ -953,15 +962,26 @@ impl Harness {
         if let Some(phase) = phase {
             harness.begin(phase, window, cx);
         }
-        if matches!(harness.mode, CliMode::ChatDemo(_)) {
-            cx.on_next_frame(window, |this, window, cx| this.chat_demo(window, cx));
-        }
-        if matches!(harness.mode, CliMode::AnnotateDemo(_)) {
-            cx.on_next_frame(window, |this, window, cx| this.annotate_demo(window, cx));
-        }
-        if let CliMode::MeasureDrop(dir, binary) = &harness.mode {
-            let (dir, binary) = (dir.clone(), binary.clone());
-            cx.on_next_frame(window, move |this, _, cx| this.drop_folder(dir, binary, cx));
+        match &harness.mode {
+            CliMode::ChatDemo(_) => cx.on_next_frame(window, |this, window, cx| {
+                this.run_demo("chat demo", chat_demo::demo, window, cx);
+            }),
+            CliMode::StartDemo => cx.on_next_frame(window, |this, window, cx| {
+                this.run_demo("start demo", start_demo::demo, window, cx);
+            }),
+            CliMode::AnnotateDemo(_) => cx.on_next_frame(window, |this, window, cx| {
+                this.run_demo("annotate demo", annotate_demo::demo, window, cx);
+            }),
+            CliMode::MeasureDrop(dir, binary) => {
+                let (dir, binary) = (dir.clone(), binary.clone());
+                cx.on_next_frame(window, move |this, _, cx| this.drop_folder(dir, binary, cx));
+            }
+            CliMode::Interactive(_)
+            | CliMode::FirstFrame
+            | CliMode::ReportOpen(_)
+            | CliMode::Headless(_)
+            | CliMode::MeasureMemory(_)
+            | CliMode::Measure(_) => {}
         }
         harness
     }

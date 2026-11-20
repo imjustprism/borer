@@ -118,24 +118,6 @@ fn reply(text: &str, uses: &[(&str, &str, Value)]) -> Reply {
     Reply::Now(events)
 }
 
-impl Harness {
-    /// Runs the chat demo once the binary is open.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - The harness's window.
-    /// * `cx` - Harness context.
-    pub(super) fn chat_demo(&mut self, window: &gpui::Window, cx: &mut gpui::Context<'_, Self>) {
-        let exit = self.exit.clone();
-        self.task = Some(cx.spawn_in(window, async move |this, cx| {
-            if let Err(err) = demo(&this, cx).await {
-                *exit.borrow_mut() = Some(err.context("chat demo"));
-            }
-            cx.update(|_, cx| cx.quit()).unwrap_or(());
-        }));
-    }
-}
-
 /// Waits until `done` holds of the thread, polling.
 ///
 /// # Errors
@@ -446,7 +428,10 @@ async fn cards(panel: &Entity<ChatPanel>, cx: &mut AsyncWindowContext) -> anyhow
 /// # Errors
 ///
 /// When the window is gone, the binary never opens, a turn never ends, or stdout fails.
-async fn demo(this: &WeakEntity<Harness>, cx: &mut AsyncWindowContext) -> anyhow::Result<()> {
+pub(super) async fn demo(
+    this: &WeakEntity<Harness>,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<()> {
     let (entry, others) = addresses(this, cx).await?;
     let panel = this.update_in(cx, |h, window, cx| {
         h.workspace

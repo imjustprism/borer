@@ -3,9 +3,9 @@
 
 use std::time::Duration;
 
-use gpui::AsyncApp;
+use gpui::{AsyncApp, AsyncWindowContext, Context, WeakEntity, Window};
 
-use super::say;
+use super::{Harness, say};
 
 /// How long each stage stays on screen for its capture.
 const HOLD: Duration = Duration::from_secs(4);
@@ -56,4 +56,32 @@ pub(super) async fn poll<T>(
         cx.background_executor().timer(POLL).await;
     }
     anyhow::bail!("{what} never came")
+}
+
+impl Harness {
+    /// Runs `demo` in the harness's window, keeps its error, named for `name`, for the
+    /// exit status, and quits the app once it ends.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - What the demo is called in its error (`annotate demo`).
+    /// * `demo` - The demo's steps.
+    /// * `window` - The harness's window.
+    /// * `cx` - Harness context.
+    pub(super) fn run_demo(
+        &mut self,
+        name: &'static str,
+        demo: impl AsyncFnOnce(&WeakEntity<Self>, &mut AsyncWindowContext) -> anyhow::Result<()>
+        + 'static,
+        window: &Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let exit = self.exit.clone();
+        self.task = Some(cx.spawn_in(window, async move |this, cx| {
+            if let Err(err) = demo(&this, cx).await {
+                *exit.borrow_mut() = Some(err.context(name));
+            }
+            cx.update(|_, cx| cx.quit()).unwrap_or(());
+        }));
+    }
 }

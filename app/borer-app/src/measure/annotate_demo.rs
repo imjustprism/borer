@@ -24,28 +24,6 @@ use borer_engine::view::Ref;
 /// The word this demo's stages are said with.
 const ANNOTATE: &str = "ANNOTATE";
 
-impl Harness {
-    /// Runs the annotating demo once the binary is open.
-    ///
-    /// # Arguments
-    ///
-    /// * `window` - The harness's window.
-    /// * `cx` - Harness context.
-    pub(super) fn annotate_demo(
-        &mut self,
-        window: &gpui::Window,
-        cx: &mut gpui::Context<'_, Self>,
-    ) {
-        let exit = self.exit.clone();
-        self.task = Some(cx.spawn_in(window, async move |this, cx| {
-            if let Err(err) = demo(&this, cx).await {
-                *exit.borrow_mut() = Some(err.context("annotate demo"));
-            }
-            cx.update(|_, cx| cx.quit()).unwrap_or(());
-        }));
-    }
-}
-
 /// Polls `found` until it gives a value.
 ///
 /// # Errors
@@ -189,7 +167,10 @@ async fn enter(
 /// # Errors
 ///
 /// When the window is gone, a wait gives up or stdout fails.
-async fn demo(this: &WeakEntity<Harness>, cx: &mut AsyncWindowContext) -> anyhow::Result<()> {
+pub(super) async fn demo(
+    this: &WeakEntity<Harness>,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<()> {
     let entry = until("the binary", this, cx, |h, cx| {
         let loaded = h.binary.read(cx).loaded()?;
         let calls = |e: &u64| {
