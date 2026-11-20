@@ -8,7 +8,7 @@
 use std::any::Any;
 
 use gpui::{
-    Action, AnyElement, App, AppContext as _, Bounds, Context, Entity, EventEmitter, FocusHandle,
+    Action, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle,
     Focusable, InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels,
     Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
     canvas, div, px, svg,
@@ -28,6 +28,7 @@ use crate::binary::{Binary, reading_label};
 use crate::recent::{RecentBinary, SHOWN_MAX};
 use crate::rows_panel::{Rows, row_keys};
 use crate::status::{gauge, progress_words, spinner};
+use crate::title_bar::MARK_CELL_PX;
 
 /// Side in logical pixels of the borer mark beside the greeting.
 const MARK_PX: f32 = 40.0;
@@ -67,8 +68,9 @@ pub struct StartItem {
     focus_handle: FocusHandle,
     /// Index of the highlighted row: the [`STARTS`] rows, then the recent ones.
     selected: usize,
-    /// Where the tab was laid out in the window last frame, which the column centres by.
-    pane: Option<Bounds<Pixels>>,
+    /// How far the tab sits from the window's left and right edges, as laid out last frame:
+    /// the rail and any docks, which a resize of the window does not move.
+    pane: Edges,
     /// Repaints the tab when the binary starts or ends a load.
     _observe: Subscription,
 }
@@ -166,7 +168,7 @@ fn fill(pane: &Entity<Pane>, binary: &Entity<Binary>, window: &mut Window, cx: &
         binary: binary.clone(),
         focus_handle: cx.focus_handle(),
         selected: first_selected(recent),
-        pane: None,
+        pane: Edges::BESIDE_RAIL,
         _observe: cx.observe(binary, |_, _, cx| cx.notify()),
     });
     pane.update(cx, |pane, cx| {
@@ -477,14 +479,20 @@ impl Render for StartItem {
                 .child(self.render_starts(cx))
                 .children(self.render_recent(cx))
         };
-        let (left, right) = self.pane.map_or((px(0.0), px(0.0)), |pane| {
-            centring(window.viewport_size().width, pane.origin.x, pane.size.width)
-        });
+        let width = window.viewport_size().width;
+        let Edges { left, right } = self.pane;
+        let (left, right) = centring(width, left, width - left - right);
         let item = cx.entity().downgrade();
         let watch = canvas(
             move |bounds, window, cx| {
+                let edges = Edges {
+                    left: bounds.origin.x,
+                    right: window.viewport_size().width - bounds.right(),
+                };
                 let moved = item.upgrade().is_some_and(|item| {
-                    item.update(cx, |item, _| item.pane.replace(bounds) != Some(bounds))
+                    item.update(cx, |item, _| {
+                        std::mem::replace(&mut item.pane, edges) != edges
+                    })
                 });
                 if moved {
                     window.defer(cx, |window, _| window.refresh());
@@ -530,6 +538,27 @@ impl Render for StartItem {
     }
 }
 
+/// How far a start tab sits from the window's edges, in logical pixels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Edges {
+    /// From the window's left edge to the tab's.
+    left: Pixels,
+    /// From the tab's right edge to the window's.
+    right: Pixels,
+}
+
+impl Edges {
+    /// Where a start tab sits before it is laid out: right of the rail with no dock open, as
+    /// in a window with no binary loaded, whose first frame is then centred already. A start
+    /// tab beside an open dock, after a loaded binary's last tab closes, or in a split's
+    /// right pane draws its first frame off by the dock or the pane left of it, and the
+    /// frame its measure asks for centres it.
+    const BESIDE_RAIL: Self = Self {
+        left: px(MARK_CELL_PX),
+        right: px(0.0),
+    };
+}
+
 /// Returns the highlighted row a new start tab begins on: the first binary opened before,
 /// so Enter opens it, else Open File.
 ///
@@ -571,7 +600,7 @@ mod tests {
     use command_palette::CommandPalette;
     use gpui::{TestAppContext, px};
 
-    use super::{COLUMN_PX, SIDE_PX, STARTS, StartItem, centring, first_selected};
+    use super::{COLUMN_PX, Edges, SIDE_PX, STARTS, StartItem, centring, first_selected};
     use crate::app_view::tests::{init, open};
     use crate::rows_panel::Rows as _;
 
@@ -582,6 +611,33 @@ mod tests {
         assert_eq!(first_selected(0), 0);
         assert_eq!(first_selected(1), STARTS.len());
         assert_eq!(first_selected(5), STARTS.len());
+    }
+
+    /// A new window's start tab is centred from its first frame: the edges it lays out at
+    /// are the ones it assumed, so it asks for no second frame.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the first frame measures other edges than the tab assumed.
+    #[gpui::test]
+    fn the_first_frame_is_centred_already(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        let start = app
+            .workspace
+            .read_with(cx, |workspace, cx| {
+                workspace.active_item_as::<StartItem>(cx)
+            })
+            .unwrap();
+        assert_eq!(
+            start.read_with(cx, |start, _| start.pane),
+            Edges::BESIDE_RAIL
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            start.read_with(cx, |start, _| start.pane),
+            Edges::BESIDE_RAIL
+        );
     }
 
     /// Enter on an action row runs its action: the palette row opens the command palette.
