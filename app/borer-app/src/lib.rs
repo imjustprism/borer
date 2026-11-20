@@ -73,7 +73,7 @@ use crate::worker::mark_ui_thread;
 /// (`--headless`, `--report-open`, `--measure-memory`, `--measure`) fails to load or
 /// measure its target binary.
 pub fn run() -> anyhow::Result<()> {
-    let (mode, given_dir) = parse_cli_args()?;
+    let (mode, given_dir, park) = parse_cli_args()?;
     if let CliMode::Headless(path) = mode {
         return run_headless(path);
     }
@@ -92,7 +92,10 @@ pub fn run() -> anyhow::Result<()> {
         .run(move |cx: &mut App| {
             mark_ui_thread();
             let opened = app_view::init(cx).and_then(|app_state| {
-                let options = app_view::window_options(cx);
+                let mut options = app_view::window_options(cx);
+                if park {
+                    app_view::park(&mut options);
+                }
                 let harness_slot = app_slot.clone();
                 match mode {
                     CliMode::Interactive(path) => {
@@ -111,7 +114,12 @@ pub fn run() -> anyhow::Result<()> {
                                 Harness::new(measured, harness_slot, &app_state, window, cx)
                             })
                         })
-                        .and_then(|window| app_view::activate(window.into(), cx)),
+                        .and_then(|window| {
+                            if park {
+                                return Ok(());
+                            }
+                            app_view::activate(window.into(), cx)
+                        }),
                 }
             });
             if let Err(err) = opened {

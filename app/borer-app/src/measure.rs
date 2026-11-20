@@ -431,20 +431,31 @@ fn say(line: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Parses `std::env::args_os` into a [`CliMode`] and the data directory a leading
-/// `--data-dir <dir>` names, without panicking on non-Unicode paths.
+/// Parses `std::env::args_os` into a [`CliMode`], the data directory a leading
+/// `--data-dir <dir>` names and whether `--park` follows it, without panicking on
+/// non-Unicode paths.
+///
+/// `--park` opens a measurement or demo window off-screen without taking focus, so a
+/// capture never steals a keystroke from the person at the machine.
 ///
 /// # Returns
 ///
-/// The parsed [`CliMode`] and the data directory, `None` when none is named.
+/// The parsed [`CliMode`], the data directory (`None` when none is named) and whether to
+/// park the window.
 ///
 /// # Errors
 ///
-/// Returns an error when a flag requiring a `<path>` or `--phase` value omits it.
-pub fn parse_cli_args() -> anyhow::Result<(CliMode, Option<PathBuf>)> {
+/// Returns an error when a flag requiring a `<path>` or `--phase` value omits it, or
+/// `--park` is given for the interactive window.
+pub fn parse_cli_args() -> anyhow::Result<(CliMode, Option<PathBuf>, bool)> {
     let args: Vec<OsString> = std::env::args_os().skip(1).collect();
     let (data_dir, rest) = split_data_dir(&args)?;
-    Ok((parse_cli_args_os(rest)?, data_dir))
+    let park = rest.first().and_then(|first| first.to_str()) == Some("--park");
+    let mode = parse_cli_args_os(rest.get(usize::from(park)..).unwrap_or_default())?;
+    if park && mode.is_interactive() {
+        anyhow::bail!("--park is for the measure and demo modes, not the interactive window");
+    }
+    Ok((mode, data_dir, park))
 }
 
 /// Splits a leading `--data-dir <dir>` off `args`.

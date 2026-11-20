@@ -170,6 +170,23 @@ pub fn window_options(cx: &App) -> WindowOptions {
     }
 }
 
+/// Parks a measurement or demo window: shown at once off every screen, without taking
+/// focus, so a capture of it never steals a keystroke.
+///
+/// # Arguments
+///
+/// * `options` - The window's options, from [`window_options`].
+pub fn park(options: &mut WindowOptions) {
+    let parked = size(px(WINDOW_WIDTH_PX), px(WINDOW_HEIGHT_PX));
+    let origin = point(px(-PARKED_PX), px(0.0));
+    options.window_bounds = Some(WindowBounds::Windowed(Bounds::new(origin, parked)));
+    options.show = true;
+    options.focus = false;
+}
+
+/// How far left of the screens a parked window opens, in logical pixels.
+const PARKED_PX: f32 = 6000.0;
+
 /// Returns the app icon at 128 px, the window icon GPUI sets on X11.
 ///
 /// Other platforms take their window icon elsewhere: Windows from the icon resource
