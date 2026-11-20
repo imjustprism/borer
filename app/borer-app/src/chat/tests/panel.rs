@@ -497,6 +497,46 @@ fn a_code_block_keeps_its_scroll_across_frames(cx: &mut TestAppContext) {
     assert_eq!(after.left(), scrolled.left());
 }
 
+/// Returns how far below a code block's last line its sideways block ends, after
+/// `reply` is drawn twice, so the block knows whether its lines overflow.
+fn room_under_code(reply: &str, cx: &mut TestAppContext) -> gpui::Pixels {
+    use crate::chat::view::{CODE_SELECTOR, SIDEWAYS_SELECTOR};
+    let (panel, _, cx) = replied(reply, true, cx);
+    panel.update(cx, |_, cx| cx.notify());
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let lines = cx.debug_bounds(CODE_SELECTOR).unwrap();
+    let block = cx.debug_bounds(SIDEWAYS_SELECTOR).unwrap();
+    block.bottom() - lines.bottom()
+}
+
+/// A code block whose lines run wider than it keeps its sideways scrollbar under the last
+/// line, in a track of its own.
+#[gpui::test]
+fn a_wide_code_block_keeps_its_scrollbar_under_the_last_line(cx: &mut TestAppContext) {
+    let long = format!(
+        "```c
+int f(void) {{ return g({}); }}
+```
+",
+        "a + ".repeat(80)
+    );
+    let room = room_under_code(&long, cx);
+    assert!(room >= gpui::px(14.0), "{room:?}");
+}
+
+/// A code block whose lines fit keeps no room for a scrollbar under them.
+#[gpui::test]
+fn a_narrow_code_block_keeps_no_scrollbar_room(cx: &mut TestAppContext) {
+    let room = room_under_code(
+        "```c
+int f(void);
+```
+",
+        cx,
+    );
+    assert_eq!(room, gpui::px(0.0));
+}
+
 /// Hiding the panel does not stop a turn: a reply streamed while it is hidden is whole
 /// when it is shown again, with no stopped receipt; and a message held for agreement stays
 /// held while hidden and sends nothing.

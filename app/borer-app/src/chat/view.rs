@@ -50,6 +50,9 @@ pub(crate) const SEND_SELECTOR: &str = "chat-send-held";
 /// Debug selector of a code block's lines, the part that scrolls sideways, for layout tests.
 pub(crate) const CODE_SELECTOR: &str = "chat-code-lines";
 
+/// The debug selector of a block that scrolls sideways, its scrollbar's track included.
+pub(crate) const SIDEWAYS_SELECTOR: &str = "chat-sideways";
+
 /// Debug selector of an opened tool call's Output heading, for layout tests.
 pub(crate) const OUTPUT_SELECTOR: &str = "chat-call-output";
 
@@ -346,24 +349,32 @@ pub(crate) fn input_note(call: &Call) -> Option<String> {
 /// Returns `content` in a block that scrolls sideways under the stable `id`, with Zed's
 /// scrollbar shown while it scrolls.
 ///
+/// The scrollbar has a track of its own under the last line when the content is wider
+/// than the block, and no track when it is not.
+///
 /// # Arguments
 ///
 /// * `id` - The block's id, the same every frame, which keeps its scroll.
 /// * `content` - What it holds, its lines never wrapped.
+/// * `track` - The track's color: the block's background.
 /// * `window` - Window it is drawn in.
 /// * `cx` - App context.
 fn sideways(
     id: impl Into<ElementId>,
     content: impl IntoElement,
+    track: gpui::Hsla,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) -> gpui::Stateful<gpui::Div> {
     ui::WithScrollbar::custom_scrollbars(
         h_flex()
+            .debug_selector(|| SIDEWAYS_SELECTOR.to_owned())
             .w_full()
             .items_start()
             .child(div().flex_none().min_w_full().child(content)),
-        ui::Scrollbars::new(ui::ScrollAxes::Horizontal).id(id),
+        ui::Scrollbars::new(ui::ScrollAxes::Horizontal)
+            .id(id)
+            .with_track_along(ui::ScrollAxes::Horizontal, track),
         window,
         cx,
     )
@@ -1087,7 +1098,7 @@ fn prose(
                     .border_color(border)
                     .bg(code_bg)
                     .overflow_hidden()
-                    .child(sideways(id, body, window, cx))
+                    .child(sideways(id, body, code_bg, window, cx))
                     .into_any_element()
             }
         });
@@ -1196,8 +1207,9 @@ fn details(
         ),
     };
     let answered = matches!(call.ran, Ran::Answered { .. });
-    let input = sideways(("chat-call-input", call.entry), input, window, cx);
-    let answer = sideways(("chat-call-output", call.entry), answer, window, cx);
+    let track = cx.theme().colors().editor_background;
+    let input = sideways(("chat-call-input", call.entry), input, track, window, cx);
+    let answer = sideways(("chat-call-output", call.entry), answer, track, window, cx);
     let unseen = (unseen > 0).then(|| small(format!("{} more", size_of(unseen)), Color::Muted));
     let colors = cx.theme().colors();
     v_flex()
