@@ -1230,6 +1230,11 @@ fn no_spelling_of_the_close_ends_the_fence() {
 /// tool descriptions or the `# next:` lines of `function_summary` and `decompile` name is
 /// answered, `borer://help` among them, listing what `query` reads; only a resource the
 /// MCP server alone holds is refused, by name with the catalog's reason.
+///
+/// The steps are read on a fixed x64 image
+/// ([`crate::code_view::tests::stepped_program`]), not the test's own executable:
+/// the engine draws `# next:` steps for x86 functions only, so on an arm64 host the test's
+/// own functions draw none.
 #[test]
 fn the_model_is_pointed_only_at_what_the_chat_has() {
     let system = super::thread::SYSTEM.as_str();
@@ -1238,8 +1243,8 @@ fn the_model_is_pointed_only_at_what_the_chat_has() {
         let a_tool = borer_front::tools::tool(word).is_some() || server_only(word).is_some();
         assert!(!a_tool || offered.contains(&word), "{word}");
     }
-    let exe = std::env::current_exe().unwrap();
-    let loaded = load_binary_blocking(exe, &Sources::default(), Vec::new()).unwrap();
+    let (program, analysis, overlay) = crate::code_view::tests::stepped_program();
+    let loaded = crate::app_view::tests::loaded_of(program, analysis, overlay);
     let help = super::tools::answer(&loaded, "query", json!({ "uri": "borer://help" }));
     let help = help.0.unwrap();
     assert!(help.contains("\nborer://triage\t"), "{help}");
@@ -1248,19 +1253,23 @@ fn the_model_is_pointed_only_at_what_the_chat_has() {
     }
     assert!(!help.contains("borer://grep"), "{help}");
     let descriptions: String = TOOLS.iter().map(|t| t.description).collect();
-    let next: String = loaded.initial_rows.rows[..40]
+    let next: String = loaded
+        .initial_rows
+        .rows
         .iter()
         .flat_map(|row| ["function_summary", "decompile"].map(|tool| (tool, row.entry)))
         .map(|(tool, entry)| {
             let address = json!({ "address": format!("{entry:#x}") });
             let said = super::tools::answer(&loaded, tool, address)
                 .0
-                .unwrap_or_default();
+                .unwrap_or_else(|why| panic!("{tool} {entry:#x}: {why}"));
             let lines = said.lines().filter(|l| l.starts_with("# next:"));
             lines.map(|l| format!("{l}\n")).collect::<String>()
         })
         .collect();
-    assert!(next.contains("borer://"), "{next}");
+    for step in ["borer://solve/", "borer://emulate/", "borer://layout/"] {
+        assert!(next.contains(step), "{step}: {next}");
+    }
     let said = format!("{system}{descriptions}{next}");
     for named in said.split("borer://").skip(1) {
         let name: String = named

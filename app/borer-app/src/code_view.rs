@@ -449,6 +449,42 @@ pub(crate) mod tests {
 
     use super::{ClickOutcome, CodeLines, CodePalette, ROLES, Role, describe, resolve_ref_click};
 
+    /// Builds a small x64 program whose three functions each draw a `# next:` step.
+    ///
+    /// A test that reads those steps reads the same ones on every host: a serial check
+    /// (`solve`), a byte-mixing loop (`emulate`) and fields read through a pointer
+    /// (`layout`).
+    pub(crate) fn stepped_program() -> (Program, Analysis, Overlay) {
+        const BASE: u64 = 0x40_1000;
+        let routines: [&[u8]; 3] = [
+            // ASM: cmp ecx, 0x1337abcd ; sete al ; ret
+            &[0x81, 0xf9, 0xcd, 0xab, 0x37, 0x13, 0x0f, 0x94, 0xc0, 0xc3],
+            // ASM: xor eax, eax ; xor byte [rcx+rax], 0x5a ; inc rax ; cmp rax, 0x10 ; jb -13 ; ret
+            &[
+                0x31, 0xc0, 0x80, 0x34, 0x01, 0x5a, 0x48, 0xff, 0xc0, 0x48, 0x83, 0xf8, 0x10, 0x72,
+                0xf3, 0xc3,
+            ],
+            // ASM: mov eax, [rcx+8] ; add eax, [rcx+0x10] ; add eax, [rcx+0x18] ; ret
+            &[0x8b, 0x41, 0x08, 0x03, 0x41, 0x10, 0x03, 0x41, 0x18, 0xc3],
+        ];
+        let mut bytes = vec![0xcc; 0x60];
+        let mut symbols = Vec::new();
+        let places = [(0, BASE), (0x20, BASE + 0x20), (0x40, BASE + 0x40)];
+        for (n, (code, (off, addr))) in routines.iter().zip(places).enumerate() {
+            bytes[off..off + code.len()].copy_from_slice(code);
+            symbols.push(Symbol {
+                name: format!("routine{n}"),
+                addr,
+                kind: SymbolKind::Export,
+            });
+        }
+        let text = Section::mapped(".text", BASE, 0, 0x60, false, true);
+        let mut program = Program::raw(bytes, Arch::X86_64, 0, Some(BASE), vec![text]);
+        program.symbols = symbols;
+        let analysis = Analysis::compute(&program);
+        (program, analysis, Overlay::default())
+    }
+
     /// Builds a small multi-function x86-64 program exercising calls, branches,
     /// labels, strings, and globals.
     pub(crate) fn sample_program() -> (Program, Analysis, Overlay) {
