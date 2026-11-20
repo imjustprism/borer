@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use borer_engine::analysis::edit::{Edit, Force};
 use borer_engine::view::Ref;
-use gpui::{Entity, Focusable as _, TestAppContext, VisualTestContext};
+use gpui::{Entity, Focusable as _, Pixels, TestAppContext, VisualTestContext, px};
 use workspace::Workspace;
 
 use super::{Annotator, Ask};
@@ -1053,3 +1053,89 @@ fn an_accepted_proposal_is_undone_as_the_models(cx: &mut TestAppContext) {
     });
     assert_eq!(authors, [model, Author::Person]);
 }
+
+/// Returns the buffer column a click at `x` on `row` of `tab` puts the cursor on, as the
+/// editor's own hit test maps the point through its scroll.
+fn column_under(
+    tab: &Entity<DecompileItem>,
+    row: usize,
+    x: Pixels,
+    cx: &mut VisualTestContext,
+) -> usize {
+    let at = tab.update_in(cx, |item, window, cx| item.pixel_of((row, 0), window, cx));
+    cx.simulate_click(gpui::point(x, at.unwrap().y), gpui::Modifiers::none());
+    tab.read_with(cx, |item, cx| item.cursor(cx)).unwrap().1
+}
+
+/// With the code scrolled right, the inline editor opens under its token, and stays under it
+/// when a wider window clamps the scroll back with no scroll event.
+///
+/// # Panics
+///
+/// Panics if the wider window does not clamp the scroll, or a click at the inline editor's
+/// left edge lands off the start of the token it edits. The second draw after the resize is
+/// the one the inline editor asks for when its host's width changes.
+#[gpui::test]
+fn the_inline_editor_stays_under_its_token_as_the_scroll_clamps(cx: &mut TestAppContext) {
+    let (workspace, binary, cx) = window(cx);
+    cx.dispatch_action(workspace::ToggleLeftDock);
+    cx.update(|_, cx| {
+        gpui::BorrowAppContext::update_global(cx, |store: &mut settings::SettingsStore, cx| {
+            store.update_user_settings(cx, |content| {
+                content.theme.buffer_font_size = Some(settings::FontSize(FONT_PX));
+            });
+        });
+    });
+    cx.simulate_resize(gpui::size(px(NARROW_PX), px(600.0)));
+    let caller = tab(&workspace, &binary, Place::decompile(CALLER), cx);
+    on(&caller, &Ref::Function(CALLEE), cx);
+    let (row, col) = caller.read_with(cx, |item, cx| item.cursor(cx)).unwrap();
+    let scroll = |cx: &mut VisualTestContext| {
+        caller.update_in(cx, |item, _, cx| {
+            item.editor()
+                .update(cx, |code, cx| code.scroll_position(cx).x)
+        })
+    };
+    caller.update_in(cx, |item, window, cx| {
+        let far = gpui::point(1000.0, 0.0);
+        item.editor()
+            .update(cx, |code, cx| code.set_scroll_position(far, window, cx));
+    });
+    settle(cx);
+    ask(&caller, Ask::Rename, cx);
+    let opened = scroll(cx);
+    cx.simulate_resize(gpui::size(px(WIDE_PX), px(600.0)));
+    settle(cx);
+    settle(cx);
+    let wide = scroll(cx);
+    assert!(
+        wide >= 2.0 && opened - wide >= 1.0,
+        "scrolled {opened} then {wide} columns"
+    );
+    let left = cx
+        .debug_bounds(crate::decompile_item::INLINE_SELECTOR)
+        .unwrap()
+        .left();
+    let span = caller.read_with(cx, |item, _| {
+        let (view, line) = item.code().unwrap().get(row).unwrap();
+        view.tokens(line)
+            .find(|(span, ..)| span.contains(&col))
+            .unwrap()
+            .0
+    });
+    let under = column_under(&caller, row, left + px(2.0), cx);
+    assert_eq!(
+        under, span.start,
+        "the editor sits over column {under}, the token is {span:?}"
+    );
+}
+
+/// The code's font size, large enough that the caller's lines are wider than the window
+/// with room beside them for the inline editor.
+const FONT_PX: f32 = 40.0;
+
+/// The window's width while the code is scrolled right, narrower than the caller's lines.
+const NARROW_PX: f32 = 700.0;
+
+/// The width the window widens to, still narrower than the caller's widest line.
+const WIDE_PX: f32 = 2600.0;

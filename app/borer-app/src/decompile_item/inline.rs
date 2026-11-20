@@ -8,9 +8,10 @@ use borer_engine::text;
 use borer_engine::view::{Kind, Ref};
 use editor::display_map::{BlockContext, BlockPlacement, BlockProperties, BlockStyle};
 use editor::scroll::Autoscroll;
+use editor::{Editor, EditorStyle};
 use gpui::{
-    AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _, IntoElement as _,
-    ParentElement as _, Pixels, Styled as _, Window, canvas, div, px,
+    App, AppContext as _, Context, Entity, Focusable as _, InteractiveElement as _,
+    IntoElement as _, ParentElement as _, Pixels, Styled as _, WeakEntity, Window, canvas, div, px,
 };
 use language::Point;
 
@@ -20,21 +21,60 @@ use crate::annotate::{Annotated, Annotator, Ask, INPUT_MIN_REMS};
 /// Space in logical pixels kept between the inline editor and its host's right edge.
 const EDGE_PX: f32 = 8.0;
 
+/// The debug selector of the box the inline editor draws in.
+pub(crate) const INLINE_SELECTOR: &str = "inline-editor";
+
 /// Returns where the inline editor sits under its anchor in a host `host` wide: its left
 /// padding and its least width.
 ///
-/// It is at least `least` wide, or the host's width when narrower, never past the host's
-/// right edge, and shifts left of its anchor as far as it must to fit.
+/// It sits under its token where the code is scrolled to, is at least `least` wide, or the
+/// host's width when narrower, never past the host's right edge, and shifts left of its
+/// anchor as far as it must to fit.
 ///
 /// # Arguments
 ///
-/// * `anchor` - The anchor's distance from the host's left edge.
+/// * `anchor` - The token's distance from the host's left edge with the code unscrolled.
+/// * `scrolled` - How far the code is scrolled right.
 /// * `host` - The host's width.
 /// * `least` - The narrowest the editor draws when the host has room.
-fn placed(anchor: Pixels, host: Pixels, least: Pixels) -> (Pixels, Pixels) {
+fn placed(anchor: Pixels, scrolled: Pixels, host: Pixels, least: Pixels) -> (Pixels, Pixels) {
     let room = (host - px(EDGE_PX)).max(px(0.0));
     let least = least.min(room);
-    (anchor.min(room - least).max(px(0.0)), least)
+    let at = (anchor - scrolled).max(px(0.0));
+    (at.min(room - least).max(px(0.0)), least)
+}
+
+/// Returns how far `code` is scrolled right now, in columns, as the editor clamps it to its
+/// width; zero once the editor is gone.
+///
+/// The editor clamps the scroll as it lays out, with no event, so the inline editor reads it
+/// each time it places itself. A change of the editor's width redraws the inline editor, so
+/// it follows a clamp from a resize on the next frame; a clamp with no change of width, as
+/// when the longest line shrinks or the gutter widens, keeps the old scroll until the next
+/// redraw.
+///
+/// # Arguments
+///
+/// * `code` - The code tab's editor.
+/// * `cx` - Application context updating the editor.
+fn scrolled_columns(code: &WeakEntity<Editor>, cx: &mut App) -> f64 {
+    code.update(cx, |code, cx| code.scroll_position(cx).x)
+        .unwrap_or_default()
+}
+
+/// Returns `columns` of horizontal scroll in pixels, in the unit the editor scrolls by: the
+/// laid-out width of an `m` in its font, snapped to the device's pixels as the editor snaps.
+///
+/// # Arguments
+///
+/// * `style` - The editor's style, for its font.
+/// * `columns` - How far the code is scrolled right, in columns.
+/// * `window` - Window the editor draws in.
+fn scrolled_px(style: &EditorStyle, columns: f64, window: &Window) -> Pixels {
+    let text = window.text_system();
+    let font = text.resolve_font(&style.text.font());
+    let em = text.em_layout_width(font, style.text.font_size.to_pixels(window.rem_size()));
+    Pixels::from(window.pixel_snap_f64(columns * f64::from(em)))
 }
 
 impl DecompileItem {
@@ -132,12 +172,14 @@ impl DecompileItem {
         });
         let shown = annotator.clone();
         let host = Arc::new(Mutex::new(None::<Pixels>));
+        let code = self.editor.downgrade();
         let render = Arc::new(move |cx: &mut BlockContext<'_, '_>| {
             let least = cx.window.rem_size() * INPUT_MIN_REMS;
             let known = host.lock().ok().and_then(|host| *host);
-            let (left, least) = known.map_or((cx.anchor_x, least), |host| {
-                placed(cx.anchor_x, host, least)
-            });
+            let width = known.unwrap_or_else(|| cx.window.viewport_size().width);
+            let columns = scrolled_columns(&code, cx.app);
+            let scrolled = scrolled_px(cx.editor_style, columns, cx.window);
+            let (left, least) = placed(cx.anchor_x, scrolled, width, least);
             let measured = host.clone();
             let watch = canvas(
                 move |bounds, window, cx| {
@@ -161,7 +203,13 @@ impl DecompileItem {
                 .w_full()
                 .flex()
                 .child(watch)
-                .child(div().min_w(least).max_w_full().child(shown.clone()))
+                .child(
+                    div()
+                        .debug_selector(|| INLINE_SELECTOR.to_owned())
+                        .min_w(least)
+                        .max_w_full()
+                        .child(shown.clone()),
+                )
                 .into_any_element()
         });
         let block = self.editor.update(cx, |editor, cx| {
@@ -236,15 +284,32 @@ mod tests {
     /// Panics if it reaches past the host's right edge or is narrower than it must be.
     #[test]
     fn the_inline_editor_stays_inside_a_narrow_host() {
-        let least = px(448.0);
-        assert_eq!(placed(px(100.0), px(1200.0), least), (px(100.0), least));
-        let (left, width) = placed(px(500.0), px(800.0), least);
+        let (least, still) = (px(448.0), px(0.0));
+        assert_eq!(
+            placed(px(100.0), still, px(1200.0), least),
+            (px(100.0), least)
+        );
+        let (left, width) = placed(px(500.0), still, px(800.0), least);
         assert_eq!(width, least);
         assert_eq!(left + width, px(800.0 - EDGE_PX));
         assert_eq!(
-            placed(px(300.0), px(300.0), least),
+            placed(px(300.0), still, px(300.0), least),
             (px(0.0), px(300.0 - EDGE_PX))
         );
-        assert_eq!(placed(px(10.0), px(0.0), least), (px(0.0), px(0.0)));
+        assert_eq!(placed(px(10.0), still, px(0.0), least), (px(0.0), px(0.0)));
+    }
+
+    /// With the code scrolled right, the inline editor opens under its token where the
+    /// token now is, not where it would be unscrolled; a token scrolled out of view on the
+    /// left puts it at the host's edge.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the editor opens away from its token.
+    #[test]
+    fn the_inline_editor_follows_a_scrolled_token() {
+        let least = px(448.0);
+        assert_eq!(placed(px(900.0), px(600.0), px(1200.0), least).0, px(300.0));
+        assert_eq!(placed(px(100.0), px(600.0), px(1200.0), least).0, px(0.0));
     }
 }

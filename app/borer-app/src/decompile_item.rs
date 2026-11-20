@@ -52,6 +52,9 @@ use crate::worker::{Job, LoadedBinary, Referent, decompile_or_why, listing_block
 mod checks;
 mod inline;
 
+#[cfg(test)]
+pub(crate) use inline::INLINE_SELECTOR;
+
 use checks::{RECHECK_STATES, act_on_code};
 
 /// Fewest logical pixels a row of code is tall.
