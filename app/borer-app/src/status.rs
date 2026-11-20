@@ -507,6 +507,10 @@ impl Work {
             let oldest = Jobs::oldest(cx).map(|(id, ..)| id);
             if oldest != self.job.map(|(id, _)| id) {
                 self.job = oldest.map(|id| (id, now));
+                if self.drawn {
+                    cx.notify();
+                }
+                (self.drawn, self.words, self.redrawn) = (false, (None, None), None);
             }
         }
         let Some(running) = self.running(cx) else {
@@ -986,7 +990,8 @@ mod tests {
     use workspace::Workspace;
 
     use super::{
-        Address, DockSwitch, DockToggle, Grades, Work, grade_text, progress_words, shown_for,
+        Address, DockSwitch, DockToggle, Grades, PROGRESS_POLL, WORK_SHOWN_AFTER, Work, grade_text,
+        progress_words, shown_for,
     };
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{
@@ -997,7 +1002,7 @@ mod tests {
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::places::Place;
     use crate::worker::{
-        GradeCounts, LoadedBinary, check_blocking, grade_counts_blocking, run_engine,
+        GradeCounts, LoadedBinary, check_blocking, grade_counts_blocking, run_engine, spawn_engine,
     };
 
     /// Returns a raw x86-64 image of `code` in `.text` at 0x1000, entered there, analyzed
@@ -1470,6 +1475,49 @@ mod tests {
             start + 2,
             "not redrawn a second after the last"
         );
+    }
+
+    /// When the request the work item shows ends while another runs, the item hides the
+    /// ended one and, once the other has run long enough to show, draws it, though both
+    /// say the same words.
+    #[gpui::test]
+    fn the_work_item_moves_on_to_the_next_request(cx: &mut TestAppContext) {
+        the_work_item_moves_on_to_the_next_request_steps(cx);
+    }
+
+    /// Runs the steps of [`the_work_item_moves_on_to_the_next_request`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the item keeps drawing the ended request or never draws the next.
+    fn the_work_item_moves_on_to_the_next_request_steps(cx: &mut TestAppContext) {
+        init(cx);
+        let binary = cx.new(|cx| Binary::new(cx));
+        let first = cx.update(|cx| spawn_engine("Request A", cx, || ()));
+        let second = cx.update(|cx| spawn_engine("Request B", cx, || ()));
+        let work = cx.new(|cx| Work::new(binary, cx));
+        let redraws = Rc::new(Cell::new(0_u32));
+        let count = redraws.clone();
+        let _watch = cx.update(|cx| cx.observe(&work, move |_, _| count.set(count.get() + 1)));
+        let shown = |cx: &mut TestAppContext| {
+            work.read_with(cx, |work, cx| work.running(cx).map(|running| running.label))
+        };
+        cx.executor().advance_clock(Duration::from_millis(250));
+        assert_eq!(shown(cx).as_deref(), Some("Request A"));
+        let drawn = |cx: &mut TestAppContext| work.read_with(cx, |work, _| work.drawn);
+        assert!(drawn(cx));
+        let before = redraws.get();
+        drop(first);
+        cx.executor().advance_clock(PROGRESS_POLL);
+        assert!(!drawn(cx), "still drawn when A ended");
+        let hidden = redraws.get();
+        assert!(hidden > before, "not redrawn when A ended");
+        cx.executor()
+            .advance_clock(WORK_SHOWN_AFTER + PROGRESS_POLL * 2);
+        assert!(redraws.get() > hidden, "not redrawn once B shows");
+        assert!(drawn(cx));
+        assert_eq!(shown(cx).as_deref(), Some("Request B"));
+        drop(second);
     }
 
     /// A function the engine has no check of is not checked again on every redraw of its
