@@ -9,17 +9,17 @@
 
 use gpui::{
     AnyElement, App, AppContext as _, Context, Entity, Hsla, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window,
-    div, px, svg,
+    ParentElement as _, Pixels, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
+    WeakEntity, Window, div, px, svg,
 };
 use platform_title_bar::PlatformTitleBar;
 use theme::{ActiveTheme as _, ThemeColors};
-use ui::{Color, Tooltip, h_flex};
+use ui::{Color, LabelCommon as _, Tooltip, h_flex};
 
 use crate::app_assets::MARK_PATH;
 use crate::binary::Binary;
 use crate::menus::MenuBar;
-use crate::start_item::small;
+use crate::start_item::{Edges, small, watch_edges};
 
 /// Width in logical pixels of the cell the mark sits in, the rail's width below it.
 pub const MARK_CELL_PX: f32 = 40.0;
@@ -66,7 +66,8 @@ pub fn binary_title(binary: &Entity<Binary>, cx: &App) -> (String, Option<String
     (name, folder.filter(|folder| !folder.is_empty()))
 }
 
-/// The title bar: the mark over the rail, the menus, the binary's name centered.
+/// The title bar: the mark over the rail, the menus, the binary's name centered on the
+/// window.
 pub struct TitleBar {
     /// Zed's platform title bar the children go in.
     platform: Entity<PlatformTitleBar>,
@@ -74,6 +75,9 @@ pub struct TitleBar {
     menu_bar: Entity<MenuBar>,
     /// The window's binary, whose name the bar shows.
     binary: Entity<Binary>,
+    /// How far the bar's children sit from the window's edges, as laid out last frame: the
+    /// room the window controls and macOS's traffic lights keep.
+    room: Edges,
     /// Redraws the name and retitles the window when the binary changes.
     _observe: Subscription,
 }
@@ -102,6 +106,7 @@ impl TitleBar {
             platform: cx.new(|cx| PlatformTitleBar::new("title-bar", cx)),
             menu_bar: cx.new(|_| MenuBar::new(binary.clone())),
             binary,
+            room: Edges::default(),
             _observe: observe,
         };
         bar.retitle(window, cx);
@@ -163,12 +168,15 @@ impl TitleBar {
         let (name, folder) = binary_title(&self.binary, cx);
         let wide = window.viewport_size().width >= px(FOLDER_SHOWN_FROM_PX);
         h_flex()
+            .debug_selector(|| TITLE_SELECTOR.to_owned())
+            .min_w_0()
+            .overflow_hidden()
             .gap(px(8.0))
-            .child(small(name, Color::Muted))
+            .child(small(name, Color::Muted).truncate())
             .children(
                 folder
                     .filter(|_| wide)
-                    .map(|folder| small(folder, Color::Placeholder)),
+                    .map(|folder| small(folder, Color::Placeholder).truncate_start()),
             )
             .into_any_element()
     }
@@ -176,18 +184,26 @@ impl TitleBar {
 
 impl Render for TitleBar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let bar = cx.entity().downgrade();
         let left = h_flex()
+            .relative()
             .flex_1()
+            .flex_basis(self.room.right)
             .h_full()
             .gap(px(MARK_GAP_PX))
             .child(Self::render_mark(cx))
             .child(self.menu_bar.clone())
+            .child(watch(bar.clone(), |edges| &mut edges.left))
             .into_any_element();
         let name = self.render_name(window, cx);
         let right = h_flex()
+            .relative()
             .flex_1()
+            .flex_basis(self.room.left)
+            .h_full()
             .justify_end()
             .children(crate::update::notice(cx))
+            .child(watch(bar, |edges| &mut edges.right))
             .into_any_element();
         self.platform
             .update(cx, |platform, _| platform.set_children([left, name, right]));
@@ -200,11 +216,35 @@ impl Render for TitleBar {
     }
 }
 
+/// Returns an empty layer over its parent that keeps, in the title bar's room, the one of
+/// the parent's [`Edges`] that `side` picks.
+///
+/// The children beside the name start with as much room as the other side's controls
+/// keep, so the name centres on the window rather than between the controls.
+///
+/// # Arguments
+///
+/// * `bar` - The title bar.
+/// * `side` - Which edge the parent measures, in the parent's edges and in the room.
+fn watch(bar: WeakEntity<TitleBar>, side: fn(&mut Edges) -> &mut Pixels) -> impl IntoElement {
+    watch_edges(move |mut edges, cx| {
+        let at = *side(&mut edges);
+        bar.upgrade().is_some_and(|bar| {
+            bar.update(cx, |bar, _| {
+                std::mem::replace(side(&mut bar.room), at) != at
+            })
+        })
+    })
+}
+
+/// The debug selector of the binary's name in the title bar.
+pub(crate) const TITLE_SELECTOR: &str = "title-name";
+
 #[cfg(test)]
 mod tests {
-    use gpui::TestAppContext;
+    use gpui::{TestAppContext, px, size};
 
-    use super::{binary_title, caption_glyph};
+    use super::{TITLE_SELECTOR, binary_title, caption_glyph};
     use crate::app_settings::BORER_THEME;
     use crate::app_view::tests::{init, load_sample, open};
     use crate::theme_contract::{QUIET_FLOOR, contrast};
@@ -225,6 +265,34 @@ mod tests {
             assert!(rest >= QUIET_FLOOR, "{}: {rest:.2} at rest", theme.name);
             let hover = contrast(colors.text, colors.ghost_element_hover);
             assert!(hover >= QUIET_FLOOR, "{}: {hover:.2} hovered", theme.name);
+        }
+    }
+
+    /// The binary's name centres on the window, not between the menus and the window
+    /// controls, in a wide window and a narrower one it still fits.
+    #[gpui::test]
+    fn the_title_centres_on_the_window(cx: &mut TestAppContext) {
+        the_title_centres_on_the_window_steps(cx);
+    }
+
+    /// Runs the steps of [`the_title_centres_on_the_window`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the name's centre is a pixel or more off the window's.
+    fn the_title_centres_on_the_window_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        for width in [1440.0, 800.0] {
+            cx.simulate_resize(size(px(width), px(900.0)));
+            for _ in 0..2 {
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            }
+            let title = cx.debug_bounds(TITLE_SELECTOR).unwrap();
+            let off = (title.center().x - px(width / 2.0)).abs();
+            assert!(off < px(1.0), "the title is {off:?} off centre at {width}");
         }
     }
 

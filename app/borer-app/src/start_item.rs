@@ -499,25 +499,13 @@ impl Render for StartItem {
         let Edges { left, right } = self.pane;
         let (left, right) = centring(width, left, width - left - right);
         let item = cx.entity().downgrade();
-        let watch = canvas(
-            move |bounds, window, cx| {
-                let edges = Edges {
-                    left: bounds.origin.x,
-                    right: window.viewport_size().width - bounds.right(),
-                };
-                let moved = item.upgrade().is_some_and(|item| {
-                    item.update(cx, |item, _| {
-                        std::mem::replace(&mut item.pane, edges) != edges
-                    })
-                });
-                if moved {
-                    window.defer(cx, |window, _| window.refresh());
-                }
-            },
-            |_, (), _, _| {},
-        )
-        .absolute()
-        .size_full();
+        let watch = watch_edges(move |edges, cx| {
+            item.upgrade().is_some_and(|item| {
+                item.update(cx, |item, _| {
+                    std::mem::replace(&mut item.pane, edges) != edges
+                })
+            })
+        });
         let root = div()
             .id("start")
             .debug_selector(|| "start-item".to_owned())
@@ -554,13 +542,38 @@ impl Render for StartItem {
     }
 }
 
-/// How far a start tab sits from the window's edges, in logical pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Edges {
-    /// From the window's left edge to the tab's.
-    left: Pixels,
-    /// From the tab's right edge to the window's.
-    right: Pixels,
+/// How far an element sits from the window's left and right edges, in logical pixels: a
+/// start tab, or the title bar's children beside the window controls.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Edges {
+    /// From the window's left edge to the element's.
+    pub(crate) left: Pixels,
+    /// From the element's right edge to the window's.
+    pub(crate) right: Pixels,
+}
+
+/// Returns an empty layer over its parent that hands `keep` the parent's [`Edges`] as it
+/// lays out, and draws the window again when `keep` says they moved.
+///
+/// # Arguments
+///
+/// * `keep` - Stores the edges, and returns whether they differ from those stored.
+pub(crate) fn watch_edges(keep: impl Fn(Edges, &mut App) -> bool + 'static) -> impl IntoElement {
+    canvas(
+        move |bounds, window, cx| {
+            let width = window.viewport_size().width;
+            let edges = Edges {
+                left: bounds.origin.x,
+                right: width - bounds.right(),
+            };
+            if keep(edges, cx) {
+                window.defer(cx, |window, _| window.refresh());
+            }
+        },
+        |_, (), _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
 
 impl Edges {
