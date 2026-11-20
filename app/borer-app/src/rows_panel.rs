@@ -413,6 +413,9 @@ pub struct RowsPanel<K: RowKind> {
     rows: Option<Filtered<K>>,
     /// Index of the highlighted row.
     selected: usize,
+    /// Whether the highlighted row is drawn and acted on: false while the open function is
+    /// not among the rows shown, until a row is picked again.
+    lit: bool,
     /// Columns the table shows.
     columns: Columns,
     /// What the rows are of.
@@ -513,6 +516,7 @@ impl<K: RowKind> RowsPanel<K> {
             shown: None,
             rows: None,
             selected: 0,
+            lit: true,
             columns: Columns::Brief,
             target: K::Target::default(),
             sort: None,
@@ -665,7 +669,7 @@ impl<K: RowKind> RowsPanel<K> {
     /// Returns the highlighted row, if any.
     #[must_use]
     pub fn selected_row(&self) -> Option<&K::Row> {
-        self.rows()?.rows().get(self.selected)
+        self.rows()?.rows().get(self.selected).filter(|_| self.lit)
     }
 
     /// Returns why the panel shows no table, from the binary's load and the shown rows with
@@ -1040,6 +1044,45 @@ impl<K: RowKind> RowsPanel<K> {
         self.selected_row().and_then(K::place)
     }
 
+    /// Highlights the row shown of `subject`, scrolling it into view only when it is off the
+    /// table; with no such row shown, highlights none, so no other row reads as it.
+    ///
+    /// The highlighted row is looked at first; an unsorted table of functions, in address
+    /// order, is searched by halves; any other by a scan.
+    ///
+    /// # Arguments
+    ///
+    /// * `subject` - What the row is of.
+    /// * `cx` - Panel context.
+    pub fn select_subject(&mut self, subject: &Ref, cx: &mut Context<'_, Self>) {
+        let of = |row: &K::Row| K::subject(row);
+        let found = self.rows().and_then(|rows| {
+            let rows = rows.rows();
+            if rows.get(self.selected).and_then(of).as_ref() == Some(subject) {
+                return Some(self.selected);
+            }
+            match (self.sort, subject) {
+                (None, Ref::Function(entry)) => rows
+                    .binary_search_by_key(entry, |row| match of(row) {
+                        Some(Ref::Function(at)) => at,
+                        Some(_) | None => 0,
+                    })
+                    .ok(),
+                _ => rows
+                    .iter()
+                    .position(|row| of(row).as_ref() == Some(subject)),
+            }
+        });
+        match found {
+            Some(row) if row == self.selected && self.lit => {}
+            Some(row) => self.select(row, cx),
+            None if self.lit => {
+                self.lit = false;
+                cx.notify();
+            }
+            None => {}
+        }
+    }
     /// Scrolls the table so the highlighted row stays visible.
     ///
     /// # Arguments
@@ -1075,7 +1118,7 @@ impl<K: RowKind> RowsPanel<K> {
         else {
             return;
         };
-        self.selected = row;
+        (self.selected, self.lit) = (row, true);
         cx.notify();
         self.open_place(place, mode, window, cx);
     }
@@ -1125,7 +1168,7 @@ impl<K: RowKind> RowsPanel<K> {
     fn render_table(&self, cx: &mut Context<'_, Self>) -> AnyElement {
         let rows = self.rows().cloned();
         let count = rows.as_ref().map_or(0, |r| r.rows().len());
-        let selected = self.selected;
+        let selected = self.lit.then_some(self.selected);
         let colors = cx.theme().colors();
         let (selected_bg, hover_bg) = (colors.element_selected, colors.element_hover);
         let (bar, muted) = (colors.text, colors.text_muted);
@@ -1148,7 +1191,7 @@ impl<K: RowKind> RowsPanel<K> {
             .header(headers)
             .map_row(move |(ix, row_div), _window, _cx| {
                 let panel = panel.clone();
-                let here = ix == selected;
+                let here = selected == Some(ix);
                 let mark = div()
                     .absolute()
                     .left_0()
@@ -1442,7 +1485,7 @@ impl<K: RowKind> Rows for RowsPanel<K> {
         if len == 0 {
             return;
         }
-        self.selected = row.min(len - 1);
+        (self.selected, self.lit) = (row.min(len - 1), true);
         self.scroll_to_selected(cx);
         cx.notify();
     }

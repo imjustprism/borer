@@ -7,7 +7,7 @@ use borer_engine::analysis::render::{
     FunctionOrder, FunctionRow, FunctionRows, INCOMPLETE_NOTE, LeftOut,
 };
 use borer_engine::view::Ref;
-use gpui::{Entity, SharedString};
+use gpui::{Context, Entity, SharedString};
 use ui::IconName;
 use workspace::Workspace;
 use workspace::dock::DockPosition;
@@ -16,6 +16,7 @@ use crate::actions::{FocusFilter, ToggleFunctionColumns, ToggleFunctions};
 use crate::app_assets::Glyph;
 use crate::binary::Binary;
 use crate::commands;
+use crate::decompile_item::DecompileItem;
 use crate::function_columns::{Column, Columns};
 use crate::panels::{PanelSpec, remove};
 use crate::places::Place;
@@ -35,7 +36,10 @@ pub const PANEL: PanelSpec = PanelSpec {
     docks: &[DockPosition::Left, DockPosition::Right],
     size_px: 560.0,
     hooks: panel::<FunctionsPanel>(),
-    add: add::<Functions>,
+    add: |workspace, binary, dock, window, cx| {
+        add::<Functions>(workspace, binary, dock, window, cx);
+        follow_active_tab(workspace, cx);
+    },
     remove: remove::<FunctionsPanel>,
     focus: focus::<Functions>,
     current: current::<Functions>,
@@ -65,6 +69,31 @@ pub fn register(workspace: &mut Workspace, binary: &Entity<Binary>) {
             }
         },
     );
+}
+
+/// Makes the functions panel highlight the function of the active code tab each time the
+/// active tab changes, for as long as the panel lives.
+///
+/// # Arguments
+///
+/// * `workspace` - The workspace the panel was just added to.
+/// * `cx` - Workspace context.
+fn follow_active_tab(workspace: &Workspace, cx: &mut Context<'_, Workspace>) {
+    let (Some(panel), this) = (workspace.panel::<FunctionsPanel>(cx), cx.entity()) else {
+        return;
+    };
+    panel.update(cx, |_, cx| {
+        cx.subscribe(&this, |panel, workspace, event: &workspace::Event, cx| {
+            if !matches!(event, workspace::Event::ActiveItemChanged) {
+                return;
+            }
+            let tab = workspace.read(cx).active_item_as::<DecompileItem>(cx);
+            if let Some(entry) = tab.and_then(|tab| tab.read(cx).entry()) {
+                panel.select_subject(&Ref::Function(entry), cx);
+            }
+        })
+        .detach();
+    });
 }
 
 /// Returns what the engine left out of the function table, as a person reads it.
@@ -210,18 +239,60 @@ mod tests {
     use workspace::dock::DockPosition;
     use workspace::{AppState, Workspace};
 
+    use borer_engine::view::Ref;
+
     use super::{Empty, Functions, FunctionsPanel, function_count, hidden};
     use crate::actions::FocusFilter;
     use crate::app_view::add_functions_panel;
-    use crate::app_view::tests::{CALLEE, CALLER, init, open, sample, shown};
+    use crate::app_view::tests::{
+        CALLEE, CALLER, init, load_sample, open, open_place, sample, shown,
+    };
     use crate::binary::BinaryEvent;
     use crate::card::CARD_SELECTOR;
-    use crate::decompile_item::Form;
+    use crate::decompile_item::{Form, TabMode};
     use crate::places::Place;
     use crate::rows_panel::Answer;
     use crate::rows_panel::RowKind as _;
     use crate::rows_panel::{ENTRY_SELECTOR, HEADER_SELECTOR, ROW_SELECTOR};
     use crate::worker::Jobs;
+
+    /// Opening a function in a tab highlights its row in the list, and the tab of another
+    /// function highlights that one's; a function the list does not show highlights none.
+    #[gpui::test]
+    fn the_list_selects_the_open_function(cx: &mut TestAppContext) {
+        the_list_selects_the_open_function_steps(cx);
+    }
+
+    /// Runs the steps of [`the_list_selects_the_open_function`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the highlighted row is not the active tab's function.
+    fn the_list_selects_the_open_function_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        let panel = app
+            .workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<FunctionsPanel>(cx))
+            .unwrap();
+        for entry in [CALLEE, CALLER] {
+            let place = Place::decompile(entry);
+            open_place(
+                &app.workspace,
+                &sample(),
+                place.clone(),
+                TabMode::Permanent,
+                cx,
+            );
+            cx.run_until_parked();
+            let selected = panel.read_with(cx, |panel, _| panel.selected_place());
+            assert_eq!(selected, Some(place));
+        }
+        let unlisted = Ref::Function(0xdead_beef);
+        panel.update(cx, |panel, cx| panel.select_subject(&unlisted, cx));
+        assert_eq!(panel.read_with(cx, |panel, _| panel.selected_place()), None);
+    }
 
     /// The count line says how many functions show and, apart, how many are hidden.
     ///
