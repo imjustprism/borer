@@ -13,7 +13,10 @@ name: release
 # configured. Run by hand on a branch, it builds and uploads the archives as
 # workflow artifacts and publishes nothing; run by hand on a tag, it publishes
 # that tag. Run by hand with dev_build set, it builds the named ref and
-# replaces the rolling `dev-build` pre-release with its archives instead.
+# replaces the rolling `dev-build` pre-release with its archives instead. Run
+# by hand with crates set, it only publishes to crates.io the crates of the
+# `v*` tag named by ref that crates.io lacks, finishing a release whose
+# crates job failed without moving its tag.
 
 on:
   push:
@@ -24,8 +27,12 @@ on:
         description: Publish the archives as the rolling dev-build pre-release
         type: boolean
         default: false
+      crates:
+        description: Only publish the crates of the v* tag named by ref
+        type: boolean
+        default: false
       ref:
-        description: The branch, tag or commit a dev build builds
+        description: The branch, tag or commit a dev build builds, or the v* tag a crates run publishes
         type: string
         default: dev
 
@@ -33,7 +40,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.dev_build && 'dev-build' || github.ref }}
+  group: release-${{ inputs.crates && format('refs/tags/{0}', inputs.ref) || inputs.dev_build && 'dev-build' || github.ref }}
   cancel-in-progress: false
 
 env:
@@ -45,8 +52,10 @@ jobs:
   # cannot mix two commits in one release, and the archives' version: the
   # tag or branch, or `dev-build`. A dev build's ref is a branch, a tag or a
   # full or short commit, and must be on one of this repository's branches,
-  # so a pull request's commit is refused.
+  # so a pull request's commit is refused. A crates run builds nothing, so
+  # this job and every job after it but crates are skipped.
   source:
+    if: ${{ !inputs.crates }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -478,18 +487,34 @@ jobs:
   # [package.metadata.binstall] in crates/borer/Cargo.toml and fetches the
   # release archive). One at a time in dependency order, each left alone when
   # the sparse index already has its manifest's version, so a rerun publishes
-  # only what is missing; a failed index read fails the job.
+  # only what is missing; a failed index read fails the job. A crates run checks
+  # out its tag and refuses one whose crates are not at the tag's version.
   crates:
     needs: registries
-    if: ${{ !cancelled() && needs.registries.result == 'success' && needs.registries.outputs.crates == 'true' }}
+    if: ${{ !cancelled() && (inputs.crates || needs.registries.result == 'success' && needs.registries.outputs.crates == 'true') }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     env:
       CRATES: borer-engine borer-front borer-live borer
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.crates && format('refs/tags/{0}', inputs.ref) || '' }}
       - name: toolchain
         run: rustup toolchain install --no-self-update
+      - name: tag
+        if: ${{ inputs.crates }}
+        env:
+          REF: ${{ inputs.ref }}
+        run: |
+          meta=$(cargo metadata --no-deps --format-version 1)
+          for crate in $CRATES; do
+            version=$(jq -r --arg n "$crate" '.packages[] | select(.name == $n) | .version' <<< "$meta")
+            if [ "v$version" != "$REF" ]; then
+              echo "::error::$crate is at '$version' in $REF; a crates run takes the v* tag of its version"
+              exit 1
+            fi
+          done
       - name: publish
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
