@@ -521,7 +521,7 @@ int f(void) {{ return g({}); }}
         "a + ".repeat(80)
     );
     let room = room_under_code(&long, cx);
-    assert!(room >= gpui::px(14.0), "{room:?}");
+    assert!(room >= crate::table::scrollbar_room(), "{room:?}");
 }
 
 /// A code block whose lines fit keeps no room for a scrollbar under them.

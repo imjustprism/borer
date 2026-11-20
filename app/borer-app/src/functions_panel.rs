@@ -254,7 +254,8 @@ mod tests {
     use crate::rows_panel::Answer;
     use crate::rows_panel::RowKind as _;
     use crate::rows_panel::Rows as _;
-    use crate::rows_panel::{ENTRY_SELECTOR, HEADER_SELECTOR, ROW_SELECTOR};
+    use crate::rows_panel::{BODY_SELECTOR, ENTRY_SELECTOR, HEADER_SELECTOR, ROW_SELECTOR};
+    use crate::table::scrollbar_room;
     use crate::worker::Jobs;
 
     /// Opens a window over the sample and returns it and its functions panel.
@@ -432,6 +433,45 @@ mod tests {
 
     /// A filter the sample's callee matches first.
     const CALLEE_FILTER: &str = "1030";
+
+    /// While the rows scroll by the height they draw at, though they would fit at the code's
+    /// row height, they end the scrollbar's room left of the panel's edge; while they fit,
+    /// they reach it.
+    #[gpui::test]
+    fn the_scrollbar_covers_no_column(cx: &mut TestAppContext) {
+        the_scrollbar_covers_no_column_steps(cx);
+    }
+
+    /// Runs the steps of [`the_scrollbar_covers_no_column`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the rows keep the scrollbar's room while they fit, or not while they scroll.
+    fn the_scrollbar_covers_no_column_steps(cx: &mut TestAppContext) {
+        let (_, _, cx) = listed(cx);
+        for (height, scrolls) in [(SCROLLS_PX, true), (FITS_PX, false)] {
+            cx.simulate_resize(gpui::size(px(800.0), px(height)));
+            for _ in 0..3 {
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                cx.run_until_parked();
+            }
+            let body = cx.debug_bounds(BODY_SELECTOR).unwrap();
+            let row = cx.debug_bounds(ROW_SELECTOR).unwrap();
+            let room = body.right() - row.right();
+            assert_eq!(
+                room >= scrollbar_room(),
+                scrolls,
+                "room {room:?} at {height}"
+            );
+        }
+    }
+
+    /// A window height whose table the rows overflow at the height they draw at, but not at
+    /// the code's row height.
+    const SCROLLS_PX: f32 = 186.0;
+
+    /// A window height whose table the rows fit.
+    const FITS_PX: f32 = 260.0;
 
     /// The count line says how many functions show and, apart, how many are hidden.
     ///

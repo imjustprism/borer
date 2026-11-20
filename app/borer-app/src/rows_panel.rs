@@ -38,7 +38,9 @@ use crate::code_view::CodePalette;
 use crate::decompile_item::{TabMode, code_row_height};
 use crate::panels::{PanelSpec, spec_panel};
 use crate::places::{Opening, Place, open_later};
-use crate::table::{Column, Columns, Fit, Ink, aligned, count_text, fit_width, row_cells, widths};
+use crate::table::{
+    Column, Columns, Fit, Ink, aligned, count_text, fit_width, row_cells, scrollbar_room, widths,
+};
 use crate::worker::{Job, LoadedBinary, Referent};
 
 /// Rows one page asks the engine for.
@@ -395,6 +397,9 @@ pub(crate) const ENTRY_SELECTOR: &str = "function-entry";
 /// Debug selector of a column header, whose presence the tests read.
 pub(crate) const HEADER_SELECTOR: &str = "rows-header";
 
+/// Debug selector of the area the table draws in, whose laid-out bounds the tests read.
+pub(crate) const BODY_SELECTOR: &str = "rows-body";
+
 /// Rows the engine selected, with the filter query that selected them.
 struct Filtered<K: RowKind> {
     /// The query, empty for every row.
@@ -586,13 +591,17 @@ impl<K: RowKind> RowsPanel<K> {
         cx.notify();
     }
 
-    /// Lays the columns out again for a table now `width` wide, when that changed.
+    /// Lays the columns out again for a table now `width` wide, when their width changed:
+    /// the table's, less [`scrollbar_room`] while the rows scroll as Zed's scrollbar sees.
     ///
     /// # Arguments
     ///
     /// * `width` - Width the table was painted at.
     /// * `cx` - Panel context.
     fn set_table_width(&mut self, width: Pixels, cx: &mut Context<'_, Self>) {
+        let scroll = &self.table_state.read(cx).scroll_handle;
+        let tall = scroll.0.borrow().base_handle.max_offset().y > Pixels::ZERO;
+        let width = width - if tall { scrollbar_room() } else { Pixels::ZERO };
         if width > Pixels::ZERO && width != self.table_width {
             self.table_width = width;
             self.relayout(cx);
@@ -1444,6 +1453,7 @@ impl<K: RowKind> Render for RowsPanel<K> {
             .child(
                 div()
                     .id("rows")
+                    .debug_selector(|| BODY_SELECTOR.to_owned())
                     .key_context("BorerRows")
                     .track_focus(&self.rows_focus)
                     .relative()

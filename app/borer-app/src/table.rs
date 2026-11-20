@@ -8,9 +8,9 @@ use std::cmp::Ordering;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Div, Hsla, InteractiveElement as _, IntoElement, ParentElement as _, Pixels,
-    SharedString, StatefulInteractiveElement as _, Styled as _, div,
+    SharedString, StatefulInteractiveElement as _, Styled as _, div, px,
 };
-use ui::Tooltip;
+use ui::{ScrollbarStyle, Tooltip};
 
 use crate::code_view::Role;
 
@@ -177,6 +177,17 @@ pub fn aligned(align: Align, child: impl IntoElement) -> Div {
         .flex()
         .when(align == Align::End, Div::justify_end)
         .child(div().min_w_0().truncate().child(child))
+}
+
+/// Padding in logical pixels Zed's scrollbar keeps on each side of its thumb, the private
+/// `SCROLLBAR_PADDING` of `ui`'s scrollbar.
+const SCROLLBAR_PAD_PX: f32 = 4.0;
+
+/// Returns the width Zed's scrollbar takes over a list's edge: its regular thumb and its
+/// padding on both sides.
+#[must_use]
+pub(crate) fn scrollbar_room() -> Pixels {
+    ScrollbarStyle::Regular.to_pixels() + px(SCROLLBAR_PAD_PX) * 2.0
 }
 
 /// Returns the drawn cells of one row.
