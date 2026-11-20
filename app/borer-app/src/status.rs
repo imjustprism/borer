@@ -987,6 +987,7 @@ mod tests {
     use borer_engine::program::{Arch, Program, Section};
     use borer_engine::progress::{Phase, Snapshot};
     use gpui::{AppContext as _, TestAppContext, VisualTestContext};
+    use language_model::LanguageModelRegistry;
     use workspace::Workspace;
 
     use super::{
@@ -998,6 +999,9 @@ mod tests {
         CALLER, init, load_sample, open, open_caller, open_place, sample, shown,
     };
     use crate::binary::{Binary, Loading, StatusLine, kind};
+    use crate::chat::ChatPanel;
+    use crate::chat::providers::{Endpoint, Offered};
+    use crate::chat::thread::Chosen;
     use crate::check_marks::tests::wrong_at;
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::places::Place;
@@ -1475,6 +1479,75 @@ mod tests {
             start + 2,
             "not redrawn a second after the last"
         );
+    }
+
+    /// The chat's switch carries a dot while a turn runs with the panel hidden, is redrawn
+    /// when the turn ends, and then carries none.
+    #[gpui::test]
+    fn the_chat_switch_marks_a_hidden_turn(cx: &mut TestAppContext) {
+        the_chat_switch_marks_a_hidden_turn_steps(cx);
+    }
+
+    /// Runs the steps of [`the_chat_switch_marks_a_hidden_turn`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the dot shows without a hidden turn, or not with one.
+    fn the_chat_switch_marks_a_hidden_turn_steps(cx: &mut TestAppContext) {
+        let app_state = init(cx);
+        let (app, cx) = open(&app_state, cx);
+        load_sample(&app, cx);
+        app.workspace.update_in(cx, |workspace, window, cx| {
+            workspace.focus_panel::<ChatPanel>(window, cx);
+        });
+        let panel = app
+            .workspace
+            .read_with(cx, |workspace, cx| workspace.panel::<ChatPanel>(cx))
+            .unwrap();
+        let fake = cx.update(|_, cx| LanguageModelRegistry::test(cx));
+        let model = fake.model("fake");
+        let thread = panel.read_with(cx, |panel, _| panel.thread().clone());
+        thread.update(cx, |thread, cx| {
+            let endpoint = Endpoint {
+                offered: Offered::Anthropic,
+                url: "https://api.anthropic.com".into(),
+            };
+            let (client, model) = (fake.clone(), model.clone());
+            thread.choose(
+                Chosen {
+                    client,
+                    model,
+                    endpoint,
+                },
+                cx,
+            );
+            thread.agree(cx);
+        });
+        let switch = app.workspace.update(cx, |workspace, cx| {
+            cx.new(|cx| DockSwitch::new(DockToggle::Chat, workspace, cx))
+        });
+        let hidden = |cx: &mut VisualTestContext| {
+            cx.update(|window, cx| {
+                switch.update(cx, |switch, cx| {
+                    let open = switch.open(window, cx).unwrap_or(false);
+                    switch.hidden_turn(open, cx)
+                })
+            })
+        };
+        assert!(!hidden(cx));
+        thread.update(cx, |thread, cx| thread.send("Go".to_owned(), cx));
+        cx.run_until_parked();
+        let click = crate::chat::PANEL.hooks.click;
+        app.workspace.update_in(cx, click);
+        cx.run_until_parked();
+        assert!(hidden(cx));
+        let redraws = Rc::new(Cell::new(0_u32));
+        let count = redraws.clone();
+        let _watch = cx.update(|_, cx| cx.observe(&switch, move |_, _| count.set(count.get() + 1)));
+        fake.end_last(&model);
+        cx.run_until_parked();
+        assert!(redraws.get() > 0, "not redrawn when the turn ended");
+        assert!(!hidden(cx));
     }
 
     /// When the request the work item shows ends while another runs, the item hides the
