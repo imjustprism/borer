@@ -393,12 +393,28 @@ fn named_export(only: &[u64]) -> String {
 /// * `overlay` - Names and prototypes to apply.
 /// * `only` - The entries to write.
 fn named_export_with(overlay: &Overlay, only: &[u64]) -> String {
-    use borer_engine::analysis::decompile::export::{Library, export};
     let p = named_image();
-    let a = Analysis::compute(&p);
     let only = only.iter().copied().collect();
+    exported_file(&p, &Analysis::compute(&p), overlay, Some(&only))
+}
+
+/// Exports an image as one file, library code included.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `a` - Its analysis.
+/// * `overlay` - Names and prototypes to apply.
+/// * `only` - The entries to write, `None` for every one.
+fn exported_file(
+    p: &Program,
+    a: &Analysis,
+    overlay: &Overlay,
+    only: Option<&std::collections::BTreeSet<u64>>,
+) -> String {
+    use borer_engine::analysis::decompile::export::{Library, export};
     let mut bodies = String::new();
-    let hoisted = export(&p, &a, overlay, Library::Skip, Some(&only), &mut |t| {
+    let hoisted = export(p, a, overlay, Library::Include, only, &mut |t| {
         bodies.push_str(t);
         Ok(())
     })
@@ -515,4 +531,37 @@ fn the_whole_export_states_each_declaration_once() {
             .collect();
         assert_eq!(file_scope.len(), 1, "{name}: {file_scope:?} in {file}");
     }
+}
+
+/// A called function over the size a caller reads through the memo is
+/// rendered once in a whole export.
+///
+/// Its caller's declaration of it comes from the text the export writes,
+/// kept once, and states the head the file defines it under.
+#[test]
+fn a_large_callee_is_rendered_once_for_its_caller_and_the_file() {
+    let mut code = vec![0x48, 0x83, 0xec, 0x28]; // ASM: sub rsp, 0x28 (caller)
+    code.extend([0xe8, 0x07, 0x00, 0x00, 0x00]); // ASM: call large
+    code.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]); // ASM: add rsp, 0x28; ret
+    code.extend([0xcc; 2]);
+    for _ in 0..1100 {
+        code.extend([0xff, 0xc1]); // ASM: inc ecx (large)
+    }
+    code.extend([0x89, 0xc8, 0xc3]); // ASM: mov eax, ecx; ret
+    let mut p = crate::raw::image(Arch::X86_64, &code, &[]);
+    p.format = BinaryFormat::Pe;
+    let a = Analysis::compute(&p);
+    let file = exported_file(&p, &a, &Overlay::default(), None);
+    assert_eq!(a.derived.held("export_named"), 1, "{file}");
+    let large = TEXT + 0x10;
+    let head = file
+        .lines()
+        .find(|l| {
+            l.contains(&format!("sub_{large:x}(")) && !l.ends_with(';') && !l.starts_with("//")
+        })
+        .unwrap_or_else(|| panic!("the large function is defined: {file}"));
+    assert!(
+        file.lines().any(|l| l.trim() == format!("extern {head};")),
+        "{head} in {file}"
+    );
 }

@@ -835,8 +835,11 @@ fn export_with(
 /// most), and its unit defines its small callees from that text too; the
 /// export reading such a text through the memo decompiles each of those
 /// functions once instead of twice, the callee first, as [`order`] writes
-/// leaves first. A larger function's text is built afresh, so the memo
-/// does not fill with texts no caller reads.
+/// leaves first. A larger function that some function calls is kept whole
+/// through [`Analysis::derived`] once rendered, since its callers read its
+/// signature from it ([`own_signature`]) and the export writes it: one
+/// decompile serves both. A larger function nothing calls is built
+/// afresh, so the memo does not fill with texts no caller reads.
 ///
 /// # Arguments
 ///
@@ -849,19 +852,32 @@ fn export_with(
 ///
 /// The text, `None` when the function does not decompile.
 fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) -> Option<String> {
-    let read = analysis.function(entry)?.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX;
-    let text = if read {
-        let key = overlay.fingerprint();
-        crate::analysis::decompiled_cached(program, analysis, overlay, key, entry)
-            .as_ref()
-            .as_ref()?
-            .text
-            .clone()
-    } else {
-        super::decompile_plain_full(program, analysis, overlay, entry)?.text
+    let f = analysis.function(entry)?;
+    let read = f.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX;
+    let build = || {
+        let text = if read {
+            let key = overlay.fingerprint();
+            crate::analysis::decompiled_cached(program, analysis, overlay, key, entry)
+                .as_ref()
+                .as_ref()?
+                .text
+                .clone()
+        } else {
+            super::decompile_plain_full(program, analysis, overlay, entry)?.text
+        };
+        super::name_fields(program, analysis, overlay, entry, &text)
+            .map(|out| super::finished(&out, program, analysis, overlay, entry))
     };
-    super::name_fields(program, analysis, overlay, entry, &text)
-        .map(|out| super::finished(&out, program, analysis, overlay, entry))
+    if read || f.callers.is_empty() {
+        return build();
+    }
+    analysis
+        .derived
+        .get_or_build_item("export_named", overlay.fingerprint(), entry, build, |t| {
+            t.as_ref().map_or(0, String::capacity)
+        })
+        .as_ref()
+        .clone()
 }
 
 /// Declares each function of the image a text names by that function's
