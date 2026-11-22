@@ -3,8 +3,9 @@
 //!
 //! It picks Claude Code in the chat docked over the open binary (default notepad), waits
 //! for its models, shows the picker (`CHAT_STAGE picker`), agrees to send, sends [`ASKED`],
-//! and once the turn ends shows it (`CHAT_STAGE turn`), then says `CHAT_DONE`. Unlike every
-//! other demo it sends a message off the machine, through Claude Code's own sign-in.
+//! and once the turn ends shows it (`CHAT_STAGE turn`), then says `CHAT_DONE`, or
+//! `CHAT_FAILED <why>` and exits with an error when the turn showed an error banner. Unlike
+//! every other demo it sends a message off the machine, through Claude Code's own sign-in.
 
 use gpui::{AsyncWindowContext, WeakEntity};
 
@@ -12,7 +13,9 @@ use super::chat_demo::{addresses, docked, until};
 use super::stage::{poll, stage};
 use super::{Harness, say};
 use crate::chat::providers::Offered;
-use crate::chat::thread::Thread;
+use borer_engine::text;
+
+use crate::chat::thread::{Entry, Thread};
 
 /// The word this demo's stages are said with.
 const CHAT: &str = "CHAT";
@@ -56,9 +59,53 @@ pub(super) async fn demo(
     thread.update(cx, |t, cx| t.send(ASKED.to_owned(), cx));
     thread.update(cx, Thread::agree);
     until(&thread, cx, |t| t.entries().len() > 2 && !t.is_running()).await?;
-    for entry in thread.read_with(cx, |t, _| t.entries().to_vec()) {
+    let entries = thread.read_with(cx, |t, _| t.entries().to_vec());
+    for entry in &entries {
         eprintln!("CHAT_ENTRY {entry:?}");
     }
     stage(CHAT, "turn", cx).await?;
+    if let Some(why) = failure(&entries) {
+        say(&format!("CHAT_FAILED {why}"))?;
+        anyhow::bail!("the turn ended in an error: {why}");
+    }
     say("CHAT_DONE")
+}
+
+/// Returns the first error banner among `entries`, `None` when the turn showed none.
+fn failure(entries: &[Entry]) -> Option<String> {
+    entries.iter().find_map(|e| {
+        if let Entry::Error(said) = e {
+            Some(text::one_line(said))
+        } else {
+            None
+        }
+    })
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use crate::chat::thread::Entry;
+
+    /// A turn that showed an error banner is a failed check; one that showed none is not.
+    #[test]
+    fn an_error_banner_fails_the_check() {
+        let said = vec![
+            Entry::Person("hi".to_owned()),
+            Entry::Model("ok".to_owned()),
+        ];
+        assert_eq!(super::failure(&said), None);
+        let failed = [
+            said,
+            vec![Entry::Error("Claude Code: Not logged in".to_owned())],
+        ]
+        .concat();
+        assert_eq!(
+            super::failure(&failed).as_deref(),
+            Some("Claude Code: Not logged in")
+        );
+    }
 }
