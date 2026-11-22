@@ -22,9 +22,10 @@ use std::fmt::Write as _;
 /// Most names one warning lists before it counts the rest.
 const NAMES_SHOWN: usize = 4;
 
-/// The names C23 and its headers give a value without a declaration in
-/// the function.
-const CONSTANTS: [&str; 4] = ["true", "false", "nullptr", "NULL"];
+/// The names C23, its headers and the compiler give a value without a
+/// declaration in the function: `__FUNCSIG__` is the text's spelling of the
+/// function's own accepted signature string.
+const CONSTANTS: [&str; 5] = ["true", "false", "nullptr", "NULL", "__FUNCSIG__"];
 
 /// The prefix of the line [`line()`] writes.
 pub(super) const WARN: &str = "// warn:";

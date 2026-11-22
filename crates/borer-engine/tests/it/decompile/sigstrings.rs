@@ -9,7 +9,7 @@
 //! `__FUNCSIG__`, warned that `__FUNCSIG__` was undeclared and listed only
 //! the second assert.
 
-use borer_engine::analysis::decompile::decompile;
+use borer_engine::analysis::decompile::{answer_header, decompile};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::num::{from_usize, lo32};
 use borer_engine::program::{Arch, Program, Section, Symbol, SymbolKind};
@@ -225,6 +225,8 @@ fn the_pretty_function_names_it(p: &Program, entry: u64, callee: u64) {
     );
     assert!(text.contains(&format!("\"{COND1}\"")), "{text}");
     assert!(text.contains("__FUNCSIG__"), "{text}");
+    let header = answer_header(p, &a, &Overlay::default(), entry, None).unwrap_or_default();
+    assert!(!header.contains("__FUNCSIG__"), "{header}");
     assert!(
         text.contains("// asserts: thread_util::IsMainThread(), false && 'Unsupported SourceType'"),
         "{text}"
