@@ -467,6 +467,69 @@ fn a_jump_after_a_pop_into_another_body_is_no_start() {
     );
 }
 
+/// Returns the function starts of a Thumb image, relative to its text.
+///
+/// # Arguments
+///
+/// * `name` - The file name.
+/// * `text` - The halfwords of `.text`; the entry is its first.
+fn thumb_entries(name: &str, text: &[u16]) -> Vec<u64> {
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p =
+        Program::from_bytes(PathBuf::from(name), elf32(&bytes, &[], ELF_TEXT | 1)).expect("parses");
+    let a = Analysis::compute(&p);
+    a.functions.iter().map(|f| f.entry - ELF_TEXT).collect()
+}
+
+/// A call followed by a literal its own function loads never returns.
+///
+/// The walk stops at the literal instead of running on into the handler
+/// after it, which the vector table then names as a function of its own.
+#[test]
+fn a_call_into_the_literal_pool_ends_the_path() {
+    let text: [u16; 20] = [
+        0xb508, // ASM: push {r3, lr}
+        0x4901, // ASM: ldr r1, [pc, #4]
+        0xf000, 0xf80a, // ASM: bl 0x1c
+        0x0000, 0x2000, // ASM: .word 0x20000000
+        0xb508, // ASM: push {r3, lr}
+        0x4901, // ASM: ldr r1, [pc, #4]
+        0xf000, 0xf804, // ASM: bl 0x1c
+        0x0000, 0x2000, // ASM: .word 0x20000000
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0xe7fe, // ASM: b .
+        0xbf00, // ASM: nop
+        0x0081, 0x0001, // ASM: .word 0x10081
+        0x008d, 0x0001, // ASM: .word 0x1008d
+    ];
+    assert_eq!(thumb_entries("pool.elf", &text), [0, 0xc, 0x1c]);
+}
+
+/// A function one call shows never returns ends every other caller's path.
+///
+/// The literal after that call is the evidence: a caller walked before it
+/// was known is walked again, and the function after its call is one of
+/// its own.
+#[test]
+fn a_call_found_never_to_return_ends_earlier_callers() {
+    let text: [u16; 16] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf805, // ASM: bl 0x10
+        0xf000, 0xf809, // ASM: bl 0x1c
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+        0xb508, // ASM: push {r3, lr}
+        0x4901, // ASM: ldr r1, [pc, #4]
+        0xf000, 0xf802, // ASM: bl 0x1c
+        0x0000, 0x2000, // ASM: .word 0x20000000
+        0xe7fe, // ASM: b .
+        0xbf00, // ASM: nop
+    ];
+    assert_eq!(thumb_entries("noret.elf", &text), [0, 0xa, 0x10, 0x1c]);
+}
+
 /// Thousands of jumps after a `pop` into other functions' bodies are each
 /// refused, and the walk ends with every function its symbol names: who
 /// holds a target is looked up, not searched for in every walk.

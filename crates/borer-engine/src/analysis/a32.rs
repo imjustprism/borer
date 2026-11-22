@@ -51,6 +51,15 @@ const GAP_ROUNDS: usize = 2;
 const OUTLINE_ROUNDS: usize = 4;
 /// Most instructions one walk decodes.
 const WALK_MAX: usize = 1 << 18;
+/// Most times a walk is made again with the paths that ran into its own
+/// literals ended there ([`walk`]).
+const POOL_ROUNDS: usize = 2;
+/// Most padding instructions looked past after a call for the data that
+/// follows it ([`into_pool`]).
+const PAD_MAX: usize = 4;
+/// Most rounds of walking again the functions that run on past a call
+/// found never to return ([`Walks::settle`]).
+const SETTLE_ROUNDS: usize = 4;
 /// Most instructions one walk from a guess decodes: a guess into data can
 /// decode a long way, and nothing it decodes is kept when it is rejected.
 const GUESS_MAX: usize = 1 << 14;
@@ -546,6 +555,7 @@ fn entry_load<'a>(
 }
 
 /// What one walk found.
+#[derive(Default)]
 struct Walked {
     /// The instructions by address.
     seen: BTreeMap<u64, Insn>,
@@ -564,6 +574,9 @@ struct Walked {
     into: BTreeSet<u64>,
     /// The known starts its jumps reach: tail calls.
     tails: BTreeSet<u64>,
+    /// The functions it calls that its bytes show never return: a call
+    /// of theirs runs into the walk's own literals ([`into_pool`]).
+    ends: BTreeSet<u64>,
 }
 
 /// Walks one function from its entry.
@@ -584,6 +597,10 @@ struct Walked {
 ///   word that decodes to no instruction or lies in them, and after
 ///   [`GUESS_MAX`] instructions, which rejects the guess: a function cut
 ///   short would leave reachable code out.
+///
+/// A call never runs on into the literals the function itself loads: those
+/// bytes are data, so the call does not return ([`into_pool`]). The walk
+/// is made again, ending each such path there.
 fn walk(
     program: &Program,
     entry: u64,
@@ -591,16 +608,84 @@ fn walk(
     noreturn: &BTreeSet<u64>,
     guess: Option<&BTreeMap<u64, (u64, bool)>>,
 ) -> Walked {
-    let mut w = Walked {
-        seen: BTreeMap::new(),
-        callees: BTreeSet::new(),
-        followed: BTreeSet::new(),
-        tables: Vec::new(),
-        bad: false,
-        exits: false,
-        into: BTreeSet::new(),
-        tails: BTreeSet::new(),
+    let mut stops = BTreeSet::new();
+    let mut ends = BTreeSet::new();
+    let mut w = walk_until(program, entry, starts, noreturn, guess, &stops);
+    for _ in 0..POOL_ROUNDS {
+        let into = into_pool(&w);
+        if into.is_empty() {
+            break;
+        }
+        for (stop, callee) in into {
+            stops.insert(stop);
+            ends.extend(callee);
+        }
+        w = walk_until(program, entry, starts, noreturn, guess, &stops);
+    }
+    w.ends = ends;
+    w
+}
+
+/// Returns the instructions a call of a walk falls into, past any padding,
+/// that lie in the literals or jump tables the walk itself reads, each
+/// with the call's direct target.
+///
+/// Such a call never returns: the compiler put data after it. Code that
+/// falls into a pool without a call before it says nothing as sure, and a
+/// guess walked through data would only split into more guesses.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+fn into_pool(w: &Walked) -> Vec<(u64, Option<u64>)> {
+    let mut pool: Vec<(u64, u64)> = Walks::stretches(w).map(|r| (r.start, r.end)).collect();
+    pool.sort_unstable();
+    let mut merged: BTreeMap<u64, (u64, bool)> = BTreeMap::new();
+    for (start, end) in pool {
+        match merged.last_entry() {
+            Some(mut last) if start <= last.get().0 => {
+                let e = &mut last.get_mut().0;
+                *e = (*e).max(end);
+            }
+            _ => {
+                merged.insert(start, (end, false));
+            }
+        }
+    }
+    let data = |i: &Insn| {
+        guess::covers(&merged, i.va).is_some()
+            || guess::covers(&merged, i.next().saturating_sub(1)).is_some()
     };
+    let mut into = Vec::new();
+    for call in w.seen.values().filter(|i| i.flow() == Flow::Call) {
+        let mut at = w.seen.get(&call.next());
+        for _ in 0..PAD_MAX {
+            match at {
+                Some(i) if gap_padding(i) && !data(i) => at = w.seen.get(&i.next()),
+                _ => break,
+            }
+        }
+        into.extend(at.filter(|i| data(i)).map(|i| (i.va, call.target())));
+    }
+    into
+}
+
+/// Walks one function from its entry, ending a path at any of `stops`
+/// ([`walk`]).
+///
+/// # Arguments
+///
+/// * `program`, `entry`, `starts`, `noreturn`, `guess` - As [`walk`]'s.
+/// * `stops` - Addresses that are data: a path reaching one ends.
+fn walk_until(
+    program: &Program,
+    entry: u64,
+    starts: &BTreeSet<u64>,
+    noreturn: &BTreeSet<u64>,
+    guess: Option<&BTreeMap<u64, (u64, bool)>>,
+    stops: &BTreeSet<u64>,
+) -> Walked {
+    let mut w = Walked::default();
     let limit = if guess.is_some() { GUESS_MAX } else { WALK_MAX };
     let mut pending: Vec<(u64, ItState)> = vec![(entry, ItState::default())];
     let leaves = |t: u64| t != entry && starts.contains(&t);
@@ -613,6 +698,10 @@ fn walk(
         }
         if guess.is_some_and(|c| guess::covers(c, va).is_some()) {
             w.into.insert(va);
+            continue;
+        }
+        if stops.contains(&va) {
+            w.exits = true;
             continue;
         }
         let Some(i) = decode(program, va, &mut it).filter(|i| i.op != Op::Invalid) else {
@@ -708,16 +797,7 @@ fn walk_gap(
     noreturn: &BTreeSet<u64>,
     covered: &BTreeMap<u64, (u64, bool)>,
 ) -> Walked {
-    let mut w = Walked {
-        seen: BTreeMap::new(),
-        callees: BTreeSet::new(),
-        followed: BTreeSet::new(),
-        tables: Vec::new(),
-        bad: false,
-        exits: false,
-        into: BTreeSet::new(),
-        tails: BTreeSet::new(),
-    };
+    let mut w = Walked::default();
     let mut pool: BTreeSet<u64> = BTreeSet::new();
     let mut pending: Vec<(u64, ItState)> = vec![(entry, ItState::default())];
     while let Some((va, mut it)) = pending.pop() {
@@ -1462,6 +1542,7 @@ impl Walks<'_> {
         self.fuel = self
             .fuel
             .saturating_sub(crate::num::from_usize(w.seen.len()));
+        self.noreturn.extend(&w.ends);
         for &c in &w.callees {
             if self.starts.insert(c) || !self.walked.contains_key(&c) {
                 queue.push(c);
@@ -1473,6 +1554,40 @@ impl Walks<'_> {
         }
         Self::mark(&mut self.covered, &mut self.data, &w);
         self.walked.insert(e, w);
+    }
+
+    /// Walks again each function that runs on past a call to a function
+    /// found since never to return ([`Walked::ends`]), and marks covered
+    /// anew what the walks then hold.
+    ///
+    /// A call another path also jumps past is left alone: the code after
+    /// it is the function's own either way.
+    ///
+    /// # Arguments
+    ///
+    /// * `program` - The image.
+    fn settle(&mut self, program: &Program) {
+        for _ in 0..SETTLE_ROUNDS {
+            let stale: Vec<u64> = self
+                .walked
+                .iter()
+                .filter(|(_, w)| {
+                    w.seen.values().any(|i| {
+                        i.flow() == Flow::Call
+                            && !guarded(i)
+                            && i.target().is_some_and(|t| self.noreturn.contains(&t))
+                            && w.seen.contains_key(&i.next())
+                            && !w.followed.contains(&i.next())
+                    })
+                })
+                .map(|(e, _)| *e)
+                .collect();
+            if stale.is_empty() {
+                break;
+            }
+            self.redo(program, stale);
+            self.cover();
+        }
     }
 
     /// Marks a walk's bytes covered: its instructions, the literals they
@@ -1575,11 +1690,14 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         imports: &imports,
     };
     walks.drain(program, seeds);
+    walks.settle(program);
     guess::pointers(program, &mut walks);
+    walks.settle(program);
     for _ in 0..GAP_ROUNDS {
         guess::gaps(program, &mut walks);
         guess::drop_inner(program, &mut walks);
     }
+    walks.settle(program);
     for _ in 0..OUTLINE_ROUNDS {
         let promoted = outline::outlines(&mut walks);
         let redo: Vec<u64> = walks
