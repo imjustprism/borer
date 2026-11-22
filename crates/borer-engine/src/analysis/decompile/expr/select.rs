@@ -92,6 +92,18 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// `x % 2^k`, the 32-bit `x` read through its sign extension, or `None`
 /// when the select is not that shape.
 fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+    /// Returns what `e` negates, as `-v` or `0 - v`.
+    ///
+    /// # Arguments
+    ///
+    /// * `e` - The expression.
+    fn negated(e: &Expr) -> Option<&Expr> {
+        match e {
+            Expr::Un(UnOp::Neg, v) => Some(v),
+            Expr::Bin(Op::Sub, z, v) if matches!(**z, Expr::Const(0)) => Some(v),
+            _ => None,
+        }
+    }
     let Flags::Cmp(Expr::Const(0), x, bits @ (32 | 64)) = &cond.flags else {
         return None;
     };
@@ -100,17 +112,12 @@ fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
         ConditionCode::s => (b, a),
         _ => return None,
     };
-    let negated = |e: &Expr| match e {
-        Expr::Un(UnOp::Neg, v) => Some(v.as_ref().clone()),
-        Expr::Bin(Op::Sub, z, v) if matches!(**z, Expr::Const(0)) => Some(v.as_ref().clone()),
-        _ => None,
-    };
-    let (Expr::Bin(Op::And, px, pm), Expr::Bin(Op::And, nx, nm)) = (pos, &negated(neg)?) else {
+    let (Expr::Bin(Op::And, px, pm), Expr::Bin(Op::And, nx, nm)) = (pos, negated(neg)?) else {
         return None;
     };
     let m = const_of(pm)?;
     let d = m.checked_add(1).filter(|d| d.is_power_of_two() && *d > 1)?;
-    if px.as_ref() != x || negated(nx).as_ref() != Some(x) || const_of(nm) != Some(m) {
+    if px.as_ref() != x || negated(nx) != Some(x) || const_of(nm) != Some(m) {
         return None;
     }
     if d >= 1u64 << (bits - 1) {
@@ -155,21 +162,33 @@ fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 ///
 /// The arm with those selects replaced by their taken sides.
 pub(super) fn arm_under(cond: &Cond, holds: bool, arm: Expr) -> Expr {
+    /// Decides the selects on `same` and on `other`, its inverse, in `e`.
+    ///
+    /// # Arguments
+    ///
+    /// * `same` - The condition true on this side.
+    /// * `other` - Its inverse, false on this side.
+    /// * `e` - The expression.
+    fn decide(same: &Cond, other: &Cond, e: Expr) -> Expr {
+        let down = |e: Box<Expr>| Box::new(decide(same, other, *e));
+        match e {
+            Expr::Ternary(c, t, _) if *c == *same => decide(same, other, *t),
+            Expr::Ternary(c, _, f) if *c == *other => decide(same, other, *f),
+            Expr::Ternary(c, t, f) => Expr::Ternary(c, down(t), down(f)),
+            Expr::Bin(op, l, r) => Expr::Bin(op, down(l), down(r)),
+            Expr::Un(op, e) => Expr::Un(op, down(e)),
+            Expr::Sext(e, b) => Expr::Sext(down(e), b),
+            Expr::Cast(e, t) => Expr::Cast(down(e), t),
+            other => other,
+        }
+    }
     let inverse = cond.invert();
     if matches!(cond.flags, Flags::Unknown) || inverse == *cond {
         return arm;
     }
-    let down = |e: Box<Expr>| Box::new(arm_under(cond, holds, *e));
-    match arm {
-        Expr::Ternary(c, t, f) if *c == *cond => arm_under(cond, holds, *if holds { t } else { f }),
-        Expr::Ternary(c, t, f) if *c == inverse => {
-            arm_under(cond, holds, *if holds { f } else { t })
-        }
-        Expr::Ternary(c, t, f) => Expr::Ternary(c, down(t), down(f)),
-        Expr::Bin(op, l, r) => Expr::Bin(op, down(l), down(r)),
-        Expr::Un(op, e) => Expr::Un(op, down(e)),
-        Expr::Sext(e, b) => Expr::Sext(down(e), b),
-        Expr::Cast(e, t) => Expr::Cast(down(e), t),
-        other => other,
+    if holds {
+        decide(cond, &inverse, arm)
+    } else {
+        decide(&inverse, cond, arm)
     }
 }
