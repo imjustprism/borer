@@ -1649,7 +1649,8 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 /// tail call when it is one straight run that returns without touching
 /// the stack pointer, so not the caller's own epilogue
 /// ([`straight_return`]), or when the jump comes right after a `pop`, so
-/// the caller's frame is gone ([`after_pop`]). The caller is walked again
+/// the caller's frame is gone ([`after_pop`]), and no other walked
+/// function holds it: a jump into another function's body splits nothing. The caller is walked again
 /// and the jump becomes a tail call.
 ///
 /// # Arguments
@@ -1672,7 +1673,13 @@ fn outlines(walks: &mut Walks<'_>) -> bool {
                 continue;
             }
             let pred = pred.get_or_insert_with(|| predecessors(w));
-            if (stepped && straight_return(w, t, pred)) || after_pop(w, t, pred) {
+            let owned = |t: u64| {
+                walks
+                    .walked
+                    .iter()
+                    .any(|(&e, o)| e != entry && o.seen.contains_key(&t))
+            };
+            if (stepped && straight_return(w, t, pred)) || (after_pop(w, t, pred) && !owned(t)) {
                 promote.push(t);
             }
         }

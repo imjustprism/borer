@@ -433,6 +433,40 @@ fn a_jump_after_a_pop_is_a_tail_call() {
     assert!(caller.blocks.iter().all(|b| b.start < ELF_TEXT + 0xa));
 }
 
+/// A jump after a `pop` into another function's body splits nothing: the
+/// target is no start, and the function it lies in keeps it.
+#[test]
+fn a_jump_after_a_pop_into_another_body_is_no_start() {
+    let text: [u16; 8] = [
+        0xb510, // ASM: push {r4, lr}
+        0x2001, // ASM: movs r0, #1
+        0x2002, // ASM: movs r0, #2
+        0xbd10, // ASM: pop {r4, pc}
+        0xb510, // ASM: push {r4, lr}
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe7f9, // ASM: b 0x4
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let syms = [
+        ("g", ELF_TEXT | 1, GLOBAL_FUNC),
+        ("f", (ELF_TEXT + 8) | 1, GLOBAL_FUNC),
+    ];
+    let p = Program::from_bytes(
+        PathBuf::from("into.elf"),
+        elf32(&bytes, &syms, ELF_TEXT | 1),
+    )
+    .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 8]);
+    let g = a.function_at(ELF_TEXT).expect("the first function");
+    assert!(
+        g.blocks
+            .iter()
+            .any(|b| b.start <= ELF_TEXT + 4 && ELF_TEXT + 4 < b.end)
+    );
+}
+
 /// A block a conditional jump enters, which jumps back with the frame
 /// still up, stays in its function past another one: a cold block.
 #[test]
