@@ -244,7 +244,10 @@ fn nz(r: &Expr) -> (Expr, Expr) {
 /// * `r` - The result.
 /// * `carry` - The shifter's carry, 1 or 0; `None` leaves the carry.
 /// * `old` - The flags before it.
-/// * `asked` - The condition the next reader in the block asks.
+/// * `asked` - The condition the next reader in the block asks; the
+///   caller passes `eq`, `ne`, `mi` or `pl` only when every reader asks one
+///   of them, since the result alone answers no reader of the carry or the
+///   overflow, which an A32 logical instruction leaves as they were.
 pub(super) fn logical(r: Expr, carry: Option<Expr>, old: &Flags, asked: Option<Cond>) -> Flags {
     if matches!(asked, Some(Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl)) {
         return Flags::Result(r, 32);

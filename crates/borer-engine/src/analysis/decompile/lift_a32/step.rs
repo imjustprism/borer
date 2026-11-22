@@ -536,6 +536,10 @@ impl Lift<'_, '_> {
             self.ex.flags = Flags::Unknown;
         } else if i.sets {
             let asked = next_reader(later);
+            let (readers, reset) = flags::readers(later);
+            let zero_sign = |c: &Cond| matches!(c, Cond::Eq | Cond::Ne | Cond::Mi | Cond::Pl);
+            let only_zero_sign = (reset || !self.flags_out) && readers.iter().all(zero_sign);
+            let kept = asked.filter(|c| only_zero_sign || !zero_sign(c));
             let old = self.ex.flags.clone();
             self.ex.flags = match kind {
                 DpKind::Add | DpKind::Cmn => Flags::Add(a, b, 32),
@@ -558,7 +562,7 @@ impl Lift<'_, '_> {
                 | DpKind::Orn
                 | DpKind::Bic
                 | DpKind::Mov
-                | DpKind::Mvn => flags::logical(r.clone(), shifter, &old, asked),
+                | DpKind::Mvn => flags::logical(r.clone(), shifter, &old, kept),
             };
         }
         if kind.compares() {

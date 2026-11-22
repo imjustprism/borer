@@ -123,3 +123,32 @@ fn a_compare_tree_through_a_jump_to_its_default_is_a_switch() {
     }
     assert!(!text.contains("if ("), "{text}");
 }
+
+/// Selects on the carry after an `ands`, under two different carries, keep
+/// every arm and agree with the emulator.
+///
+/// `ands` sets N and Z from its result and leaves C as the compare before
+/// it set it, so two `movcs` after two `ands` of one value test different
+/// carries though their flags name the same result.
+#[test]
+fn carry_selects_after_ands_keep_every_arm_and_each_agrees_with_the_emulator() {
+    let text = agreed(&[
+        0x429a, // ASM: cmp r2, r3
+        0x4008, // ASM: ands r0, r1
+        0xbf08, // ASM: it eq
+        0x2501, // ASM: moveq r5, #1
+        0xbf28, // ASM: it cs
+        0x2502, // ASM: movcs r5, #2
+        0x42b2, // ASM: cmp r2, r6
+        0x4008, // ASM: ands r0, r1
+        0xbf08, // ASM: it eq
+        0x2503, // ASM: moveq r5, #3
+        0xbf28, // ASM: it cs
+        0x2504, // ASM: movcs r5, #4
+        0x4628, // ASM: mov r0, r5
+        0x4770, // ASM: bx lr
+    ]);
+    for k in ["r5 = 1;", "r5 = 2;", "r5 = 3;", "? 4"] {
+        assert!(text.contains(k), "{text}");
+    }
+}
