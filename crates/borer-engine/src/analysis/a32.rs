@@ -1699,7 +1699,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
     }
     walks.settle(program);
     for _ in 0..OUTLINE_ROUNDS {
-        let promoted = outline::outlines(&mut walks);
+        let promoted = outline::outlines(program, &mut walks);
         let redo: Vec<u64> = walks
             .walked
             .iter()

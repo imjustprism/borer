@@ -67,9 +67,20 @@ pub(super) fn covers(covered: &BTreeMap<u64, (u64, bool)>, va: u64) -> Option<(u
 /// * `walks` - The walks so far.
 /// * `x` - The address.
 fn opens_after_end(program: &Program, walks: &Walks<'_>, x: u64) -> bool {
-    if walks.covered.get(&x).is_none_or(|(_, insn)| !insn)
-        || walks.labels.get(&x).is_some_and(|e| *e < x)
-    {
+    walks.labels.get(&x).is_none_or(|e| *e >= x) && ends_before(program, walks, x)
+}
+
+/// Tells whether covered code at `x` follows the end of other code: an
+/// instruction lies there, and the code before it, past any padding, ends
+/// a path or is data, so nothing falls into `x`.
+///
+/// # Arguments
+///
+/// * `program` - The image.
+/// * `walks` - The walks so far.
+/// * `x` - The address.
+pub(super) fn ends_before(program: &Program, walks: &Walks<'_>, x: u64) -> bool {
+    if walks.covered.get(&x).is_none_or(|(_, insn)| !insn) {
         return false;
     }
     let mode = program.modes.at(x);

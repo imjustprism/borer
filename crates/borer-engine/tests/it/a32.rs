@@ -530,6 +530,74 @@ fn a_call_found_never_to_return_ends_earlier_callers() {
     assert_eq!(thumb_entries("noret.elf", &text), [0, 0xa, 0x10, 0x1c]);
 }
 
+/// A frameless wrapper's jump past another function is a tail call, and
+/// what it reaches a function, though it opens a frame of its own.
+#[test]
+fn a_frameless_jump_past_another_function_is_a_tail_call() {
+    let text: [u16; 14] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf803, // ASM: bl 0x10
+        0xbd08, // ASM: pop {r3, pc}
+        0x2001, // ASM: movs r0, #1
+        0xe001, // ASM: b 0x14
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+    ];
+    assert_eq!(thumb_entries("wrap.elf", &text), [0, 0xc, 0x10, 0x14]);
+}
+
+/// The same jump with no start between it and its target, and nothing
+/// else reaching the target, keeps the target a block of the jumper.
+#[test]
+fn a_frameless_jump_to_the_next_block_stays_inside() {
+    let text: [u16; 12] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf801, // ASM: bl 0x8
+        0xbd08, // ASM: pop {r3, pc}
+        0x2001, // ASM: movs r0, #1
+        0xe000, // ASM: b 0xe
+        0xbf00, // ASM: nop
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+    ];
+    assert_eq!(thumb_entries("cold.elf", &text), [0, 8]);
+}
+
+/// A body two functions jump to after popping their frames is a function,
+/// though neither jump alone passes another start.
+#[test]
+fn a_body_two_callers_tail_call_is_a_function() {
+    let text: [u16; 22] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf804, // ASM: bl 0xe
+        0xf000, 0xf807, // ASM: bl 0x18
+        0xbd08, // ASM: pop {r3, pc}
+        0xbf00, // ASM: nop
+        0xb510, // ASM: push {r4, lr}
+        0x2401, // ASM: movs r4, #1
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe005, // ASM: b 0x24
+        0xb510, // ASM: push {r4, lr}
+        0x2402, // ASM: movs r4, #2
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe000, // ASM: b 0x24
+        0xbf00, // ASM: nop
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+        0xbf00, // ASM: nop
+    ];
+    assert_eq!(thumb_entries("shared.elf", &text), [0, 0xe, 0x18, 0x24]);
+}
+
 /// Thousands of jumps after a `pop` into other functions' bodies are each
 /// refused, and the walk ends with every function its symbol names: who
 /// holds a target is looked up, not searched for in every walk.
