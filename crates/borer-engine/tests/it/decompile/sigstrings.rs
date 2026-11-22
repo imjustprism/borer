@@ -292,7 +292,7 @@ fn a_lone_trace_names_its_function_unsure() {
 ///
 /// A second candidate beside [`COND1`]; name words follow it,
 /// `audio::Store` at 0x280, `audio::Load` at 0x2c0, `Load` at 0x300 and
-/// `Store` at 0x320.
+/// `Store` at 0x320; the full signature `void audio::Load()` at 0x340.
 const OTHER: &str = "audio::Load()";
 
 /// Returns an x64 image whose `main` at 0x1000 calls one function per
@@ -328,6 +328,7 @@ fn reporters(funcs: &[&[u64]]) -> Program {
         (0x2c0, "audio::Load"),
         (0x300, "Load"),
         (0x320, "Store"),
+        (0x340, "void audio::Load()"),
     ] {
         page[off..off + text.len()].copy_from_slice(text.as_bytes());
     }
@@ -386,4 +387,14 @@ fn a_bare_function_name_decides_a_trace() {
     assert_eq!(names(&[&[0x280]]), [None]);
     assert_eq!(names(&[&[0x240, 0x320]]), [None]);
     assert_eq!(names(&[&[0x240, 0x300]]), [Some("audio::Load".to_owned())]);
+}
+
+/// A full signature of the trace's name anywhere proves the trace a call:
+/// the trace names nothing and the signature's function takes the name
+/// unnumbered, whichever comes first.
+#[test]
+fn a_full_signature_elsewhere_outranks_a_trace() {
+    let load = Some("audio::Load".to_owned());
+    assert_eq!(names(&[&[0x240], &[0x340]]), [None, load.clone()]);
+    assert_eq!(names(&[&[0x340], &[0x240]]), [load, None]);
 }

@@ -127,6 +127,11 @@ struct Traces {
 /// Fills the name and signature of every unnamed function that references a
 /// signature string only it can be, and marks those names inferred.
 ///
+/// Trace names ([`choose_traces`]) come last, once every stronger name is
+/// known: a full signature, symbol or function name spelling the same
+/// qualified name anywhere in the program proves the trace text a call, so
+/// it names nothing; a trace name is never numbered and numbers no other.
+///
 /// # Arguments
 ///
 /// * `program` - The image the strings are read from.
@@ -145,23 +150,39 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     let traced = choose_traces(&found, &traces, &named);
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     for f in &mut analysis.functions {
-        let sig = chosen.get(&f.entry).and_then(|&s| found.sigs.get(s));
-        let Some(name) = sig
-            .map(|s| &s.name)
-            .or_else(|| traced.get(&f.entry).copied())
-        else {
+        let Some(sig) = chosen.get(&f.entry).and_then(|&s| found.sigs.get(s)) else {
             continue;
         };
-        let n = seen.entry(name.clone()).or_insert(0);
+        let n = seen.entry(sig.name.clone()).or_insert(0);
         *n += 1;
         f.name = Some(if *n == 1 {
-            name.clone()
+            sig.name.clone()
         } else {
-            format!("{name}_{n}")
+            format!("{}_{n}", sig.name)
         });
         f.name_inferred = true;
-        f.name_source = sig.map_or(NameSource::Trace, |_| NameSource::Signature);
-        f.signature = sig.cloned();
+        f.name_source = NameSource::Signature;
+        f.signature = Some(sig.clone());
+    }
+    let wanted: BTreeSet<&str> = traced.values().map(|n| n.as_str()).collect();
+    let held: BTreeSet<String> = found
+        .sigs
+        .iter()
+        .map(|s| s.name.as_str())
+        .chain(analysis.functions.iter().filter_map(|f| f.name.as_deref()))
+        .chain(program.symbols.iter().map(|s| s.name.as_str()))
+        .filter(|n| wanted.contains(n))
+        .map(str::to_owned)
+        .collect();
+    for f in &mut analysis.functions {
+        let Some(name) = traced.get(&f.entry).filter(|n| !held.contains(n.as_str())) else {
+            continue;
+        };
+        if f.name.is_none() {
+            f.name = Some((*name).clone());
+            f.name_inferred = true;
+            f.name_source = NameSource::Trace;
+        }
     }
 }
 
