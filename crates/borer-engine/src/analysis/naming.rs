@@ -880,7 +880,10 @@ fn declares(head: &str, name: &str, params: &str, bound: impl Fn(&str) -> bool) 
 /// operator, so `ok && ns::Ready()` and `n == ns::Count()` are
 /// comparisons. A reference or pointer return keeps its `&` or `*` beside
 /// the type or the name (`Foo &ns::Get()`, `Foo&& ns::Take()`), never with a
-/// space on both sides.
+/// space on both sides; and the type before it is no lone lowercase word
+/// that is neither a builtin type nor a `_t` name, so `x& ns::Mask()`,
+/// `x &ns::Mask()` and `x *ns::Scale()` are a bitwise and and a product.
+/// A `const`, `struct` or qualified type before it stays a type.
 ///
 /// # Arguments
 ///
@@ -898,7 +901,16 @@ fn expression(ret: &str, name: &str) -> bool {
         });
         return !special && conversion_type(name).is_none();
     }
-    ret.contains(['=', '!', '|', '?', '+', '"', '\''])
+    let core = ret.trim_end().trim_end_matches(['*', '&', ' ']);
+    let lone = core.len() < ret.trim_end().len()
+        && !core.is_empty()
+        && core
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        && !TYPE_WORDS.contains(&core)
+        && !SPECIFIERS.contains(&core)
+        && !core.ends_with("_t");
+    lone || ret.contains(['=', '!', '|', '?', '+', '"', '\''])
         || [" && ", " & ", " * "].iter().any(|op| ret.contains(op))
 }
 
@@ -1351,6 +1363,14 @@ mod tests {
         );
         let s = parse_signature("Foo&& ns::Take(Foo&&)").expect("gcc rvalue return");
         assert_eq!(s.ret, "Foo&&");
+        for typed in [
+            "foo_t *ns::Get()",
+            "const node *ns::Head()",
+            "struct node *ns::Head()",
+            "char *ns::Name()",
+        ] {
+            assert!(parse_signature(typed).is_some(), "{typed}");
+        }
         for ctor in ["Foo::Foo(int)", "ns::Box<T>::Box()", "Foo::~Foo()"] {
             assert!(parse_signature(ctor).is_some(), "{ctor}");
         }
@@ -1362,6 +1382,9 @@ mod tests {
             "n == ns::Count()",
             "!ns::Done()",
             "a & ns::Mask()",
+            "x& ns::Mask()",
+            "x &ns::Mask()",
+            "x *ns::Scale()",
         ] {
             assert!(parse_signature(text).is_none(), "{text}");
         }
