@@ -29,8 +29,10 @@
 //!   an array of function designators initialized from the image.
 //!
 //! A name a call passes another argument count than its declaration
-//! states stays undeclared: the declaration would refuse the text rather
-//! than describe it.
+//! states stays undeclared in a function's own text: the declaration
+//! would refuse the text rather than describe it. The whole-file export
+//! declares such a callee by its own signature all the same and says in a
+//! `// warn:` line how the text disagrees ([`own_prototype`]).
 
 use super::*;
 use crate::fxmap::FxHashSet;
