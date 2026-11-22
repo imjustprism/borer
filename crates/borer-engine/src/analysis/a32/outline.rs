@@ -102,6 +102,9 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
 /// jump to that way is shared, so a function wherever it lies; code one
 /// function jumps to must lie away from it, as [`tail_jump`] says.
 ///
+/// A walk whose entry another holder runs through is that holder's own
+/// code, not another function reaching `t`, and is not counted.
+///
 /// Each walk's [`Shape`] is built once, and the work is charged to the
 /// walks' fuel: when it runs out, or the cancel flag in force is raised,
 /// the targets not yet weighed stay blocks and the discovery is marked
@@ -131,11 +134,23 @@ fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<
     let mut shapes: BTreeMap<u64, Shape> = BTreeMap::new();
     let mut spent = 0u64;
     let mut found = Vec::new();
-    for (t, held) in holders {
+    for (t, mut held) in holders {
         if spent >= walks.fuel || crate::cancel::Cancel::raised() {
             walks.incomplete = true;
             break;
         }
+        let pairs =
+            crate::num::from_usize(held.len()).saturating_mul(crate::num::from_usize(held.len()));
+        spent = spent.saturating_add(pairs);
+        let inner: Vec<u64> = held
+            .iter()
+            .copied()
+            .filter(|e| {
+                held.iter()
+                    .any(|o| o != e && walks.walked.get(o).is_some_and(|w| w.seen.contains_key(e)))
+            })
+            .collect();
+        held.retain(|e| !inner.contains(e));
         let alone = held.len() == 1;
         let tail = held.iter().all(|entry| {
             let Some(w) = walks.walked.get(entry) else {
@@ -301,8 +316,8 @@ fn sp_step(i: &Insn) -> Option<i64> {
 /// function.
 ///
 /// When no other walk holds `t`, it lies before the walk's entry or past
-/// another start, so a block laid out after the jump stays the jumper's
-/// own. Every way into `t` from outside the code `t` reaches is an
+/// the start of a function the walk does not run through, so a block laid
+/// out after the jump stays the jumper's own. Every way into `t` from outside the code `t` reaches is an
 /// unconditional jump at the entry's stack depth, the frame given back or
 /// never built ([`Shape::depth`]); no
 /// instruction of that code is reached from outside it, and the entry is
@@ -327,7 +342,10 @@ fn tail_jump(
     alone: bool,
     spent: &mut u64,
 ) -> bool {
-    let apart = t < entry || starts.range((entry + 1)..t).next().is_some();
+    let apart = t < entry
+        || starts
+            .range((entry + 1)..t)
+            .any(|s| !w.seen.contains_key(s));
     if t == entry || (alone && !apart) {
         return false;
     }

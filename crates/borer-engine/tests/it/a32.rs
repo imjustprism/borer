@@ -473,7 +473,7 @@ fn a_jump_after_a_pop_into_another_body_is_no_start() {
 ///
 /// * `name` - The file name.
 /// * `text` - The halfwords of `.text`; the entry is its first.
-fn thumb_entries(name: &str, text: &[u16]) -> Vec<u64> {
+pub(crate) fn thumb_entries(name: &str, text: &[u16]) -> Vec<u64> {
     let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
     let p =
         Program::from_bytes(PathBuf::from(name), elf32(&bytes, &[], ELF_TEXT | 1)).expect("parses");
