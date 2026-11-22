@@ -910,7 +910,7 @@ fn expression(ret: &str, name: &str) -> bool {
         && !TYPE_WORDS.contains(&core)
         && !SPECIFIERS.contains(&core)
         && !core.ends_with("_t");
-    lone || ret.contains(['=', '!', '|', '?', '+', '"', '\''])
+    lone || ret.contains(['=', '!', '|', '?', '+', '"'])
         || [" && ", " & ", " * "].iter().any(|op| ret.contains(op))
 }
 
@@ -1371,6 +1371,8 @@ mod tests {
         ] {
             assert!(parse_signature(typed).is_some(), "{typed}");
         }
+        let s = parse_signature("Foo<'a'> ns::Get()").expect("char template argument");
+        assert_eq!((s.name.as_str(), s.ret.as_str()), ("ns::Get", "Foo<'a'>"));
         for ctor in ["Foo::Foo(int)", "ns::Box<T>::Box()", "Foo::~Foo()"] {
             assert!(parse_signature(ctor).is_some(), "{ctor}");
         }
