@@ -19,7 +19,7 @@ use serde_json::{Value, json};
 
 use super::ChatPanel;
 use super::providers::{ChatHttp, Endpoint, Offered, credentials};
-use super::thread::{Chosen, Entry, Thread, Verdict, fenced};
+use super::thread::{Chosen, Entry, Runs, Thread, Verdict, fenced};
 use crate::app_view::AppWindow;
 use crate::app_view::tests::{init, load_sample, open};
 use crate::worker::{Sources, load_binary_blocking};
@@ -162,7 +162,7 @@ fn verdicts_of(thread: &Entity<Thread>, cx: &mut VisualTestContext) -> Vec<Verdi
 /// Returns Zed's fake model chosen as if it were Anthropic's API, off this machine.
 fn remote(fake: &Arc<FakeLanguageModelProvider>, model: &LanguageModel) -> Chosen {
     Chosen {
-        client: fake.clone(),
+        runs: Runs::Api(fake.clone()),
         model: model.clone(),
         endpoint: Endpoint {
             offered: Offered::Anthropic,

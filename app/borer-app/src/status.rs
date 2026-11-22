@@ -1036,7 +1036,7 @@ mod tests {
     use crate::binary::{Binary, Loading, StatusLine, kind};
     use crate::chat::ChatPanel;
     use crate::chat::providers::{Endpoint, Offered};
-    use crate::chat::thread::Chosen;
+    use crate::chat::thread::{Chosen, Runs};
     use crate::check_marks::tests::wrong_at;
     use crate::decompile_item::{DecompileItem, TabMode};
     use crate::places::Place;
@@ -1641,7 +1641,7 @@ mod tests {
             let (client, model) = (fake.clone(), model.clone());
             thread.choose(
                 Chosen {
-                    client,
+                    runs: Runs::Api(client),
                     model,
                     endpoint,
                 },

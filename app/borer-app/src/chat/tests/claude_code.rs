@@ -14,7 +14,10 @@ use serde_json::{Value, json};
 
 use super::super::claude_code::Session;
 use super::super::providers::Offered;
-use super::super::thread::{Entry, Fault, Ran, Thread, Verdict};
+use language_model::LanguageModel;
+use language_model::fake_provider::FakeLanguageModelProvider;
+
+use super::super::thread::{Chosen, Entry, Fault, Ran, Runs, Thread, Verdict};
 use super::{behind, chatting};
 
 /// What the app wrote to the fake child's input.
@@ -149,13 +152,21 @@ fn with_child(
     let (session, out, written) = fake_session(&killed, then == Then::Hangs, cx);
     out.unbounded_send(Ok(chunk(&script(entry)))).unwrap();
     drop(out);
-    let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
+    let chosen = claude(&fake, &model);
     thread.update(cx, |t, cx| {
         t.choose(chosen, cx);
         t.agree(cx);
         t.claude = Some(session);
     });
     (thread, written, killed, cx)
+}
+
+/// Returns Claude Code's model `sonnet` chosen, run by Claude Code.
+fn claude(fake: &Arc<FakeLanguageModelProvider>, model: &LanguageModel) -> Chosen {
+    Chosen {
+        runs: Runs::ClaudeCode,
+        ..behind(fake, model, (Offered::ClaudeCode, "claude"), "sonnet")
+    }
 }
 
 /// Returns Claude Code's control request `id` carrying an MCP call of `tool` with `args`.
@@ -220,6 +231,8 @@ fn a_read_call_is_answered_and_the_reply_streams(cx: &mut TestAppContext) {
     let (name, ran) = ran.unwrap();
     assert_eq!(name, "functions");
     assert!(matches!(ran, Ran::Answered { .. }), "{ran:?}");
+    let sent = thread.read_with(cx, |t, _| t.request().messages.len());
+    assert_eq!(sent, 1, "only the system prompt: no API transcript is kept");
     let wrote = lines_of(&written);
     assert_eq!(wrote[0]["type"], "user");
     assert_eq!(wrote[0]["message"]["content"], "What is here?");
@@ -318,7 +331,7 @@ fn a_stray_line_after_a_turn_is_dropped(cx: &mut TestAppContext) {
     let (_app, thread, fake, model, cx) = chatting(None, cx);
     let killed = Flag::default();
     let (session, out, written) = fake_session(&killed, true, cx);
-    let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
+    let chosen = claude(&fake, &model);
     thread.update(cx, |t, cx| {
         t.choose(chosen, cx);
         t.agree(cx);
@@ -361,7 +374,7 @@ fn a_child_that_stops_reading_ends_the_turn(cx: &mut TestAppContext) {
     });
     let from = BufReader::new(output.into_async_read());
     let session = Session::over(from, Stuck, child, Some("sonnet"), &cx.executor());
-    let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
+    let chosen = claude(&fake, &model);
     thread.update(cx, |t, cx| {
         t.choose(chosen, cx);
         t.agree(cx);

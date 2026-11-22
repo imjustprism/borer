@@ -24,7 +24,7 @@ use super::stage::{poll, stage};
 use super::{Harness, say};
 use crate::chat::ChatPanel;
 use crate::chat::providers::{Endpoint, Offered, listed};
-use crate::chat::thread::{Chosen, Entry, Thread, Verdict};
+use crate::chat::thread::{Chosen, Entry, Runs, Thread, Verdict};
 
 /// The word this demo's stages are said with.
 const CHAT: &str = "CHAT";
@@ -322,7 +322,7 @@ async fn pick(
     panel.update_in(cx, |panel, window, cx| {
         let endpoint = Endpoint::of(Offered::Anthropic, cx);
         let model = |id: &str, name: &str| Chosen {
-            client: scripted.clone(),
+            runs: Runs::Api(scripted.clone()),
             model: listed(&endpoint, id, name.to_owned(), 200_000),
             endpoint: endpoint.clone(),
         };

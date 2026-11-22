@@ -30,7 +30,7 @@ use language_model::{
 use open_ai::completion::{ChatCompletionMaxTokensParameter, into_open_ai};
 use ui::IconName;
 
-use super::thread::Chosen;
+use super::thread::{Chosen, Runs};
 
 /// Most models of a provider kept from its list.
 const MODELS_MAX: usize = 200;
@@ -85,7 +85,7 @@ pub enum Offered {
 
 impl Offered {
     /// Every provider the chat reaches over HTTP, in the picker's order.
-    pub const ALL: [Self; 6] = [
+    pub const HTTP: [Self; 6] = [
         Self::Anthropic,
         Self::OpenAi,
         Self::Google,
@@ -94,12 +94,12 @@ impl Offered {
         Self::LmStudio,
     ];
 
-    /// Returns every provider the chat offers now, in the picker's order: [`Self::ALL`], then
+    /// Returns every provider the chat offers now, in the picker's order: [`Self::HTTP`], then
     /// Claude Code when `claude` is on `PATH` ([`super::claude_code::program`]).
     #[must_use]
     pub fn on_offer() -> Vec<Self> {
         let found = super::claude_code::program().map(|_| Self::ClaudeCode);
-        Self::ALL.into_iter().chain(found).collect()
+        Self::HTTP.into_iter().chain(found).collect()
     }
 
     /// Returns what the picker and the change feed call the provider.
@@ -487,7 +487,7 @@ pub async fn models(
                 wire,
             };
             Chosen {
-                client: Arc::new(client),
+                runs: Runs::Api(Arc::new(client)),
                 model,
                 endpoint: endpoint.clone(),
             }
@@ -717,8 +717,10 @@ mod tests {
         let ids: Vec<_> = listed.iter().map(|m| m.model.id.0.to_string()).collect();
         assert_eq!(ids, ["qwen3"]);
         let chosen = &listed[0];
-        let events = chosen
-            .client
+        let super::Runs::Api(client) = &chosen.runs else {
+            panic!("an HTTP provider runs through its API");
+        };
+        let events = client
             .stream_completion(&chosen.model, hello(), &cx.to_async())
             .await
             .unwrap();
@@ -856,7 +858,7 @@ mod tests {
             default_thinking_level: None,
         };
         let mut bodies = Vec::new();
-        for offered in Offered::ALL {
+        for offered in Offered::HTTP {
             let wire = match offered {
                 Offered::Anthropic => Wire::Anthropic(claude.clone()),
                 Offered::Google => Wire::Google(gemini.clone()),
@@ -892,7 +894,7 @@ mod tests {
     async fn the_tool_definitions_sent_are_measured_and_cached(cx: &mut TestAppContext) {
         let bodies = opening_bodies(cx).await;
         let sent: Vec<Offered> = bodies.iter().map(|(offered, _)| *offered).collect();
-        assert_eq!(sent, Offered::ALL);
+        assert_eq!(sent, Offered::HTTP);
         for (offered, body) in bodies {
             let tools = body["tools"].to_string().len();
             let system = super::super::thread::SYSTEM.len();
@@ -924,7 +926,7 @@ mod tests {
     /// Every key the chat reads is kept out of a Claude Code it starts.
     #[test]
     fn every_key_the_chat_reads_is_kept_from_claude_code() {
-        for offered in Offered::ALL {
+        for offered in Offered::HTTP {
             if let Some(var) = offered.key_var() {
                 assert!(super::KEPT_FROM_CLAUDE_CODE.contains(&var), "{var}");
             }

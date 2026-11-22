@@ -19,8 +19,8 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 use borer_engine::text::one_line;
@@ -29,20 +29,15 @@ use borer_front::claude_code::{
     refuse, respond, user,
 };
 use futures::channel::mpsc;
-use futures::future::BoxFuture;
 use futures::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite};
-use futures::{AsyncWriteExt as _, FutureExt as _, SinkExt as _, StreamExt as _};
+use futures::{AsyncWriteExt as _, SinkExt as _, StreamExt as _};
 use gpui::{AsyncApp, BackgroundExecutor, Task, WeakEntity};
-use language_model::{
-    LanguageModel, LanguageModelClient, LanguageModelCompletionError,
-    LanguageModelCompletionStream, LanguageModelRequest, LanguageModelToolUse,
-    LanguageModelToolUseInput,
-};
+use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
 use serde_json::{Value, json};
 
 use super::providers::{Endpoint, KEPT_FROM_CLAUDE_CODE, listed};
 use super::thread::{
-    Chosen, Entry, Fault, SYSTEM, Spend, Thread, answer_call, fenced, step, within,
+    Chosen, Entry, Fault, Runs, SYSTEM, Spend, Thread, answer_call, fenced, step, within,
 };
 
 /// Who the turn waits on, as a silence or a failure names it.
@@ -364,7 +359,6 @@ pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<
         }
     };
     anyhow::ensure!(!models.is_empty(), "Claude Code listed no model");
-    let client: Arc<dyn LanguageModelClient> = Arc::new(Itself);
     Ok(models
         .into_iter()
         .map(|m| {
@@ -374,7 +368,7 @@ pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<
                 m.display_name
             };
             Chosen {
-                client: client.clone(),
+                runs: Runs::ClaudeCode,
                 model: listed(&endpoint, &m.value, name, WINDOW),
                 endpoint: endpoint.clone(),
             }
@@ -489,23 +483,6 @@ fn tool_use(id: &Value, name: String, args: Value) -> LanguageModelToolUse {
         input: LanguageModelToolUseInput::Json(args),
         is_input_complete: true,
         thought_signature: None,
-    }
-}
-
-/// The client a Claude Code model's [`Chosen`] holds: Claude Code runs its turns itself
-/// ([`run_turn`]), so a request sent through it is refused.
-struct Itself;
-
-impl LanguageModelClient for Itself {
-    fn stream_completion(
-        &self,
-        _model: &LanguageModel,
-        _request: LanguageModelRequest,
-        _cx: &AsyncApp,
-    ) -> BoxFuture<'static, Result<LanguageModelCompletionStream, LanguageModelCompletionError>>
-    {
-        let why = anyhow::anyhow!("Claude Code runs its turns itself; nothing was sent");
-        futures::future::ready(Err(why.into())).boxed()
     }
 }
 

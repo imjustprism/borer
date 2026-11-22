@@ -242,11 +242,31 @@ pub struct Proposal {
     pub author: Author,
 }
 
+/// What runs a chosen model's turns.
+#[derive(Clone)]
+pub enum Runs {
+    /// A provider's API, sent each request through this client, with the thread running the
+    /// agent loop and keeping the transcript it sends.
+    Api(Arc<dyn LanguageModelClient>),
+    /// The Claude Code installed on this machine, which runs its own agent loop and keeps
+    /// its own conversation ([`super::claude_code`]).
+    ClaudeCode,
+}
+
+impl std::fmt::Debug for Runs {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Api(_) => "Api",
+            Self::ClaudeCode => "ClaudeCode",
+        })
+    }
+}
+
 /// The model the person picked, and where its requests go.
 #[derive(Clone)]
 pub struct Chosen {
-    /// What sends its requests.
-    pub client: Arc<dyn LanguageModelClient>,
+    /// What runs its turns.
+    pub runs: Runs,
     /// The model.
     pub model: LanguageModel,
     /// Where its requests go, which says whether they leave the machine.
@@ -653,8 +673,10 @@ impl Thread {
         }
         let generation = self.generation;
         self.entries.push(Entry::Person(text.clone()));
-        self.messages
-            .push(message(Role::User, vec![MessageContent::Text(text)]));
+        if matches!(chosen.runs, Runs::Api(_)) {
+            self.messages
+                .push(message(Role::User, vec![MessageContent::Text(text)]));
+        }
         self.turn = Some(cx.spawn(async move |this, cx| {
             let timer = cx.background_executor().timer(TURN_MAX);
             let ended = {
@@ -1093,14 +1115,17 @@ async fn run_turn(
     generation: u64,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
-    if chosen.endpoint.offered == Offered::ClaudeCode {
-        return super::claude_code::run_turn(this, chosen, generation, cx).await;
-    }
+    let client = match &chosen.runs {
+        Runs::Api(client) => client,
+        Runs::ClaudeCode => {
+            return super::claude_code::run_turn(this, chosen, generation, cx).await;
+        }
+    };
     let mut spend = step(this, generation, cx, |thread, _| Spend::new(thread.budget))?;
     loop {
         let request = step(this, generation, cx, |thread, _| thread.request())?;
         let provider = chosen.model.provider_name.0.clone();
-        let asked = chosen.client.stream_completion(&chosen.model, request, cx);
+        let asked = client.stream_completion(&chosen.model, request, cx);
         let mut events = within(cx, &provider, asked).await??;
         step(this, generation, cx, |thread, cx| {
             thread.entries.push(Entry::Model(String::new()));
