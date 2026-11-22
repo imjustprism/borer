@@ -1136,12 +1136,7 @@ async fn run_turn(
             match event? {
                 LanguageModelCompletionEvent::Text(chunk) => {
                     text.push_str(&chunk);
-                    step(this, generation, cx, |thread, cx| {
-                        if let Some(Entry::Model(shown)) = thread.entries.last_mut() {
-                            shown.push_str(&chunk);
-                        }
-                        cx.notify();
-                    })?;
+                    step(this, generation, cx, |t, cx| t.stream_text(&chunk, cx))?;
                 }
                 LanguageModelCompletionEvent::ToolUse(call) if call.is_input_complete => {
                     uses.push(call);
