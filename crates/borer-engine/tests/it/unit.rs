@@ -463,6 +463,12 @@ fn an_export_of_one_entry_declares_its_tail_callee() {
         .collect();
     ways.dedup();
     assert_eq!(ways.len(), 1, "one way: {decls:?} in {file}");
+    let whole = named_export(&[TEXT, TEXT + 0x20]);
+    let head = whole
+        .lines()
+        .find(|l| l.contains(" twice(") && !l.ends_with(';') && !l.starts_with("//"))
+        .unwrap_or_else(|| panic!("twice is defined: {whole}"));
+    assert_eq!(ways, [format!("{head};")], "its own signature: {file}");
 }
 
 /// A data symbol a function names by its address is declared in the
@@ -506,10 +512,10 @@ fn a_variadic_or_contradicted_callee_is_declared() {
         "{file}"
     );
     let file = stated(TEXT, "uint64_t tail(void)");
+    let decls = declarations_of(&file, "twice");
+    assert!(!decls.is_empty(), "twice is declared: {file}");
     assert!(
-        declarations_of(&file, "twice")
-            .iter()
-            .all(|d| d.contains("uint32_t twice(")),
+        decls.iter().all(|d| d.contains("uint32_t twice(")),
         "{file}"
     );
     assert!(
