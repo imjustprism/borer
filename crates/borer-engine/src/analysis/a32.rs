@@ -622,7 +622,11 @@ fn walk(
     let ends: BTreeSet<u64> = w
         .seen
         .values()
-        .filter(|i| i.flow() == Flow::Call && stops.contains(&past_padding(&w, i, gap_padding)))
+        .filter(|i| {
+            i.flow() == Flow::Call
+                && !guarded(i)
+                && stops.contains(&past_padding(&w, i, gap_padding))
+        })
         .filter_map(Insn::target)
         .collect();
     w.ends = ends;
@@ -651,9 +655,11 @@ fn past_padding(w: &Walked, call: &Insn, pad: impl Fn(&Insn) -> bool) -> u64 {
 /// Returns the instructions a call of a walk falls into, past any padding,
 /// that lie in the literals or jump tables the walk itself reads.
 ///
-/// Such a call never returns: the compiler put data after it. Code that
-/// falls into a pool without a call before it says nothing as sure, and a
-/// guess walked through data would only split into more guesses.
+/// Such a call never returns: the compiler put data after it. A call under
+/// a condition is left out, since the path that skips it reaches those
+/// bytes anyway. Code that falls into a pool without a call before it says
+/// nothing as sure, and a guess walked through data would only split into
+/// more guesses.
 ///
 /// # Arguments
 ///
@@ -679,7 +685,7 @@ fn into_pool(w: &Walked) -> Vec<u64> {
     };
     w.seen
         .values()
-        .filter(|i| i.flow() == Flow::Call)
+        .filter(|i| i.flow() == Flow::Call && !guarded(i))
         .map(|call| past_padding(w, call, |i| gap_padding(i) && !data(i)))
         .filter(|va| w.seen.get(va).is_some_and(&data))
         .collect()

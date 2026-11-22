@@ -617,6 +617,36 @@ fn a_callee_that_returns_keeps_its_other_callers_tails() {
     assert!(first.blocks.iter().all(|k| k.end <= ELF_TEXT + 0x18));
 }
 
+/// A call under a condition before the function's literal does not end
+/// the path: the path that skips the call reaches the same bytes.
+#[test]
+fn a_conditional_call_before_the_literal_pool_goes_on() {
+    let text: [u16; 15] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xbd08, // ASM: pop {r3, pc}
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x4902, // ASM: ldr r1, [pc, #8]
+        0x2800, // ASM: cmp r0, #0
+        0xbf18, // ASM: it ne
+        0xf000, 0xf803, // ASM: blne 0x1c
+        0xbf00, // ASM: nop
+        0x4770, 0x4770, // ASM: .word (reads as bx lr; bx lr)
+        0x4770, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("blne.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let f = a.function_at(ELF_TEXT + 0xc).expect("the caller");
+    assert!(
+        f.blocks
+            .iter()
+            .any(|b| b.start <= ELF_TEXT + 0x18 && ELF_TEXT + 0x18 < b.end)
+    );
+}
+
 /// A frameless wrapper's jump past another function is a tail call, and
 /// what it reaches a function, though it opens a frame of its own.
 #[test]
