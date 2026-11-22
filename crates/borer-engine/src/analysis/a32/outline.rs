@@ -11,12 +11,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Walked, Walks, guarded};
-use crate::isa::a32::{self, Flow, Index, Insn, Offset, Op, PC};
+use crate::isa::a32::{self, DpKind, Flow, Index, Insn, Offset, Op, Operand, PC};
 use crate::program::Program;
 
-/// Most instructions looked back over from a jump for the `pop` that
-/// gave its frame back ([`frame_gone`]).
-const FRAME_LOOK: usize = 64;
 /// Most targets [`shared_tails`] weighs in one round of [`outlines`]; the
 /// rest wait for the next round.
 const SHARED_MAX: usize = 1 << 10;
@@ -29,8 +26,9 @@ const BODY_MAX: usize = 1 << 14;
 /// before the caller's entry or past another function's start. It is a
 /// tail call when it is one straight run that returns without touching
 /// the stack pointer, so not the caller's own epilogue
-/// ([`straight_return`]), or when the jump comes right after a `pop`, so
-/// the caller's frame is gone ([`after_pop`]), and no other walked
+/// ([`straight_return`]), or when the jump comes right after a `pop` that
+/// gives back all the caller pushed ([`after_pop`], [`Shape::depth`]), so
+/// the caller's frame is gone, and no other walked
 /// function holds it ([`owners`]): a jump into another function's body
 /// splits nothing. A block several walks hold is promoted when each of
 /// them reaches it that way ([`shared_tails`]). The caller is walked again
@@ -50,6 +48,7 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
     let mut held = None;
     for (&entry, w) in &walks.walked {
         let mut pred = None;
+        let mut shape = None;
         for &t in &w.followed {
             if t == entry || walks.starts.contains(&t) {
                 continue;
@@ -59,8 +58,16 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
                 continue;
             }
             let pred = pred.get_or_insert_with(|| predecessors(w));
+            let balanced = |shape: &mut Option<Shape>| {
+                let shape = shape.get_or_insert_with(|| Shape::of(w, entry));
+                pred.get(&t)
+                    .copied()
+                    .flatten()
+                    .is_some_and(|j| shape.depth.get(&j) == Some(&Some(0)))
+            };
             if (stepped && straight_return(w, t, pred))
                 || (after_pop(w, t, pred)
+                    && balanced(&mut shape)
                     && held
                         .get_or_insert_with(|| owners(&walks.walked))
                         .get(&t)
@@ -136,7 +143,7 @@ fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<
             };
             let shape = shapes.entry(*entry).or_insert_with(|| {
                 spent = spent.saturating_add(crate::num::from_usize(w.seen.len()));
-                Shape::of(w)
+                Shape::of(w, *entry)
             });
             tail_jump(&walks.starts, *entry, w, shape, t, alone, &mut spent)
         });
@@ -153,6 +160,13 @@ struct Shape {
     /// Every instruction that falls, jumps or dispatches to each address
     /// of the walk.
     preds: BTreeMap<u64, Vec<u64>>,
+    /// The stack depth before each instruction, in bytes from the entry's
+    /// (a push makes it negative), or `None` where two paths disagree or
+    /// an instruction before it moves `sp` in a way [`sp_step`] does not
+    /// read. A conditional return or jump (`popne {r4, pc}`) moves `sp`
+    /// only on the path that leaves, so the path past it keeps the depth;
+    /// any other conditional move of `sp` leaves the depth unknown.
+    depth: BTreeMap<u64, Option<i64>>,
 }
 
 impl Shape {
@@ -161,7 +175,8 @@ impl Shape {
     /// # Arguments
     ///
     /// * `w` - The walk.
-    fn of(w: &Walked) -> Self {
+    /// * `entry` - Its entry.
+    fn of(w: &Walked, entry: u64) -> Self {
         let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         for i in w.seen.values() {
             edges(i, &mut |to| {
@@ -175,7 +190,110 @@ impl Shape {
                 preds.entry(target).or_default().push(t.site);
             }
         }
-        Self { preds }
+        let mut depth: BTreeMap<u64, Option<i64>> = BTreeMap::from([(entry, Some(0))]);
+        let mut pending = vec![entry];
+        while let Some(va) = pending.pop() {
+            let (Some(i), Some(&d)) = (w.seen.get(&va), depth.get(&va)) else {
+                continue;
+            };
+            let step = match sp_step(i) {
+                Some(0) => Some(0),
+                _ if guarded(i) => Some(0),
+                _ if i.predicated() => None,
+                k => k,
+            };
+            let after = d.zip(step).map(|(d, k)| d.saturating_add(k));
+            let mut next = |to: u64| {
+                let new = match depth.get(&to) {
+                    None => after,
+                    Some(old) if *old == after || old.is_none() => return,
+                    Some(_) => None,
+                };
+                if w.seen.contains_key(&to) {
+                    depth.insert(to, new);
+                    pending.push(to);
+                }
+            };
+            edges(i, &mut next);
+            for t in w.tables.iter().filter(|t| t.site == va) {
+                t.targets.iter().for_each(|&x| next(x));
+            }
+        }
+        Self { preds, depth }
+    }
+}
+
+/// Returns how far an instruction moves `sp`, in bytes (a push is
+/// negative), or `None` when it writes `sp` in a way not read.
+///
+/// Zero for one that does not write it; read are a `push` or `pop`
+/// (`stmdb` and `ldmia` with writeback), a `vpush` or `vpop`, a load or
+/// store that writes `sp` back by a constant, and an `add` or `sub` of a
+/// constant to `sp`.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+fn sp_step(i: &Insn) -> Option<i64> {
+    if !i.registers().writes.contains(&a32::SP) {
+        return Some(0);
+    }
+    let words = |regs: u16| i64::from(regs.count_ones()) * 4;
+    let vwords = |first: a32::Reg, count: u8| {
+        let size = if matches!(first, a32::Reg::D(_)) {
+            8
+        } else {
+            4
+        };
+        i64::from(count) * size
+    };
+    let sp_by = |addr: a32::Addr| match addr {
+        a32::Addr {
+            base: a32::SP,
+            offset: Offset::Imm(step),
+            index: Index::Pre | Index::Post,
+        } => Some(i64::from(step)),
+        _ => None,
+    };
+    match i.op {
+        Op::Stm {
+            rn: a32::SP,
+            regs,
+            wback: true,
+            block: a32::Block::Db,
+        } => Some(-words(regs)),
+        Op::Ldm {
+            rn: a32::SP,
+            regs,
+            wback: true,
+            block: a32::Block::Ia,
+        } => Some(words(regs)),
+        Op::VStm {
+            rn: a32::SP,
+            first,
+            count,
+            wback: true,
+            db: true,
+        } => Some(-vwords(first, count)),
+        Op::VLdm {
+            rn: a32::SP,
+            first,
+            count,
+            wback: true,
+            db: false,
+        } => Some(vwords(first, count)),
+        Op::Load { rt, addr, .. } | Op::Store { rt, addr, .. } if rt != a32::SP => sp_by(addr),
+        Op::Dp {
+            kind,
+            rd: a32::SP,
+            rn: a32::SP,
+            src: Operand::Imm { value, .. },
+        } => match kind {
+            DpKind::Add => Some(i64::from(value)),
+            DpKind::Sub => Some(-i64::from(value)),
+            _ => None,
+        },
+        _ => None,
     }
 }
 
@@ -185,7 +303,8 @@ impl Shape {
 /// When no other walk holds `t`, it lies before the walk's entry or past
 /// another start, so a block laid out after the jump stays the jumper's
 /// own. Every way into `t` from outside the code `t` reaches is an
-/// unconditional jump with the frame gone ([`frame_gone`]); no
+/// unconditional jump at the entry's stack depth, the frame given back or
+/// never built ([`Shape::depth`]); no
 /// instruction of that code is reached from outside it, and the entry is
 /// not in it, so the code at `t` shares no block with the jumper. Code of
 /// more than [`BODY_MAX`] instructions is not followed: the target stays.
@@ -235,45 +354,9 @@ fn tail_jump(
                 j.flow() == Flow::Jump
                     && j.target() == Some(t)
                     && !j.predicated()
-                    && frame_gone(w, entry, *p, shape)
+                    && shape.depth.get(p) == Some(&Some(0))
             })
         })
-}
-
-/// Tells whether the stack is as the function found it at the jump at
-/// `jump`.
-///
-/// Walking back from it through instructions only one way reaches, a
-/// `pop` comes before anything else touches the stack pointer, or the
-/// entry does.
-///
-/// # Arguments
-///
-/// * `w` - The walk.
-/// * `entry` - The walk's entry.
-/// * `jump` - The jump's address.
-/// * `shape` - The walk's shape.
-fn frame_gone(w: &Walked, entry: u64, jump: u64, shape: &Shape) -> bool {
-    let mut va = jump;
-    for _ in 0..FRAME_LOOK {
-        if va == entry {
-            return true;
-        }
-        let Some(p) = shape.preds.get(&va).and_then(|p| match p.as_slice() {
-            [one] => w.seen.get(one),
-            _ => None,
-        }) else {
-            return false;
-        };
-        if popped(p) {
-            return true;
-        }
-        if touches_sp(p) {
-            return false;
-        }
-        va = p.va;
-    }
-    false
 }
 
 /// Returns the addresses of a walk reached from `from`, `from` included,

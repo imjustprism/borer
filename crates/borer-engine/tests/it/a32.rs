@@ -699,6 +699,53 @@ fn a_target_another_function_falls_into_is_no_start() {
     assert_eq!(thumb_entries("fall.elf", &text), [0, 0xc, 0x18]);
 }
 
+/// A load that pops one word of a three-word frame leaves the frame
+/// behind: the jump after it is no tail call, and its target stays a
+/// block of the jumper.
+#[test]
+fn a_partial_pop_before_a_jump_is_no_tail_call() {
+    let text: [u16; 16] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf806, // ASM: bl 0x16
+        0xbd08, // ASM: pop {r3, pc}
+        0xb530, // ASM: push {r4, r5, lr}
+        0x2401, // ASM: movs r4, #1
+        0xf85d, 0x4b04, // ASM: ldr.w r4, [sp], #4
+        0xe001, // ASM: b 0x1a
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+    ];
+    assert_eq!(thumb_entries("partial.elf", &text), [0, 0xc, 0x16]);
+}
+
+/// A conditional `pop` that returns moves `sp` only on the path it leaves
+/// by: the path past it still pops its frame before the jump, a tail call.
+#[test]
+fn a_conditional_return_keeps_the_frame_of_the_path_past_it() {
+    let text: [u16; 18] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf808, // ASM: bl 0x1a
+        0xbd08, // ASM: pop {r3, pc}
+        0xb510, // ASM: push {r4, lr}
+        0x2800, // ASM: cmp r0, #0
+        0xbf18, // ASM: it ne
+        0xbd10, // ASM: popne {r4, pc}
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe001, // ASM: b 0x1e
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+    ];
+    assert_eq!(thumb_entries("popne.elf", &text), [0, 0xc, 0x1a, 0x1e]);
+}
+
 /// A frameless wrapper's jump past another function is a tail call, and
 /// what it reaches a function, though it opens a frame of its own.
 #[test]
