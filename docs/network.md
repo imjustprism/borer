@@ -28,8 +28,10 @@ borer has no telemetry or crash reporting. Only these reach the network:
   offered only when the program is on `PATH`, found by file name alone: on
   Windows the native installer's `claude.exe` (a `claude.cmd` from npm is not
   detected, and no row is shown for it), elsewhere `claude`. The app starts
-  it on this machine, in the system's temporary folder, with no built-in
-  tool and no saved session, and hands it each message over a pipe. It runs
+  it on this machine, in a new empty folder of its own under the app's data
+  folder, removed when it ends, with no built-in tool, no saved session and
+  no project or local Claude Code settings, and hands it each message over a
+  pipe. It runs
   in Claude Code's safe mode, so none of the person's Claude Code hooks,
   skills, plugins or CLAUDE.md files run or load: text from the binary
   reaches the model, and nothing configured for other work may act on it.

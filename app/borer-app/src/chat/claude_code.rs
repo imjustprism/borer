@@ -19,6 +19,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
@@ -70,10 +71,66 @@ pub(crate) fn program() -> Option<&'static Path> {
     FOUND.get()?.as_deref()
 }
 
-/// Looks for the `claude` program on `PATH` once, by file name alone ([`find`]); later calls
-/// do nothing. It stats files, so it runs off the UI thread.
+/// Looks for the `claude` program on `PATH` once, by file name alone ([`find`]).
+///
+/// It first removes the working folders earlier sessions left ([`sweep`]); later calls do
+/// nothing. It touches the disk, so it runs off the UI thread.
 pub(crate) fn probe() {
-    FOUND.get_or_init(|| find(&std::env::var_os("PATH")?, NAME));
+    FOUND.get_or_init(|| {
+        sweep(&folders());
+        find(&std::env::var_os("PATH")?, NAME)
+    });
+}
+
+/// Returns the folder under the app's data folder that holds each session's working folder.
+fn folders() -> PathBuf {
+    paths::data_dir().join("claude-code")
+}
+
+/// Removes every folder in `root`, as sessions leave them when their child had not yet
+/// exited as they dropped; one still in use stays.
+fn sweep(root: &Path) {
+    if borer_engine::program::unusable_path(root).is_some() {
+        return;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the app's own folder, past unusable_path"
+    )]
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        std::fs::remove_dir_all(entry.path()).unwrap_or(());
+    }
+}
+
+/// A session's own working folder, made empty for it and removed when it drops, so no
+/// `CLAUDE.md` or `.claude` folder of a shared place reaches Claude Code.
+#[derive(Debug)]
+struct Folder(PathBuf);
+
+impl Folder {
+    /// Makes a new empty folder in `root`, named by this process and a count.
+    ///
+    /// # Errors
+    ///
+    /// Returns that the folder could not be made.
+    fn new(root: &Path) -> anyhow::Result<Self> {
+        static NEXT: AtomicU64 = AtomicU64::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let dir = root.join(format!("{}-{n}", std::process::id()));
+        std::fs::create_dir_all(root)
+            .and_then(|()| std::fs::create_dir(&dir))
+            .with_context(|| format!("no working folder for Claude Code at {}", dir.display()))?;
+        Ok(Self(dir))
+    }
+}
+
+impl Drop for Folder {
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).unwrap_or(());
+    }
 }
 
 /// Returns the first file named `name` in the absolute folders of the `PATH` value `path`.
@@ -102,6 +159,8 @@ pub(crate) struct Session {
     model: Option<String>,
     /// The child, killed when dropped.
     _child: Box<dyn Any>,
+    /// Its working folder, removed after the child is dropped; `None` for a fake child.
+    _folder: Option<Folder>,
 }
 
 impl std::fmt::Debug for Session {
@@ -113,17 +172,18 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// Starts the `claude` program [`probe`] found with the chat's flags ([`args`]) in the
-    /// system's temporary folder.
+    /// Starts the `claude` program [`probe`] found with the chat's flags ([`args`]) in a
+    /// new working folder of its own ([`Folder`]).
     ///
     /// # Errors
     ///
     /// Returns that no `claude` was found, or that it did not start or gave no pipe.
     fn start(model: Option<&str>) -> anyhow::Result<Self> {
         let program = program().with_context(|| format!("no {NAME} was found on PATH"))?;
+        let folder = Folder::new(&folders())?;
         let mut child = util::command::new_command(program)
             .args(args(model, &SYSTEM))
-            .current_dir(std::env::temp_dir())
+            .current_dir(&folder.0)
             .stdin(util::command::Stdio::piped())
             .stdout(util::command::Stdio::piped())
             .stderr(util::command::Stdio::null())
@@ -141,12 +201,15 @@ impl Session {
             .stdout
             .take()
             .context("Claude Code gave no output pipe")?;
-        Ok(Self::over(
-            futures::io::BufReader::new(from),
-            to,
-            Box::new(child),
-            model,
-        ))
+        Ok(Self {
+            _folder: Some(folder),
+            ..Self::over(
+                futures::io::BufReader::new(from),
+                to,
+                Box::new(child),
+                model,
+            )
+        })
     }
 
     /// Returns a session over the pipes `from` and `to`; dropping it drops `child`.
@@ -161,6 +224,7 @@ impl Session {
             from: Box::new(from),
             model: model.map(str::to_owned),
             _child: child,
+            _folder: None,
         }
     }
 
@@ -407,5 +471,32 @@ mod tests {
         let found = super::find(&with_absolute, "Cargo.toml").unwrap();
         assert!(found.is_absolute());
         assert_eq!(found, here.join("Cargo.toml"));
+    }
+
+    /// A session's working folder is new and empty, gone once it drops, and a folder left
+    /// behind is swept.
+    #[test]
+    fn a_working_folder_is_private_and_removed() {
+        let root = std::env::temp_dir().join(format!("borer-cc-test-{}", std::process::id()));
+        let (one, two) = (
+            super::Folder::new(&root).unwrap(),
+            super::Folder::new(&root).unwrap(),
+        );
+        assert_ne!(one.0, two.0);
+        let is_dir = |p: &std::path::Path| {
+            borer_engine::program::checked_metadata(p)
+                .unwrap()
+                .is_some_and(|m| m.is_dir())
+        };
+        assert!(is_dir(&one.0) && is_dir(&two.0));
+        let gone = one.0.clone();
+        drop(one);
+        assert!(!is_dir(&gone));
+        drop(two);
+        let left = root.join("left");
+        std::fs::create_dir(&left).unwrap();
+        super::sweep(&root);
+        assert!(!is_dir(&left));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

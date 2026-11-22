@@ -284,11 +284,20 @@ pub fn read(line: &str) -> Result<Event, String> {
 /// stream-json --verbose`); load none of the person's customizations, slash commands or
 /// saved sessions (`--safe-mode --disable-slash-commands --no-session-persistence`), since
 /// text from the binary reaches the model and no hook, skill, plugin or CLAUDE.md the person
-/// set up for other work may run on it or shape it; offer
+/// set up for other work may run on it or shape it; read no project or local settings file,
+/// only the person's own (`--setting-sources user`); offer
 /// no built-in tool (`--tools ""`) and no MCP server but borer's, served by the app
 /// (`--strict-mcp-config --mcp-config`); allow borer's tools alone and deny every prompt
 /// (`--allowedTools`, `--permission-prompts none`); and tell the model `system` in place of
 /// Claude Code's own prompt (`--system-prompt`).
+///
+/// Claude Code 2.1.318's help says `--safe-mode` starts it with "all customizations
+/// (CLAUDE.md, skills, installed plugins, hooks, MCP servers, custom commands and agents,
+/// output styles, workflows, custom themes, keybindings, and more) disabled", while
+/// "admin-managed (policy) settings still apply" and "auth, model selection, built-in tools
+/// and plugins, and permissions work normally". So policy settings and the person's
+/// permission rules still apply; the permission rules can widen nothing here, since no
+/// built-in tool is offered and no MCP server but borer's is loaded.
 ///
 /// # Arguments
 ///
@@ -311,6 +320,8 @@ pub fn args(model: Option<&str>, system: &str) -> Vec<String> {
         "--safe-mode",
         "--disable-slash-commands",
         "--no-session-persistence",
+        "--setting-sources",
+        "user",
         "--strict-mcp-config",
         "--mcp-config",
         config.to_string().as_str(),
@@ -594,6 +605,7 @@ mod tests {
         };
         assert_eq!(after("--tools"), "");
         assert_eq!(after("--permission-prompts"), "none");
+        assert_eq!(after("--setting-sources"), "user");
         assert_eq!(after("--model"), "sonnet");
         assert_eq!(after("--system-prompt"), "be brief");
         assert!(
