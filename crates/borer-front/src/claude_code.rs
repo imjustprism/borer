@@ -53,6 +53,12 @@ pub const LINE_MAX: usize = 8 << 20;
 /// Most bytes read from Claude Code in one turn or one model listing.
 pub const TURN_MAX_BYTES: usize = 64 << 20;
 
+/// Most bytes of tool answers one turn sends Claude Code, whatever the byte budget.
+///
+/// Claude Code echoes each answer back as one line (`--verbose`), and JSON can write a byte
+/// as six, so a turn's answers stay well under what one line may hold ([`LINE_MAX`]).
+pub const ANSWERS_MAX: usize = LINE_MAX / 8;
+
 /// Most models kept from Claude Code's list.
 pub const MODELS_MAX: usize = 64;
 

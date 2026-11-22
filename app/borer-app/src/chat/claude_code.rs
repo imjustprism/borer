@@ -25,8 +25,8 @@ use std::sync::{Arc, OnceLock};
 use anyhow::Context as _;
 use borer_engine::text::one_line;
 use borer_front::claude_code::{
-    Event, LINE_MAX, Mcp, TURN_MAX_BYTES, answered, args, initialize, mcp, read, refuse, respond,
-    user,
+    ANSWERS_MAX, Event, LINE_MAX, Mcp, TURN_MAX_BYTES, answered, args, initialize, mcp, read,
+    refuse, respond, user,
 };
 use futures::channel::mpsc;
 use futures::future::BoxFuture;
@@ -436,7 +436,7 @@ pub(crate) async fn run_turn(
     };
     session.write(&user(&said.unwrap_or_default()), cx).await?;
     let mut spend = step(this, generation, cx, |thread, _| {
-        Spend::new(thread.budget())
+        Spend::new(room(thread.budget()))
     })?;
     let mut left = TURN_MAX_BYTES;
     loop {
@@ -471,6 +471,12 @@ pub(crate) async fn run_turn(
     step(this, generation, cx, |thread, _| {
         thread.claude = Some(session);
     })
+}
+
+/// Returns the bytes of tool answers a turn sends Claude Code: the byte `budget`, never more
+/// than [`ANSWERS_MAX`], so no echoed answer outgrows a line, even with no budget.
+fn room(budget: Option<usize>) -> Option<usize> {
+    Some(budget.map_or(ANSWERS_MAX, |budget| budget.min(ANSWERS_MAX)))
 }
 
 /// Returns Claude Code's call of the tool `name` with `args`, under the JSON-RPC `id`, as the
@@ -542,6 +548,16 @@ mod tests {
         assert!(matches!(&said[0].1, Ok(super::Event::Done(Ok(())))));
         let why = format!("{:#}", said[1].1.as_ref().unwrap_err());
         assert!(why.contains("over"), "{why}");
+    }
+
+    /// A turn's tool answers are capped below what an echoed line may hold, with no byte
+    /// budget as with one larger than the cap.
+    #[test]
+    fn answers_stay_below_a_line() {
+        assert_eq!(super::room(None), Some(super::ANSWERS_MAX));
+        assert_eq!(super::room(Some(usize::MAX)), Some(super::ANSWERS_MAX));
+        assert_eq!(super::room(Some(10)), Some(10));
+        assert!(super::ANSWERS_MAX.saturating_mul(6) < super::LINE_MAX);
     }
 
     /// A session's working folder is new and empty, gone once it drops, and a folder left
