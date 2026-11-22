@@ -45,6 +45,27 @@ impl AsyncWrite for Sink {
     }
 }
 
+/// An input that takes nothing, as a child that stopped reading.
+struct Stuck;
+
+impl AsyncWrite for Stuck {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Poll::Pending
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Pending
+    }
+}
+
 /// Whether the fake child was dropped, as the real one is killed.
 #[derive(Clone, Default)]
 struct Flag(Arc<AtomicBool>);
@@ -324,4 +345,37 @@ fn a_stray_line_after_a_turn_is_dropped(cx: &mut TestAppContext) {
     assert!(!entries.contains(&Entry::Model("stray".to_owned())));
     assert!(!killed.get());
     assert_eq!(lines_of(&written).len(), 2);
+}
+
+/// A child that stops reading its input ends the turn after the read wait, as a child that
+/// goes silent does, and is killed.
+#[gpui::test]
+fn a_child_that_stops_reading_ends_the_turn(cx: &mut TestAppContext) {
+    let (_app, thread, fake, model, cx) = chatting(None, cx);
+    let killed = Flag::default();
+    let (out, output) = mpsc::unbounded();
+    let child = Box::new(Child {
+        flag: killed.clone(),
+        _out: Some(out),
+    });
+    let from = BufReader::new(output.into_async_read());
+    let session = Session::over(from, Stuck, child, Some("sonnet"), &cx.executor());
+    let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
+    thread.update(cx, |t, cx| {
+        t.choose(chosen, cx);
+        t.agree(cx);
+        t.claude = Some(session);
+    });
+    thread.update(cx, |t, cx| t.send("Look".to_owned(), cx));
+    cx.run_until_parked();
+    assert!(thread.read_with(cx, |t, _| t.is_running()));
+    cx.executor()
+        .advance_clock(super::super::thread::READ_TIMEOUT);
+    cx.run_until_parked();
+    let last = thread.read_with(cx, |t, _| t.entries().last().cloned());
+    let Some(Entry::Error(said)) = last else {
+        panic!("no banner: {last:?}")
+    };
+    assert!(said.contains("no word from Claude Code"), "{said}");
+    assert!(killed.get());
 }

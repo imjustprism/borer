@@ -268,15 +268,19 @@ impl Session {
         }
     }
 
-    /// Writes `line` and flushes it.
+    /// Writes `line` and flushes it, within [`within`]'s wait.
     ///
     /// # Errors
     ///
-    /// Returns that Claude Code no longer reads.
-    async fn write(&mut self, line: &str) -> anyhow::Result<()> {
-        let wrote = self.to.write_all(line.as_bytes()).await;
+    /// Returns that Claude Code no longer reads, or took nothing in that time.
+    async fn write(&mut self, line: &str, cx: &AsyncApp) -> anyhow::Result<()> {
+        let to = &mut self.to;
+        let wrote = within(cx, WHO, async move {
+            let wrote = to.write_all(line.as_bytes()).await;
+            wrote.and(to.flush().await)
+        });
         wrote
-            .and(self.to.flush().await)
+            .await?
             .context("Claude Code stopped reading; it may have ended")
     }
 
@@ -333,7 +337,7 @@ async fn hear(mut from: impl AsyncBufRead + Unpin, mut heard: mpsc::Sender<Heard
 /// Returns that it did not start, went silent, refused, or listed nothing.
 pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<Vec<Chosen>> {
     let mut session = Session::start(None, cx).await?;
-    session.write(&initialize(LISTING)).await?;
+    session.write(&initialize(LISTING), cx).await?;
     let mut left = TURN_MAX_BYTES;
     let models = loop {
         match session.next(&mut left, cx).await? {
@@ -351,10 +355,10 @@ pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<
                     Mcp::Call { id, .. } => answered(&id, "no turn runs", true),
                 };
                 session
-                    .write(&respond(&request, &json!({ "mcp_response": reply })))
+                    .write(&respond(&request, &json!({ "mcp_response": reply })), cx)
                     .await?;
             }
-            Event::Ask { request } => session.write(&refuse(&request, REFUSED)).await?,
+            Event::Ask { request } => session.write(&refuse(&request, REFUSED), cx).await?,
             Event::Done(Err(why)) => anyhow::bail!("Claude Code: {}", one_line(&why)),
             Event::Text(_) | Event::Answered { .. } | Event::Done(Ok(())) | Event::Other => {}
         }
@@ -430,7 +434,7 @@ pub(crate) async fn run_turn(
             Session::start(model.map(str::to_owned), cx).await?
         }
     };
-    session.write(&user(&said.unwrap_or_default())).await?;
+    session.write(&user(&said.unwrap_or_default()), cx).await?;
     let mut spend = step(this, generation, cx, |thread, _| {
         Spend::new(thread.budget())
     })?;
@@ -449,7 +453,7 @@ pub(crate) async fn run_turn(
                     }
                 };
                 session
-                    .write(&respond(&request, &json!({ "mcp_response": reply })))
+                    .write(&respond(&request, &json!({ "mcp_response": reply })), cx)
                     .await?;
                 if let Some(why) = spend.spent() {
                     return step(this, generation, cx, |thread, cx| {
@@ -458,7 +462,7 @@ pub(crate) async fn run_turn(
                     });
                 }
             }
-            Event::Ask { request } => session.write(&refuse(&request, REFUSED)).await?,
+            Event::Ask { request } => session.write(&refuse(&request, REFUSED), cx).await?,
             Event::Done(Ok(())) => break,
             Event::Done(Err(why)) => anyhow::bail!("Claude Code: {}", one_line(&why)),
             Event::Answered { .. } | Event::Other => {}
