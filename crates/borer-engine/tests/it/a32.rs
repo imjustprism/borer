@@ -568,6 +568,55 @@ fn a_call_decoded_from_a_literal_marks_nothing_noreturn() {
     );
 }
 
+/// A callee one caller's literal follows, but that returns, ends only that
+/// caller's path.
+///
+/// The callee returns when its first argument is zero, as `error` does:
+/// the caller passing one stops after the call, and the caller passing
+/// zero keeps the code after it.
+#[test]
+fn a_callee_that_returns_keeps_its_other_callers_tails() {
+    let text: [u16; 24] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf809, // ASM: bl 0x1c
+        0xbd08, // ASM: pop {r3, pc}
+        0xb510, // ASM: push {r4, lr}
+        0x2001, // ASM: movs r0, #1
+        0x4901, // ASM: ldr r1, [pc, #4]
+        0xf000, 0xf809, // ASM: bl 0x28
+        0xbf00, // ASM: nop
+        0x0000, 0x2000, // ASM: .word 0x20000000
+        0xb510, // ASM: push {r4, lr}
+        0x2000, // ASM: movs r0, #0
+        0xf000, 0xf802, // ASM: bl 0x28
+        0x2005, // ASM: movs r0, #5
+        0xbd10, // ASM: pop {r4, pc}
+        0x2800, // ASM: cmp r0, #0
+        0xd000, // ASM: beq 0x2e
+        0xe7fe, // ASM: b .
+        0x4770, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("error.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 0xc, 0x1c, 0x28]);
+    let b = a
+        .function_at(ELF_TEXT + 0x1c)
+        .expect("the caller passing zero");
+    assert!(
+        b.blocks
+            .iter()
+            .any(|k| k.start <= ELF_TEXT + 0x24 && ELF_TEXT + 0x24 < k.end)
+    );
+    let first = a
+        .function_at(ELF_TEXT + 0xc)
+        .expect("the caller passing one");
+    assert!(first.blocks.iter().all(|k| k.end <= ELF_TEXT + 0x18));
+}
+
 /// A frameless wrapper's jump past another function is a tail call, and
 /// what it reaches a function, though it opens a frame of its own.
 #[test]

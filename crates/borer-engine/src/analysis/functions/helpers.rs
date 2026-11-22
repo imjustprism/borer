@@ -173,7 +173,7 @@ const EXIT_ON_STATUS_NAMES: [&str; 2] = ["error", "error_at_line"];
 /// # Arguments
 ///
 /// * `name` - The name, without a `dll!` prefix.
-pub(super) fn exits_on_status_name(name: &str) -> bool {
+pub(crate) fn exits_on_status_name(name: &str) -> bool {
     EXIT_ON_STATUS_NAMES.contains(&name)
 }
 

@@ -35,7 +35,7 @@ mod guess;
 mod outline;
 mod returns;
 
-use super::functions::helpers::is_noreturn_name;
+use super::functions::helpers::{exits_on_status_name, is_noreturn_name};
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};
 use super::{Analysis, BasicBlock, BlockTerm, Function, NameSource, RefKind, bare_name, seeds};
 use crate::isa::a32::{
@@ -1557,7 +1557,6 @@ impl Walks<'_> {
         self.fuel = self
             .fuel
             .saturating_sub(crate::num::from_usize(w.seen.len()));
-        self.noreturn.extend(&w.ends);
         for &c in &w.callees {
             if self.starts.insert(c) || !self.walked.contains_key(&c) {
                 queue.push(c);
@@ -1572,17 +1571,38 @@ impl Walks<'_> {
     }
 
     /// Walks again each function that runs on past a call to a function
-    /// found since never to return ([`Walked::ends`]), and marks covered
-    /// anew what the walks then hold.
+    /// found since never to return, and marks covered anew what the walks
+    /// then hold.
     ///
-    /// A call another path also jumps past is left alone: the code after
-    /// it is the function's own either way.
+    /// A function is found never to return when a call of it runs into
+    /// its caller's literals ([`Walked::ends`]) and its own walk has no
+    /// way back ([`never_returns`]): one such call only ends its own path,
+    /// since a function like `error` returns or not by its argument. A
+    /// name that exits only on some arguments is never taken. A call
+    /// another path also jumps past is left alone: the code after it is
+    /// the function's own either way.
     ///
     /// # Arguments
     ///
     /// * `program` - The image.
     fn settle(&mut self, program: &Program) {
         for _ in 0..SETTLE_ROUNDS {
+            let learned: Vec<u64> = self
+                .walked
+                .values()
+                .flat_map(|w| w.ends.iter().copied())
+                .filter(|c| !self.noreturn.contains(c))
+                .filter(|c| {
+                    self.walked
+                        .get(c)
+                        .is_some_and(|w| never_returns(w, &self.noreturn))
+                        && !program
+                            .symbols
+                            .iter()
+                            .any(|s| s.addr == *c && exits_on_status_name(bare_name(&s.name)))
+                })
+                .collect();
+            self.noreturn.extend(learned);
             let stale: Vec<u64> = self
                 .walked
                 .iter()
@@ -1667,6 +1687,27 @@ impl Walks<'_> {
         self.covered = first.into_iter().collect();
         self.data = stretches.into_iter().collect();
     }
+}
+
+/// Tells whether a walk shows its function never returns.
+///
+/// Every path decodes, none returns, none leaves through a register jump
+/// the walk did not resolve, and every function it tail-calls never
+/// returns either.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+/// * `noreturn` - The functions known never to return.
+fn never_returns(w: &Walked, noreturn: &BTreeSet<u64>) -> bool {
+    !w.bad
+        && w.seen.len() < WALK_MAX
+        && w.tails.iter().all(|t| noreturn.contains(t))
+        && w.seen.values().all(|i| match i.flow() {
+            Flow::Return => false,
+            Flow::Jump => i.target().is_some() || w.tables.iter().any(|t| t.site == i.va),
+            Flow::Next | Flow::CondJump | Flow::Call | Flow::Invalid => true,
+        })
 }
 
 /// Discovers an ARM32 program's functions, blocks, references and jump
