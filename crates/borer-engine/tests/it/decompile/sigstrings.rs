@@ -467,3 +467,24 @@ fn a_later_name_outranks_a_trace() {
     assert_eq!(names(0x1140).as_deref(), Some("audio::Load"));
     assert_eq!(names(0x1100), None);
 }
+
+/// A symbol spelling the trace's text, at a data address or at another
+/// function's entry, proves the trace a call: the trace names nothing.
+#[test]
+fn a_symbol_or_function_name_outranks_a_trace() {
+    let symbol = |addr: u64| Symbol {
+        name: "audio::Load".to_owned(),
+        addr,
+        kind: SymbolKind::Local,
+    };
+    let mut p = reporters(&[&[0x240]]);
+    p.symbols.push(symbol(0x2400));
+    let a = Analysis::compute(&p);
+    assert_eq!(a.function(0x1100).and_then(|f| f.name.clone()), None);
+    let mut p = reporters(&[&[0x240], &[0x320]]);
+    p.symbols.push(symbol(0x1140));
+    let a = Analysis::compute(&p);
+    let names = |e: u64| a.function(e).and_then(|f| f.name.clone());
+    assert_eq!(names(0x1140).as_deref(), Some("audio::Load"));
+    assert_eq!(names(0x1100), None);
+}

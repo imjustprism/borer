@@ -1366,6 +1366,30 @@ mod tests {
         assert!(fs[1].signature.is_none());
     }
 
+    /// A trace name of a class the function reaches through a smart pointer
+    /// came from an inlined method and is dropped like a signature name.
+    ///
+    /// # Panics
+    ///
+    /// When the trace name is kept.
+    #[test]
+    fn trace_names_of_methods_reached_through_a_pointer_are_dropped() {
+        let ptr = "Core::Ptr<Messaging::DeleteItem>::operator ->";
+        let mut fs = vec![
+            named(0x10, ptr, NameSource::Signature, Vec::new(), &[]),
+            named(
+                0x20,
+                "Messaging::DeleteItem::Ready",
+                NameSource::Trace,
+                vec![0x10],
+                &[],
+            ),
+        ];
+        fs[1].signature = None;
+        unname_inlined_signatures(&mut fs);
+        assert_eq!(fs[1].name, None);
+    }
+
     /// A trace name of a recovered class the function's class is not related
     /// to is dropped like a signature name; one of its own class stays.
     ///
