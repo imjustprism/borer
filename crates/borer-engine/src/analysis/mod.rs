@@ -155,6 +155,11 @@ pub enum NameSource {
     /// the named function's own body, code inlined from it, or code handed
     /// the string, which all reference it the same way.
     Signature,
+    /// A trace string spelling a qualified name and empty parentheses
+    /// (`Class::Method()`) that only this function references, and the
+    /// function references no full signature: unsure, since an assert's
+    /// condition reads the same.
+    Trace,
     /// A dispatcher's wrong-type message naming the type this handles.
     Handler,
     /// A vtable slot of a recovered class, numbered by position.
@@ -177,7 +182,7 @@ pub enum NameSource {
 }
 
 impl NameSource {
-    /// The short tag listings print: `-`, `sym`, `hlp`, `sig`, `hnd`,
+    /// The short tag listings print: `-`, `sym`, `hlp`, `sig`, `trc`, `hnd`,
     /// `slot`, `qt`, `fnl`, `pack`, `lib`, `objc`, `const`.
     #[must_use]
     pub fn code(self) -> &'static str {
@@ -186,6 +191,7 @@ impl NameSource {
             NameSource::Symbol => "sym",
             NameSource::Helper => "hlp",
             NameSource::Signature => "sig",
+            NameSource::Trace => "trc",
             NameSource::Handler => "hnd",
             NameSource::Slot => "slot",
             NameSource::Qt => "qt",
@@ -207,6 +213,7 @@ impl NameSource {
             NameSource::Signature => {
                 "a signature string the function references (its own body, code inlined from it, or code handed the string)"
             }
+            NameSource::Trace => "unsure: a trace string only this function references",
             NameSource::Handler => "the wrong-type message of a command handler",
             NameSource::Slot => "a vtable slot of a recovered class, numbered by position",
             NameSource::Qt => "Qt moc metadata",

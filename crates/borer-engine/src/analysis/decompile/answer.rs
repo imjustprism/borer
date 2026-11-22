@@ -260,7 +260,8 @@ fn header_lines(
 /// one line each.
 ///
 /// First where its name and types came from when a signature string gave
-/// them: the name by [`NameSource::Signature`], the types by the signature
+/// them: the name by [`NameSource::Signature`] or, unsure, by
+/// [`NameSource::Trace`], the types by the signature
 /// the function keeps, which a later name (Qt metadata, a funclet's
 /// parent) leaves in place. A name or prototype the overlay states is the
 /// user's, so the line names only what the string still gives. Then one
@@ -283,7 +284,9 @@ fn signature_notes(
     let Some(f) = analysis.function(entry) else {
         return Vec::new();
     };
-    let name = f.name_source == NameSource::Signature && !overlay.names.contains_key(&entry);
+    let traced = f.name_source == NameSource::Trace;
+    let name =
+        (traced || f.name_source == NameSource::Signature) && !overlay.names.contains_key(&entry);
     let types = f.signature.is_some() && !overlay.prototypes.contains_key(&entry);
     let what = match (name, types) {
         (true, true) => Some("name and types"),
@@ -292,7 +295,12 @@ fn signature_notes(
         (false, false) => None,
     };
     let refs = referenced_signatures(program, analysis, entry);
-    what.map(|w| format!("// {w}: {}", NameSource::Signature.describe()))
+    let source = if name && traced {
+        NameSource::Trace
+    } else {
+        NameSource::Signature
+    };
+    what.map(|w| format!("// {w}: {}", source.describe()))
         .into_iter()
         .chain(
             refs.lines

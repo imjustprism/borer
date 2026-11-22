@@ -244,20 +244,19 @@ impl FunctionRows {
     /// lists only them, then `, largest first` under
     /// [`FunctionOrder::Size`] and what was left out), the
     /// [`INCOMPLETE_NOTE`] line when the walk ran out of budget, a column
-    /// header, a `# src sig:` line saying what a signature-inferred name
-    /// rests on when the page shows one, then one `entry size blocks instrs
+    /// header, a `# src sig:` (and `# src trc:`) line saying what a name
+    /// inferred from a signature (or a trace) string rests on when the page
+    /// shows one, then one `entry size blocks instrs
     /// callers callees src name` line per row.
     #[must_use]
     pub fn spell(&self) -> String {
         let mut out = format!("# {}\n{}", self.showing(), incomplete_line(self.incomplete));
         out.push_str("# entry size blocks instrs callers callees src name\n");
-        let sig = RowSource::Found(NameSource::Signature);
-        if self.rows.iter().any(|r| r.src == sig) {
-            let _ = writeln!(
-                out,
-                "# src sig: inferred from {}",
-                NameSource::Signature.describe()
-            );
+        for source in [NameSource::Signature, NameSource::Trace] {
+            if self.rows.iter().any(|r| r.src == RowSource::Found(source)) {
+                let (code, why) = (source.code(), source.describe());
+                let _ = writeln!(out, "# src {code}: inferred from {why}");
+            }
         }
         for r in &self.rows {
             let _ = writeln!(

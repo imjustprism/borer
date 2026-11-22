@@ -457,17 +457,15 @@ pub fn export_pack(
     let mut lines = Vec::new();
     let mut unsigned = Vec::new();
     for (&entry, fname) in &wanted {
-        let inferred = !overlay.names.contains_key(&entry)
-            && analysis
-                .function(entry)
-                .is_some_and(|f| f.name_source == NameSource::Signature);
-        let note = if inferred {
-            format!(
-                "# {fname}: inferred from {}\n",
-                NameSource::Signature.describe()
-            )
-        } else {
-            String::new()
+        let source = analysis
+            .function(entry)
+            .map(|f| f.name_source)
+            .filter(|s| matches!(s, NameSource::Signature | NameSource::Trace));
+        let note = match source {
+            Some(s) if !overlay.names.contains_key(&entry) => {
+                format!("# {fname}: inferred from {}\n", s.describe())
+            }
+            _ => String::new(),
         };
         match signature(program, analysis, &index, entry) {
             Some(sig) => lines.push(format!("{note}fn {} {fname}", format_signature(&sig))),

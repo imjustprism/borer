@@ -17,6 +17,10 @@
 //! the other referrers inlined it and stay `sub_`, as does anything still
 //! ambiguous.
 //!
+//! A trace string (`Class::Method()`, no return type) reads the same as an
+//! assert's condition, so it names a function only as a weaker fallback on
+//! evidence outside the text ([`choose_traces`]), and declares no types.
+//!
 //! The template signatures GCC and Clang write (`void Box<T>::Grow() [with
 //! T = int]`) name nothing; they say what code a function holds
 //! ([`templates`]).
@@ -99,7 +103,7 @@ struct Found {
 /// * `program` - The image the strings are read from.
 /// * `analysis` - Functions and cross-references; names are written in place.
 pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
-    let found = signatures(program, analysis);
+    let (found, traces) = signatures(program, analysis);
     let mut named: BTreeSet<u64> = analysis
         .functions
         .iter()
@@ -109,32 +113,89 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     let mut assigned = vec![false; found.referrers.len()];
     let (mut chosen, _) = choose_own(&found, &mut named, &mut assigned);
     chosen.extend(choose_helpers(program, analysis, &found, &named, &assigned));
+    let traced = choose_traces(&found, &traces, &named);
     let mut seen: BTreeMap<String, u32> = BTreeMap::new();
     for f in &mut analysis.functions {
-        let Some(sig) = chosen.get(&f.entry).and_then(|&s| found.sigs.get(s)) else {
+        let sig = chosen.get(&f.entry).and_then(|&s| found.sigs.get(s));
+        let Some(name) = sig
+            .map(|s| &s.name)
+            .or_else(|| traced.get(&f.entry).copied())
+        else {
             continue;
         };
-        let n = seen.entry(sig.name.clone()).or_insert(0);
+        let n = seen.entry(name.clone()).or_insert(0);
         *n += 1;
         f.name = Some(if *n == 1 {
-            sig.name.clone()
+            name.clone()
         } else {
-            format!("{}_{n}", sig.name)
+            format!("{name}_{n}")
         });
         f.name_inferred = true;
-        f.name_source = NameSource::Signature;
-        f.signature = Some(sig.clone());
+        f.name_source = sig.map_or(NameSource::Trace, |_| NameSource::Signature);
+        f.signature = sig.cloned();
     }
 }
 
-/// Reads the signature strings the code references, each once, and
-/// records the setters among them in `analysis.classes.setters`.
+/// Names each function by the one trace string it references
+/// ([`trace_name`]) when the evidence outside the text holds.
+///
+/// Text alone cannot tell `"CVdsVolumePlex::QueryExtents()"`, a trace of
+/// the method's own name, from `"thread_util::IsMainThread()"`, an assert's
+/// condition. So the function must reference no accepted full signature
+/// (one always wins), no other function may reference the trace (a
+/// condition is shared by every site that checks it, a trace sits in its
+/// one method), and the function must reference no second trace. The name
+/// is a weaker claim ([`NameSource::Trace`]) and gives no types.
+///
+/// # Arguments
+///
+/// * `found` - The full signatures and the functions referencing them.
+/// * `traces` - Each trace name with the functions referencing it.
+/// * `named` - The functions already holding a name.
+///
+/// # Returns
+///
+/// Each named function's entry and its name.
+fn choose_traces<'t>(
+    found: &Found,
+    traces: &'t BTreeMap<String, BTreeSet<u64>>,
+    named: &BTreeSet<u64>,
+) -> BTreeMap<u64, &'t String> {
+    let mut per: BTreeMap<u64, Vec<&String>> = BTreeMap::new();
+    for (name, refs) in traces {
+        for &r in refs {
+            per.entry(r).or_default().push(name);
+        }
+    }
+    per.into_iter()
+        .filter_map(|(entry, names)| {
+            let [name] = names.as_slice() else {
+                return None;
+            };
+            let alone = traces.get(*name).is_some_and(|r| r.len() == 1);
+            (alone && !named.contains(&entry) && !found.candidates.contains_key(&entry))
+                .then_some((entry, *name))
+        })
+        .collect()
+}
+
+/// Reads the signature and trace strings the code references, each once,
+/// and records the setters among the signatures in
+/// `analysis.classes.setters`.
 ///
 /// # Arguments
 ///
 /// * `program` - The image the strings are read from.
 /// * `analysis` - Cross-references; the setters are written in place.
-fn signatures(program: &Program, analysis: &mut Analysis) -> Found {
+///
+/// # Returns
+///
+/// The full signatures, and each trace name ([`trace_name`]) with the
+/// functions referencing it.
+fn signatures(
+    program: &Program,
+    analysis: &mut Analysis,
+) -> (Found, BTreeMap<String, BTreeSet<u64>>) {
     let mut found = Found {
         sigs: Vec::new(),
         candidates: BTreeMap::new(),
@@ -148,12 +209,26 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> Found {
         .filter(|&t| in_data(program, t))
         .collect();
     let parsed = super::striped(&targets, |&target| {
-        cstr_at(program, target, SIG_MIN, SIG_MAX).and_then(|(_, text)| parse_signature(&text))
+        cstr_at(program, target, SIG_MIN, SIG_MAX)
+            .map(|(_, text)| parse_signature(&text).map_or_else(|| Err(trace_name(&text)), Ok))
     });
     let mut setters: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
-    for (target, sig) in targets.iter().zip(parsed) {
-        let (Some(sig), Some(sites)) = (sig, analysis.xrefs.get(target)) else {
+    let mut traces: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    for (target, read) in targets.iter().zip(parsed) {
+        let (Some(read), Some(sites)) = (read, analysis.xrefs.get(target)) else {
             continue;
+        };
+        let sig = match read {
+            Ok(sig) => sig,
+            Err(trace) => {
+                if let Some(name) = trace {
+                    traces
+                        .entry(name)
+                        .or_default()
+                        .extend(data_referrers(sites));
+                }
+                continue;
+            }
         };
         if let Some(class) = class_of(&sig.name)
             && let Some(member) = setter_member(&sig.name)
@@ -182,7 +257,30 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> Found {
         found.sigs.push(sig);
     }
     analysis.classes.setters = setters;
-    found
+    (found, traces)
+}
+
+/// Reads a trace string: a qualified name and empty parentheses, no return
+/// type (`CVdsVolumePlex::QueryExtents()`), which [`parse_signature`]
+/// refuses as a call.
+///
+/// # Arguments
+///
+/// * `text` - The string as read.
+///
+/// # Returns
+///
+/// The name, or `None` when the text is not one qualified name followed
+/// by `()`.
+fn trace_name(text: &str) -> Option<String> {
+    let name = text.strip_suffix("()")?;
+    let one_word = last_token(name).len() == name.len();
+    (one_word
+        && name.len() <= NAME_MAX
+        && class_of(name).is_some()
+        && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && name.chars().all(|c| ident_char(c) || ":<>,*& ".contains(c)))
+    .then(|| name.to_owned())
 }
 
 /// Names each function by the one candidate only it still references.
@@ -1164,6 +1262,34 @@ mod tests {
             "a & ns::Mask()",
         ] {
             assert!(parse_signature(text).is_none(), "{text}");
+        }
+    }
+
+    /// A trace string is one qualified name and `()`; prose, arguments,
+    /// members and unqualified calls are not.
+    ///
+    /// # Panics
+    ///
+    /// When a reading disagrees with its expectation.
+    #[test]
+    fn trace_strings_are_one_qualified_name_and_empty_parentheses() {
+        assert_eq!(
+            super::trace_name("CVdsVolumePlex::QueryExtents()").as_deref(),
+            Some("CVdsVolumePlex::QueryExtents")
+        );
+        assert_eq!(
+            super::trace_name("CComObject<CFoo, int>::CreateInstance()").as_deref(),
+            Some("CComObject<CFoo, int>::CreateInstance")
+        );
+        for text in [
+            "Error in Foo::Bar()",
+            "Foo::Bar(&p)",
+            "p->Foo::Bar()",
+            "x.Foo::Bar()",
+            "Refresh()",
+            "Foo::Bar() failed",
+        ] {
+            assert!(super::trace_name(text).is_none(), "{text}");
         }
     }
 

@@ -45,6 +45,7 @@ impl From<RowSource> for Said {
             RowSource::Found(
                 NameSource::Helper
                 | NameSource::Signature
+                | NameSource::Trace
                 | NameSource::Handler
                 | NameSource::Slot
                 | NameSource::Qt

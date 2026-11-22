@@ -8,6 +8,11 @@
 //! `thread_util::IsMainThread`, gave it a `this`, printed the condition as
 //! `__FUNCSIG__`, warned that `__FUNCSIG__` was undeclared and listed only
 //! the second assert.
+//!
+//! A call-shaped string (`Class::Method()`) is often a trace of the
+//! method's own name, so it may still name a function, unsure, when no
+//! other function references it and no full signature or second such
+//! string competes.
 
 use borer_engine::analysis::decompile::{answer_header, decompile};
 use borer_engine::analysis::{Analysis, Overlay};
@@ -242,15 +247,103 @@ fn the_shared_pretty_function_names_the_asserting_function() {
     the_pretty_function_names_it(&arm64(PRETTY), 0x1_0000, 0x1_0100);
 }
 
-/// A function whose only candidate is call-expression condition text takes
-/// no name from it and prints it as the literal.
+/// The unsure wording a name from a trace string carries.
+const UNSURE: &str = "// name: unsure: a trace string only this function references";
+
+/// A call-shaped string only one function references, and no full
+/// signature, names it with the unsure wording, no types, no `this` and no
+/// `__FUNCSIG__`, on x64 and arm64.
 #[test]
-fn condition_text_alone_names_nothing() {
+fn condition_text_one_function_alone_references_names_it_unsure() {
     for (p, entry) in [(x64("audio"), 0x1000), (arm64("audio"), 0x1_0000)] {
         let a = Analysis::compute(&p);
-        assert_eq!(a.function(entry).and_then(|f| f.name.clone()), None);
+        let f = a.function(entry).expect("a function");
+        assert_eq!(f.name.as_deref(), Some("thread_util::IsMainThread"));
+        assert!(f.signature.is_none());
+        let header = answer_header(&p, &a, &Overlay::default(), entry, None).unwrap_or_default();
+        assert!(header.lines().any(|l| l == UNSURE), "{header}");
         let text = decompile(&p, &a, &Overlay::default(), entry).expect("decompiles");
+        let signature = text.lines().find(|l| l.starts_with("// signature: "));
+        assert!(signature.is_some_and(|s| !s.contains("this")), "{text}");
         assert!(text.contains(&format!("\"{COND1}\"")), "{text}");
         assert!(!text.contains("__FUNCSIG__"), "{text}");
     }
+}
+
+/// The trace-like string at offset 0x240 of the data page, a second
+/// candidate beside [`COND1`].
+const OTHER: &str = "audio::Load()";
+
+/// Returns an x64 image whose `main` at 0x1000 calls one function per
+/// entry of `funcs`, the k-th at 0x1100 + 0x40 k, each passing the
+/// strings at its data offsets to the reporter one call each.
+///
+/// # Arguments
+///
+/// * `funcs` - Per function, the data-page offsets of the strings it passes.
+fn reporters(funcs: &[&[u64]]) -> Program {
+    let data = 0x2000u64;
+    let mut bytes = vec![0xccu8; 0x1000];
+    let mut main = Vec::new();
+    for (k, offs) in (0u64..).zip(funcs) {
+        let entry = 0x1100 + 0x40 * k;
+        main.extend(rip(0x1000 + 5 * k, &[0xe8], entry)); // ASM: call function k
+        let mut code = Vec::new();
+        for off in *offs {
+            let at = entry + from_usize(code.len());
+            code.extend(rip(at, &[0x48, 0x8d, 0x0d], data + off)); // ASM: lea rcx, [string]
+            code.extend(rip(at + 7, &[0xff, 0x15], data)); // ASM: call [reporter]
+        }
+        code.push(0xc3); // ASM: ret
+        let at = usize::try_from(entry - 0x1000).unwrap_or(0);
+        bytes[at..at + code.len()].copy_from_slice(&code);
+    }
+    main.push(0xc3); // ASM: ret
+    bytes[..main.len()].copy_from_slice(&main);
+    let mut page = strings(PRETTY);
+    page[0x240..0x240 + OTHER.len()].copy_from_slice(OTHER.as_bytes());
+    bytes.extend(page);
+    let mut p = Program::raw(
+        bytes,
+        Arch::X86_64,
+        0,
+        Some(0x1000),
+        vec![
+            Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+            Section::mapped(".rdata", data, 0x1000, 0x1000, false, false),
+        ],
+    );
+    p.symbols.push(Symbol {
+        name: "libc!assert_fail".to_owned(),
+        addr: data,
+        kind: SymbolKind::Import,
+    });
+    p
+}
+
+/// Returns the names of the functions [`reporters`] placed.
+///
+/// # Arguments
+///
+/// * `funcs` - As [`reporters`] takes them.
+fn names(funcs: &[&[u64]]) -> Vec<Option<String>> {
+    let p = reporters(funcs);
+    let a = Analysis::compute(&p);
+    (0u64..)
+        .take(funcs.len())
+        .map(|k| a.function(0x1100 + 0x40 * k).and_then(|f| f.name.clone()))
+        .collect()
+}
+
+/// Condition text two functions reference names neither; a full signature
+/// beside a call-shaped string wins; two call-shaped strings name nothing.
+#[test]
+fn a_trace_names_only_the_one_function_with_no_better_evidence() {
+    assert_eq!(names(&[&[0x140], &[0x140]]), [None, None]);
+    assert_eq!(
+        names(&[&[0x140, 0x200]]),
+        [Some("audio::GetDefaultSourceArray".to_owned())]
+    );
+    assert_eq!(names(&[&[0x140, 0x240]]), [None]);
+    assert_eq!(names(&[&[0x240]]), [Some("audio::Load".to_owned())]);
 }

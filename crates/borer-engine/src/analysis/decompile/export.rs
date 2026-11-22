@@ -105,6 +105,7 @@ pub fn left_out(f: &Function, library: Library) -> bool {
         NameSource::None
         | NameSource::Symbol
         | NameSource::Signature
+        | NameSource::Trace
         | NameSource::Handler
         | NameSource::Slot
         | NameSource::Qt
