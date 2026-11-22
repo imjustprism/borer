@@ -93,7 +93,9 @@ fn case_label(k: u64) -> String {
 ///
 /// From the root's branch, every successor that is a pure conditional
 /// block entered only from the tree and testing the same value joins the
-/// tree; every other successor is a leaf. A leaf reached only along
+/// tree; every other successor is a leaf, one off a side that matches no
+/// value taken past a block that holds only a jump
+/// ([`follow_trampoline`]). A leaf reached only along
 /// `v == K` edges is a case body under those values; a leaf reached any
 /// other way (the far side of a split, the `!=` side of the last compare)
 /// is the default, and the tree qualifies when there is at most one such
@@ -159,6 +161,7 @@ pub(super) fn try_ladder<L: Lifter>(
     let mut cases: BTreeMap<usize, Vec<u64>> = BTreeMap::new();
     let mut residual: BTreeSet<usize> = BTreeSet::new();
     let mut work: Vec<Edge> = Vec::new();
+    let mut journal = Journal::default();
     edges(&mut work, i, &root, t, f);
     while let Some(Edge { from, to: b, case }) = work.pop() {
         if let Some(k) = case {
@@ -167,6 +170,7 @@ pub(super) fn try_ladder<L: Lifter>(
             }
             continue;
         }
+        let b = follow_trampoline(ctx, st, from, b, &mut journal);
         if b != i
             && !nodes.contains(&b)
             && nodes.len() < LADDER_MAX_NODES
@@ -187,18 +191,16 @@ pub(super) fn try_ladder<L: Lifter>(
         residual.insert(b);
         cases.remove(&b);
     }
-    if residual.len() > 1 || cases.len() < LADDER_MIN_CASES || cases.len() > SWITCH_ARMS_MAX {
+    if residual.len() > 1
+        || !(LADDER_MIN_CASES..=SWITCH_ARMS_MAX).contains(&cases.len())
+        || cases.values().map(Vec::len).sum::<usize>() > SWITCH_VALUES_MAX
+        || cases
+            .keys()
+            .chain(residual.iter())
+            .any(|&l| l == i || nodes.contains(&l) || st.outside(l) || st.loops.contains(&l))
+    {
+        journal.restore(st, 0);
         return None;
-    }
-    let values: usize = cases.values().map(Vec::len).sum();
-    if values > SWITCH_VALUES_MAX {
-        return None;
-    }
-    let leaves = cases.keys().chain(residual.iter());
-    for &l in leaves {
-        if l == i || nodes.contains(&l) || st.outside(l) || st.loops.contains(&l) {
-            return None;
-        }
     }
     let switch_expr = v.render(&ctx.names());
     for &n in &nodes {

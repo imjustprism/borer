@@ -33,6 +33,7 @@ mod results;
 mod rounding;
 mod solve;
 mod switches;
+mod thumb;
 mod values;
 
 /// Decompiles one fixture function with an empty overlay.
