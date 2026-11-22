@@ -271,7 +271,8 @@ fn condition_text_one_function_alone_references_names_it_unsure() {
 }
 
 /// The trace-like string at offset 0x240 of the data page, a second
-/// candidate beside [`COND1`].
+/// candidate beside [`COND1`]; bare names follow it, `audio::Store` at
+/// 0x280 and `audio::Load` at 0x2c0.
 const OTHER: &str = "audio::Load()";
 
 /// Returns an x64 image whose `main` at 0x1000 calls one function per
@@ -301,7 +302,13 @@ fn reporters(funcs: &[&[u64]]) -> Program {
     main.push(0xc3); // ASM: ret
     bytes[..main.len()].copy_from_slice(&main);
     let mut page = strings(PRETTY);
-    page[0x240..0x240 + OTHER.len()].copy_from_slice(OTHER.as_bytes());
+    for (off, text) in [
+        (0x240, OTHER),
+        (0x280, "audio::Store"),
+        (0x2c0, "audio::Load"),
+    ] {
+        page[off..off + text.len()].copy_from_slice(text.as_bytes());
+    }
     bytes.extend(page);
     let mut p = Program::raw(
         bytes,
@@ -346,4 +353,13 @@ fn a_trace_names_only_the_one_function_with_no_better_evidence() {
     );
     assert_eq!(names(&[&[0x140, 0x240]]), [None]);
     assert_eq!(names(&[&[0x240]]), [Some("audio::Load".to_owned())]);
+}
+
+/// A bare `__FUNCTION__`-style name that differs from the trace blocks it,
+/// and one that agrees keeps it.
+#[test]
+fn a_bare_function_name_decides_a_trace() {
+    assert_eq!(names(&[&[0x240, 0x280]]), [None]);
+    assert_eq!(names(&[&[0x240, 0x2c0]]), [Some("audio::Load".to_owned())]);
+    assert_eq!(names(&[&[0x280]]), [None]);
 }

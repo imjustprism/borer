@@ -95,6 +95,15 @@ struct Found {
     referrers: Vec<BTreeSet<u64>>,
 }
 
+/// The strings that name a function without declaring it.
+#[derive(Default)]
+struct Traces {
+    /// Each trace name ([`trace_name`]) with the functions referencing it.
+    calls: BTreeMap<String, BTreeSet<u64>>,
+    /// Each function's bare qualified-name strings ([`qualified_word`]).
+    bare: BTreeMap<u64, BTreeSet<String>>,
+}
+
 /// Fills the name and signature of every unnamed function that references a
 /// signature string only it can be, and marks those names inferred.
 ///
@@ -144,13 +153,16 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
 /// condition. So the function must reference no accepted full signature
 /// (one always wins), no other function may reference the trace (a
 /// condition is shared by every site that checks it, a trace sits in its
-/// one method), and the function must reference no second trace. The name
-/// is a weaker claim ([`NameSource::Trace`]) and gives no types.
+/// one method), and the function must reference no second trace and no bare
+/// qualified name (a `__FUNCTION__` spelling, `ns::Cls::Run`) that differs from it:
+/// that one is the function's own name and the trace a call it checks. A
+/// bare name that agrees supports it. The name is a weaker claim
+/// ([`NameSource::Trace`]) and gives no types.
 ///
 /// # Arguments
 ///
 /// * `found` - The full signatures and the functions referencing them.
-/// * `traces` - Each trace name with the functions referencing it.
+/// * `traces` - The trace and bare qualified-name strings.
 /// * `named` - The functions already holding a name.
 ///
 /// # Returns
@@ -158,11 +170,11 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
 /// Each named function's entry and its name.
 fn choose_traces<'t>(
     found: &Found,
-    traces: &'t BTreeMap<String, BTreeSet<u64>>,
+    traces: &'t Traces,
     named: &BTreeSet<u64>,
 ) -> BTreeMap<u64, &'t String> {
     let mut per: BTreeMap<u64, Vec<&String>> = BTreeMap::new();
-    for (name, refs) in traces {
+    for (name, refs) in &traces.calls {
         for &r in refs {
             per.entry(r).or_default().push(name);
         }
@@ -172,9 +184,16 @@ fn choose_traces<'t>(
             let [name] = names.as_slice() else {
                 return None;
             };
-            let alone = traces.get(*name).is_some_and(|r| r.len() == 1);
-            (alone && !named.contains(&entry) && !found.candidates.contains_key(&entry))
-                .then_some((entry, *name))
+            let alone = traces.calls.get(*name).is_some_and(|r| r.len() == 1);
+            let disputed = traces
+                .bare
+                .get(&entry)
+                .is_some_and(|b| b.iter().any(|n| n != *name));
+            (alone
+                && !disputed
+                && !named.contains(&entry)
+                && !found.candidates.contains_key(&entry))
+            .then_some((entry, *name))
         })
         .collect()
 }
@@ -190,12 +209,8 @@ fn choose_traces<'t>(
 ///
 /// # Returns
 ///
-/// The full signatures, and each trace name ([`trace_name`]) with the
-/// functions referencing it.
-fn signatures(
-    program: &Program,
-    analysis: &mut Analysis,
-) -> (Found, BTreeMap<String, BTreeSet<u64>>) {
+/// The full signatures and the trace strings.
+fn signatures(program: &Program, analysis: &mut Analysis) -> (Found, Traces) {
     let mut found = Found {
         sigs: Vec::new(),
         candidates: BTreeMap::new(),
@@ -209,20 +224,35 @@ fn signatures(
         .filter(|&t| in_data(program, t))
         .collect();
     let parsed = super::striped(&targets, |&target| {
-        cstr_at(program, target, SIG_MIN, SIG_MAX)
-            .map(|(_, text)| parse_signature(&text).map_or_else(|| Err(trace_name(&text)), Ok))
+        cstr_at(program, target, SIG_MIN, SIG_MAX).map(|(_, text)| {
+            parse_signature(&text).map_or_else(
+                || {
+                    Err((
+                        trace_name(&text),
+                        qualified_word(&text).then(|| text.clone()),
+                    ))
+                },
+                Ok,
+            )
+        })
     });
     let mut setters: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
-    let mut traces: BTreeMap<String, BTreeSet<u64>> = BTreeMap::new();
+    let mut traces = Traces::default();
     for (target, read) in targets.iter().zip(parsed) {
         let (Some(read), Some(sites)) = (read, analysis.xrefs.get(target)) else {
             continue;
         };
         let sig = match read {
             Ok(sig) => sig,
-            Err(trace) => {
+            Err((trace, word)) => {
+                if let Some(word) = word {
+                    for from in data_referrers(sites) {
+                        traces.bare.entry(from).or_default().insert(word.clone());
+                    }
+                }
                 if let Some(name) = trace {
                     traces
+                        .calls
                         .entry(name)
                         .or_default()
                         .extend(data_referrers(sites));
@@ -274,13 +304,22 @@ fn signatures(
 /// by `()`.
 fn trace_name(text: &str) -> Option<String> {
     let name = text.strip_suffix("()")?;
-    let one_word = last_token(name).len() == name.len();
-    (one_word
+    qualified_word(name).then(|| name.to_owned())
+}
+
+/// Tells whether a text is one qualified name and nothing else
+/// (`ns::Cls::Run`, `Box<int, T *>::Get`): no parentheses, no space outside
+/// template arguments, at most [`NAME_MAX`] bytes.
+///
+/// # Arguments
+///
+/// * `name` - The text.
+fn qualified_word(name: &str) -> bool {
+    last_token(name).len() == name.len()
         && name.len() <= NAME_MAX
         && class_of(name).is_some()
         && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
-        && name.chars().all(|c| ident_char(c) || ":<>,*& ".contains(c)))
-    .then(|| name.to_owned())
+        && name.chars().all(|c| ident_char(c) || ":<>,*& ".contains(c))
 }
 
 /// Names each function by the one candidate only it still references.
