@@ -398,3 +398,26 @@ fn a_full_signature_elsewhere_outranks_a_trace() {
     assert_eq!(names(&[&[0x240], &[0x340]]), [None, load.clone()]);
     assert_eq!(names(&[&[0x340], &[0x240]]), [load, None]);
 }
+
+/// An exported pack leaves a trace name out and says so, so loading the
+/// pack back names nothing for certain that the program only guessed.
+#[test]
+fn a_trace_name_stays_out_of_an_exported_pack() {
+    use borer_engine::analysis::NameSource;
+    use borer_engine::analysis::sigs::export_pack;
+    use borer_engine::pack::{Pack, Packs};
+    let p = reporters(&[&[0x240]]);
+    let a = Analysis::compute(&p);
+    let f = a.function(0x1100).expect("a function");
+    assert_eq!(f.name_source, NameSource::Trace);
+    let text = export_pack(&p, &a, &Overlay::default(), "probe", true);
+    assert!(!text.contains("audio::Load"), "{text}");
+    assert!(
+        text.contains("# 1 names read from a trace string are left out"),
+        "{text}"
+    );
+    let (pack, _) = Pack::parse(&text, "probe.borer").expect("the export reads");
+    let b = Analysis::compute_with(&p, std::sync::Arc::new(Packs { packs: vec![pack] }));
+    let f = b.function(0x1100).expect("a function");
+    assert_eq!(f.name_source, NameSource::Trace);
+}

@@ -419,8 +419,9 @@ fn positional(name: &str) -> bool {
 /// * `overlay` - The names the user gave.
 /// * `name` - The pack's name.
 /// * `all` - Whether names the analysis recovered go in too, besides the
-///   user's: not a symbol's (the next build has its own), and not a name
-///   built from an address or a slot position.
+///   user's: not a symbol's (the next build has its own), not a name
+///   built from an address or a slot position, and not an unsure name from a
+///   trace string ([`NameSource::Trace`]), which a pack would load as certain.
 ///
 /// # Returns
 ///
@@ -434,9 +435,14 @@ pub fn export_pack(
     all: bool,
 ) -> String {
     let mut wanted: BTreeMap<u64, String> = BTreeMap::new();
+    let mut unsure = 0usize;
     if all {
         for f in &analysis.functions {
             let name = name_of(analysis, overlay, f.entry);
+            if f.name_source == NameSource::Trace && !overlay.names.contains_key(&f.entry) {
+                unsure += 1;
+                continue;
+            }
             if f.name.is_some()
                 && !matches!(
                     f.name_source,
@@ -457,15 +463,17 @@ pub fn export_pack(
     let mut lines = Vec::new();
     let mut unsigned = Vec::new();
     for (&entry, fname) in &wanted {
-        let source = analysis
-            .function(entry)
-            .map(|f| f.name_source)
-            .filter(|s| matches!(s, NameSource::Signature | NameSource::Trace));
-        let note = match source {
-            Some(s) if !overlay.names.contains_key(&entry) => {
-                format!("# {fname}: inferred from {}\n", s.describe())
-            }
-            _ => String::new(),
+        let inferred = !overlay.names.contains_key(&entry)
+            && analysis
+                .function(entry)
+                .is_some_and(|f| f.name_source == NameSource::Signature);
+        let note = if inferred {
+            format!(
+                "# {fname}: inferred from {}\n",
+                NameSource::Signature.describe()
+            )
+        } else {
+            String::new()
         };
         match signature(program, analysis, &index, entry) {
             Some(sig) => lines.push(format!("{note}fn {} {fname}", format_signature(&sig))),
@@ -484,6 +492,12 @@ pub fn export_pack(
     out.push_str(
         "# Add a [match] section (a string only this program holds) to load it by itself.\n",
     );
+    if unsure > 0 {
+        let _ = writeln!(
+            out,
+            "# {unsure} names read from a trace string are left out: a pack name loads as certain."
+        );
+    }
     let _ = writeln!(out, "\npack {name} 1");
     let _ = writeln!(out, "about names exported from {file}");
     out.push_str("\n[names]\n");
