@@ -1468,6 +1468,65 @@ fn a_noreturn_import_behind_an_endbr64_stub_ends_the_text() {
     assert!(text.contains("return 7;"), "{text}");
 }
 
+/// An error path two checks share, ending in an import that never
+/// returns, reads as a guard after each check, with the main path at the
+/// function's level.
+///
+/// `f(a1, a2)` checks `a1 < 0`, calls `f`, checks `a2 < 0`, then calls `g`
+/// three times and returns 1; both failed checks jump to the one block
+/// that calls `h` and then `abort`, as GCC lays out a shared error exit.
+/// Every callee is an import, so no call is left out as doing nothing. The text tests each check where it is made and the
+/// structure check agrees with it.
+#[test]
+fn a_shared_error_exit_is_a_guard_per_check() {
+    use borer_engine::analysis::decompile::traces::{Structure, check_structure};
+    let mut code = vec![
+        0x48, 0x83, 0xec, 0x28, // ASM: sub rsp, 0x28
+        0x85, 0xc9, // ASM: test ecx, ecx
+        0x78, 0x3c, // ASM: js 0x140001044
+        0x89, 0x54, 0x24, 0x30, // ASM: mov [rsp+0x30], edx
+        0xff, 0x15, 0xf6, 0x0f, 0x00, 0x00, // ASM: call [0x140002008]
+        0x83, 0x7c, 0x24, 0x30, 0x00, // ASM: cmp dword [rsp+0x30], 0
+        0x7c, 0x2b, // ASM: jl 0x140001044
+        0xb9, 0x01, 0x00, 0x00, 0x00, // ASM: mov ecx, 1
+        0xff, 0x15, 0xec, 0x0f, 0x00, 0x00, // ASM: call [0x140002010]
+        0xb9, 0x02, 0x00, 0x00, 0x00, // ASM: mov ecx, 2
+        0xff, 0x15, 0xe1, 0x0f, 0x00, 0x00, // ASM: call [0x140002010]
+        0xb9, 0x03, 0x00, 0x00, 0x00, // ASM: mov ecx, 3
+        0xff, 0x15, 0xd6, 0x0f, 0x00, 0x00, // ASM: call [0x140002010]
+        0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+        0x48, 0x83, 0xc4, 0x28, // ASM: add rsp, 0x28
+        0xc3, // ASM: ret
+        0xff, 0x15, 0xce, 0x0f, 0x00, 0x00, // ASM: call [0x140002018]
+        0xff, 0x15, 0xb0, 0x0f, 0x00, 0x00, // ASM: call [0x140002000]
+    ];
+    code.resize(0x60, 0xcc);
+    let p = program64_with_imports(
+        &code,
+        &[0; 0x20],
+        &[
+            (0x1_4000_2000, "msvcrt.dll!abort"),
+            (0x1_4000_2008, "ext.dll!f"),
+            (0x1_4000_2010, "ext.dll!g"),
+            (0x1_4000_2018, "ext.dll!h"),
+        ],
+    );
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("goto"), "{text}");
+    assert_eq!(
+        text.lines().filter(|l| *l == "  abort();").count(),
+        2,
+        "{text}"
+    );
+    assert!(text.lines().any(|l| l == "return 1;"), "{text}");
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        check_structure(&p, &a, &Overlay::default(), 0x1_4000_1000, &text),
+        Structure::Agrees,
+        "{text}"
+    );
+}
+
 /// The code a catch the text could not wrap runs stays in the text.
 ///
 /// The structurer writes it after the body under the label of the block

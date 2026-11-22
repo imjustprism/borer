@@ -683,7 +683,7 @@ fn local(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
     let mut changed = guards(list) | ladders(list) | rejoins(list) | exits(list, cx);
     changed |= falls(list, cx);
     changed |= dead(list, f) | returns(list);
-    changed || skips(list, cx, f) || flattens(list)
+    changed || skips(list, cx, f) || flattens(list, f)
 }
 
 /// Shortest `if` body, in printed lines, worth turning into an early exit.
@@ -692,23 +692,49 @@ const EARLY_EXIT_MIN: usize = 4;
 /// Most statements a tail moved into an early exit may hold.
 const EARLY_TAIL_MAX: usize = 3;
 
-/// Turns a long `if` whose body never falls out, followed by a short tail
-/// that leaves, into an early exit with the body at the same level.
+/// Turns a long `if` followed by a short tail that leaves into an early
+/// exit with the body at the same level.
 ///
-/// `if (c) { BODY } TAIL` is `if (!c) { TAIL } BODY` when no path through
-/// `BODY` reaches its end and `TAIL` is at most [`EARLY_TAIL_MAX`] plain
-/// statements ending in a `return`, `break` or `continue`: a compare ladder
-/// nesting once per compare becomes a run of early returns. Bodies shorter
-/// than [`EARLY_EXIT_MIN`] lines keep the natural form.
+/// `if (c) { BODY } TAIL` is `if (!c) { TAIL } BODY` when `BODY` ends in a
+/// `return`, `goto`, `break` or `continue` and `TAIL` is at most
+/// [`EARLY_TAIL_MAX`] plain statements, the last one control never runs
+/// past ([`stops`]): a `return`, `break` or `continue`, or a call the
+/// binary never returns from that ends its block. A compare ladder nesting
+/// once per compare becomes a run of early returns. A `BODY` that ends in
+/// a call that never returns stays: it already reads as the guard of an
+/// error path, as the source writes one.
+///
+/// When control falls off `BODY`'s end ([`ends`]), `BODY` does not end in
+/// a call, and `TAIL` ends in a call that never returns, `TAIL` is copied
+/// to `BODY`'s end first: `if (c) { BODY } TAIL` is
+/// `if (!c) { TAIL } BODY TAIL`, the error path a compiler laid out once
+/// for several checks written as a guard per check, as the source did.
+/// Each copy runs on exactly the paths that reached `TAIL` before (falling
+/// off `BODY`'s end, or `c` failing), and nothing runs after the call, so
+/// no path gains or loses a statement. The call counts only on evidence
+/// the engine has, the facts' blocks that end in a call that never
+/// returns ([`crate::analysis::functions::call_ends_path`]: a callee or
+/// import known never to return by name or by discovery, glibc's `error`
+/// with a nonzero status, or the call followed by padding or another
+/// function's entry), never the stack protector's failure call; a call
+/// not proven so leaves the text as it was. A tail that returns is not
+/// copied: whether the source wrote one exit or several is not in the
+/// binary. A `BODY` that ends in a call falls into `TAIL` right after that
+/// call, often one that never returns though no fact shows it, and a copy
+/// behind it would only repeat the error path.
+///
+/// Bodies shorter than [`EARLY_EXIT_MIN`] lines keep the natural form, and
+/// since a tail is shorter than that, a guard is never turned back.
 ///
 /// # Arguments
 ///
 /// * `list` - The statements, rewritten in place.
+/// * `f` - The facts: which blocks end in a call that never returns.
 ///
 /// # Returns
 ///
 /// Whether an `if` was turned.
-fn flattens(list: &mut Vec<Stmt>) -> bool {
+fn flattens(list: &mut Vec<Stmt>, f: &Facts<'_>) -> bool {
     for k in 0..list.len() {
         let StmtKind::If {
             cond,
@@ -718,27 +744,19 @@ fn flattens(list: &mut Vec<Stmt>) -> bool {
         else {
             continue;
         };
-        let leaves = then.iter().rfind(|s| !idle(s)).is_some_and(|s| {
-            matches!(
-                s.kind,
-                StmtKind::Return(_) | StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue
-            )
-        });
-        if !leaves
-            || !weighs(then, EARLY_EXIT_MIN, &|s| {
-                usize::from(!idle(s))
-                    + usize::from(matches!(
-                        s.kind,
-                        StmtKind::If { .. }
-                            | StmtKind::While { .. }
-                            | StmtKind::DoWhile { .. }
-                            | StmtKind::For { .. }
-                            | StmtKind::Switch { .. }
-                            | StmtKind::Block(_)
-                            | StmtKind::Try { .. }
-                    ))
-            })
-        {
+        if !weighs(then, EARLY_EXIT_MIN, &|s| {
+            usize::from(!idle(s))
+                + usize::from(matches!(
+                    s.kind,
+                    StmtKind::If { .. }
+                        | StmtKind::While { .. }
+                        | StmtKind::DoWhile { .. }
+                        | StmtKind::For { .. }
+                        | StmtKind::Switch { .. }
+                        | StmtKind::Block(_)
+                        | StmtKind::Try { .. }
+                ))
+        }) {
             continue;
         }
         let tail = list[k + 1..]
@@ -750,23 +768,31 @@ fn flattens(list: &mut Vec<Stmt>) -> bool {
                     StmtKind::Expr(_) | StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue
                 )
             })
-            .position(|s| {
-                matches!(
-                    s.kind,
-                    StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue
-                )
-            });
-        let Some(end) = tail.map(|n| k + 2 + n) else {
+            .enumerate()
+            .find(|&(n, _)| stops(list, k + 1 + n, f));
+        let Some((n, last)) = tail else {
             continue;
         };
+        let fatal = matches!(last.kind, StmtKind::Expr(_));
+        let closing = then.iter().rfind(|s| !idle(s)).map(|s| &s.kind);
+        let copied = !matches!(
+            closing,
+            Some(StmtKind::Return(_) | StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue)
+        );
+        let called = matches!(closing, Some(StmtKind::Expr(e)) if calls_out(e));
+        if copied && (!fatal || called || ends(then, f)) {
+            continue;
+        }
+        let end = k + 2 + n;
         let cond = negate(cond);
         let tail: Vec<Stmt> = list.drain(k + 1..end).collect();
         let mut body = Vec::new();
-        if let StmtKind::If { then, .. } = &mut list[k].kind {
-            body = std::mem::replace(then, tail);
-        }
-        if let StmtKind::If { cond: c, .. } = &mut list[k].kind {
+        if let StmtKind::If { cond: c, then, .. } = &mut list[k].kind {
             *c = cond;
+            if copied {
+                then.extend_from_slice(&tail);
+            }
+            body = std::mem::replace(then, tail);
         }
         list.splice(k + 1..k + 1, body);
         return true;
@@ -2150,5 +2176,90 @@ g();
         assert!(!run(&shape("abort"), &ends).contains("goto"));
         assert!(run(&shape("abort"), &BTreeSet::new()).contains("goto"));
         assert!(run(&shape("__stack_chk_fail"), &ends).contains("goto"));
+    }
+
+    /// An error path two checks share, ending in a call that never
+    /// returns, is a guard after each check.
+    ///
+    /// The main path is then at the function's level. With the call not
+    /// known to end its path, a tail longer than
+    /// [`super::EARLY_TAIL_MAX`], or the stack protector's failure call,
+    /// the checks stay nested. An `if` whose body ends in the call is the
+    /// guard already and stays, and a body that ends in a call takes no
+    /// copy.
+    #[test]
+    fn a_shared_error_call_is_a_guard_per_check() {
+        let shape = |tail: &str| {
+            format!(
+                "if (a1 < 0) goto L_10;
+f();
+if (a2 < 0) goto L_10;
+g(1);
+g(2);
+g(3);
+return 1;
+L_10:
+{tail}"
+            )
+        };
+        let run = |text: &str, ends: &BTreeSet<u64>| {
+            let mut body = build(text);
+            super::fold_jumps(&mut body, ends);
+            print(&body)
+        };
+        let ends: BTreeSet<u64> = [0x10].into_iter().collect();
+        assert_eq!(
+            run(&shape("h();\nabort();\n"), &ends),
+            "if (a1 < 0) {
+  h();
+  abort();
+}
+f();
+if (a2 < 0) {
+  h();
+  abort();
+}
+g(1);
+g(2);
+g(3);
+return 1;
+"
+        );
+        let nested = |tail: &str| {
+            format!(
+                "if (a1 >= 0) {{
+  f();
+  if (a2 >= 0) {{
+    g(1);
+    g(2);
+    g(3);
+    return 1;
+  }}
+}}
+{tail}"
+            )
+        };
+        let kept = |tail: &str, ends: &BTreeSet<u64>| {
+            assert_eq!(run(&shape(tail), ends), nested(tail));
+        };
+        kept("h();\nabort();\n", &BTreeSet::new());
+        kept("h(1);\nh(2);\nh(3);\nabort();\n", &ends);
+        kept("h();\n__stack_chk_fail();\n", &ends);
+        let guard = "if (a1 == 0) {\n  h(1);\n  h(2);\n  h(3);\n  abort();\n}\nreturn a1;\n";
+        assert_eq!(
+            run(
+                "if (a1 != 0) goto L_20;\nL_10:\nh(1);\nh(2);\nh(3);\nabort();\nL_20:\nreturn a1;\n",
+                &ends
+            ),
+            guard
+        );
+        let calls = "if (a1 >= 0) {\n  f();\n  g(1);\n  g(2);\n  g(3);\n}\nh();\nabort();\n";
+        assert_eq!(
+            run(
+                "if (a1 < 0) goto L_10;\nf();\ng(1);\ng(2);\ng(3);\nL_10:\nh();\nabort();\n",
+                &ends
+            ),
+            calls
+        );
     }
 }
