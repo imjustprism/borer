@@ -1650,8 +1650,9 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 /// the stack pointer, so not the caller's own epilogue
 /// ([`straight_return`]), or when the jump comes right after a `pop`, so
 /// the caller's frame is gone ([`after_pop`]), and no other walked
-/// function holds it: a jump into another function's body splits nothing. The caller is walked again
-/// and the jump becomes a tail call.
+/// function holds it ([`owners`]): a jump into another function's body
+/// splits nothing. The caller is walked again and the jump becomes a tail
+/// call.
 ///
 /// # Arguments
 ///
@@ -1662,6 +1663,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 /// Whether a block was promoted.
 fn outlines(walks: &mut Walks<'_>) -> bool {
     let mut promote = Vec::new();
+    let mut held = None;
     for (&entry, w) in &walks.walked {
         let mut pred = None;
         for &t in &w.followed {
@@ -1673,13 +1675,13 @@ fn outlines(walks: &mut Walks<'_>) -> bool {
                 continue;
             }
             let pred = pred.get_or_insert_with(|| predecessors(w));
-            let owned = |t: u64| {
-                walks
-                    .walked
-                    .iter()
-                    .any(|(&e, o)| e != entry && o.seen.contains_key(&t))
-            };
-            if (stepped && straight_return(w, t, pred)) || (after_pop(w, t, pred) && !owned(t)) {
+            if (stepped && straight_return(w, t, pred))
+                || (after_pop(w, t, pred)
+                    && held
+                        .get_or_insert_with(|| owners(&walks.walked))
+                        .get(&t)
+                        .is_none_or(|owner| *owner == Some(entry)))
+            {
                 promote.push(t);
             }
         }
@@ -1692,6 +1694,27 @@ fn outlines(walks: &mut Walks<'_>) -> bool {
         walks.guessed.insert(t);
     }
     promoted
+}
+
+/// Returns, for each address the walks decoded, the one walk that holds it,
+/// or `None` where several do.
+///
+/// Built once for a round of [`outlines`], so asking who holds a target
+/// costs a lookup rather than a pass over every walk.
+///
+/// # Arguments
+///
+/// * `walked` - The walks, by entry.
+fn owners(walked: &BTreeMap<u64, Walked>) -> BTreeMap<u64, Option<u64>> {
+    let mut held: BTreeMap<u64, Option<u64>> = BTreeMap::new();
+    for (&entry, w) in walked {
+        for &va in w.seen.keys() {
+            held.entry(va)
+                .and_modify(|owner| *owner = None)
+                .or_insert(Some(entry));
+        }
+    }
+    held
 }
 
 /// Tells whether `t` is reached only by an unconditional jump that a

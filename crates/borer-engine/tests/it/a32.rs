@@ -467,6 +467,42 @@ fn a_jump_after_a_pop_into_another_body_is_no_start() {
     );
 }
 
+/// Thousands of jumps after a `pop` into other functions' bodies are each
+/// refused, and the walk ends with every function its symbol names: who
+/// holds a target is looked up, not searched for in every walk.
+#[test]
+fn many_jumps_after_a_pop_into_other_bodies_stay_refused() {
+    const PAIRS: u64 = 2048;
+    let pair: [u16; 8] = [
+        0xb510, // ASM: push {r4, lr}
+        0x2001, // ASM: movs r0, #1
+        0x2002, // ASM: movs r0, #2
+        0xbd10, // ASM: pop {r4, pc}
+        0xb510, // ASM: push {r4, lr}
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe7f9, // ASM: b .-10
+    ];
+    let mut bytes = Vec::new();
+    let mut names = Vec::new();
+    for k in 0..PAIRS {
+        bytes.extend(pair.iter().flat_map(|h| h.to_le_bytes()));
+        names.push((format!("g{k}"), (ELF_TEXT + 16 * k) | 1));
+        names.push((format!("f{k}"), (ELF_TEXT + 16 * k + 8) | 1));
+    }
+    let syms: Vec<(&str, u64, u8)> = names
+        .iter()
+        .map(|(n, a)| (n.as_str(), *a, GLOBAL_FUNC))
+        .collect();
+    let p = Program::from_bytes(
+        PathBuf::from("many.elf"),
+        elf32(&bytes, &syms, ELF_TEXT | 1),
+    )
+    .expect("parses");
+    let a = Analysis::compute(&p);
+    assert!(!a.incomplete);
+    assert_eq!(a.functions.len(), usize::try_from(2 * PAIRS).expect("fits"));
+}
+
 /// A block a conditional jump enters, which jumps back with the frame
 /// still up, stays in its function past another one: a cold block.
 #[test]
