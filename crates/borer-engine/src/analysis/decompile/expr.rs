@@ -3595,8 +3595,9 @@ pub(super) fn abs_bits(v: u64, bits: u8) -> Option<u64> {
 /// `max`, `umin`, or `umax` ([`extremum`]); a full-width select of a
 /// value and its negation is `abs` ([`known_select`]); an unsigned
 /// full-width compare that selects zero over its own difference is
-/// `sub_sat` ([`saturating_sub`]). Selects on `cond` inside an arm take
-/// the side `cond` decides there ([`arm_under`]).
+/// `sub_sat` ([`saturating_sub`]); GCC's ARM remainder through the
+/// magnitude is `%` ([`known_select`]). Selects on `cond` inside
+/// an arm take the side `cond` decides there ([`arm_under`]).
 ///
 /// # Arguments
 ///

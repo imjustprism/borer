@@ -1,10 +1,10 @@
-//! The selects [`super::ternary`] reads as something else: an `abs`, and
-//! the arms a select on the same condition decides.
+//! The selects [`super::ternary`] reads as something else: an `abs`, a
+//! signed remainder, and the arms a select on the same condition decides.
 
-use super::{Cond, ConditionCode, Expr, Flags, Helper, UnOp};
+use super::{Cond, ConditionCode, Expr, Flags, Helper, Op, UnOp, const_of};
 
 /// Returns the operation a select computes, when it is one this module
-/// reads: an `abs` ([`absolute`]).
+/// reads: an `abs` ([`absolute`]) or a signed remainder ([`signed_power_remainder`]).
 ///
 /// # Arguments
 ///
@@ -16,7 +16,7 @@ use super::{Cond, ConditionCode, Expr, Flags, Helper, UnOp};
 ///
 /// The operation, or `None` when the select is none of them.
 pub(super) fn known_select(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
-    absolute(cond, a, b)
+    absolute(cond, a, b).or_else(|| signed_power_remainder(cond, a, b))
 }
 
 /// A compare-select of a value and its negation, as `abs`.
@@ -67,6 +67,65 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
     } else {
         Some(Expr::Un(UnOp::Neg, Box::new(call)))
     }
+}
+
+/// Reverses a signed remainder by a power of two taken through the
+/// magnitude.
+///
+/// GCC writes `x % 2^k` on ARM as the low bits of `x`, or the negated low
+/// bits of `-x` when `-x` is not negative: `rsbs r2, r3, #0; and r3, r3,
+/// #m; and r2, r2, #m; it pl; rsbpl r3, r2, #0` lifts as `-x >= 0 ? -(-x &
+/// m) : x & m` with `m = 2^k - 1` (arm64's `negs; and; and; csneg ..., mi`
+/// is the same select with the arms swapped). `-x` has its sign clear for
+/// every `x` from `INT_MIN + 1` to 0, where the negated low bits of the
+/// magnitude are the remainder; for a positive `x` the low bits are, and
+/// `INT_MIN`, whose negation keeps its sign, has low bits and remainder 0.
+///
+/// # Arguments
+///
+/// * `cond` - The condition, the sign of `0 - x`.
+/// * `a` - Value when true.
+/// * `b` - Value when false.
+///
+/// # Returns
+///
+/// `x % 2^k`, the 32-bit `x` read through its sign extension, or `None`
+/// when the select is not that shape.
+fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
+    let Flags::Cmp(Expr::Const(0), x, bits @ (32 | 64)) = &cond.flags else {
+        return None;
+    };
+    let (neg, pos) = match cond.cc.0 {
+        ConditionCode::ns => (a, b),
+        ConditionCode::s => (b, a),
+        _ => return None,
+    };
+    let negated = |e: &Expr| match e {
+        Expr::Un(UnOp::Neg, v) => Some(v.as_ref().clone()),
+        Expr::Bin(Op::Sub, z, v) if matches!(**z, Expr::Const(0)) => Some(v.as_ref().clone()),
+        _ => None,
+    };
+    let (Expr::Bin(Op::And, px, pm), Expr::Bin(Op::And, nx, nm)) = (pos, &negated(neg)?) else {
+        return None;
+    };
+    let m = const_of(pm)?;
+    let d = m.checked_add(1).filter(|d| d.is_power_of_two() && *d > 1)?;
+    if px.as_ref() != x || negated(nx).as_ref() != Some(x) || const_of(nm) != Some(m) {
+        return None;
+    }
+    if d >= 1u64 << (bits - 1) {
+        return None;
+    }
+    let dividend = if *bits == 32 {
+        Expr::Sext(Box::new(x.clone()), 32)
+    } else {
+        x.clone()
+    };
+    Some(Expr::Bin(
+        Op::SRem,
+        Box::new(dividend),
+        Box::new(Expr::Const(d)),
+    ))
 }
 
 /// Returns one arm of a select with the selects inside it on the same

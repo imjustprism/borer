@@ -1128,6 +1128,37 @@ fn power_quotients(t: &mut Tally, w: u8, xs: &[u64]) {
     }
 }
 
+/// The signed remainders by powers of two GCC takes on ARM through the
+/// magnitude, `-x >= 0 ? -(-x & m) : x & m`, as [`ternary`] reverses them.
+///
+/// # Arguments
+///
+/// * `t` - The tally.
+/// * `w` - The width.
+/// * `xs` - The dividends.
+fn power_remainders(t: &mut Tally, w: u8, xs: &[u64]) {
+    let neg = |e: Expr| Expr::Un(UnOp::Neg, Box::new(e));
+    for kk in 1..u64::from(w - 1) {
+        let m = k((1u64 << kk) - 1);
+        let low = b(Op::And, &X, &m);
+        let flipped = neg(b(Op::And, &neg(X), &m));
+        for (cc, a, z) in [(C::ns, &flipped, &low), (C::s, &low, &flipped)] {
+            let test = cond(cc, Flags::Cmp(k(0), X, w));
+            let before = Expr::Ternary(
+                Box::new(test.clone()),
+                Box::new(a.clone()),
+                Box::new(z.clone()),
+            );
+            let after = ternary(test, a.clone(), z.clone());
+            t.same("-x >= 0 ? -(-x & m) : x & m", &before, &after, w, xs, &[0]);
+            assert!(
+                matches!(after, Expr::Bin(Op::SRem, ..)),
+                "{w} {kk}: {after:?}"
+            );
+        }
+    }
+}
+
 /// Every rewrite the folder applies holds on every 8-bit operand.
 ///
 /// Each shape is folded with every constant and every value of its
@@ -1201,6 +1232,7 @@ fn every_rewrite_of_the_folder_holds_on_sampled_words() {
         builders(&mut t, &d);
         nested_selects(&mut t, &d);
         power_quotients(&mut t, w, &wide);
+        power_remainders(&mut t, w, &wide);
         let mut xs = wide.clone();
         let mut magics = Vec::new();
         for dv in divisors.into_iter().filter(|dv| *dv < 1 << (w - 1)) {

@@ -74,6 +74,25 @@ fn an_it_pair_of_bit_updates_agrees_with_the_emulator_as_an_if() {
     assert!(!text.contains('?'), "{text}");
 }
 
+/// GCC's remainder by a power of two through the magnitude (`rsbs`, two
+/// masks, `it pl; rsbpl`) is the signed `%` and agrees with the emulator.
+#[test]
+fn a_signed_remainder_by_a_power_of_two_agrees_with_the_emulator() {
+    let text = agreed(&[
+        0x4603, // ASM: mov r3, r0
+        0x3301, // ASM: adds r3, #1
+        0x425a, // ASM: rsbs r2, r3, #0
+        0xf003, 0x037f, // ASM: and r3, r3, #0x7f
+        0xf002, 0x027f, // ASM: and r2, r2, #0x7f
+        0xbf58, // ASM: it pl
+        0x4253, // ASM: rsbpl r3, r2, #0
+        0x4618, // ASM: mov r0, r3
+        0x4770, // ASM: bx lr
+    ]);
+    assert!(text.contains("% 128"), "{text}");
+    assert!(!text.contains('?'), "{text}");
+}
+
 /// A compare tree whose last miss jumps to the default through a block
 /// holding only that jump is one `switch`: the jump is a detour to the one
 /// default the range split also reaches.
