@@ -39,7 +39,7 @@ use language_model::{
 };
 use serde_json::{Value, json};
 
-use super::providers::{Endpoint, listed};
+use super::providers::{Endpoint, KEPT_FROM_CLAUDE_CODE, listed};
 use super::thread::{
     Chosen, Entry, Fault, SYSTEM, Spend, Thread, answer_call, fenced, step, within,
 };
@@ -181,9 +181,12 @@ impl Session {
     fn start(model: Option<&str>) -> anyhow::Result<Self> {
         let program = program().with_context(|| format!("no {NAME} was found on PATH"))?;
         let folder = Folder::new(&folders())?;
-        let mut child = util::command::new_command(program)
-            .args(args(model, &SYSTEM))
-            .current_dir(&folder.0)
+        let mut command = util::command::new_command(program);
+        command.args(args(model, &SYSTEM)).current_dir(&folder.0);
+        for var in KEPT_FROM_CLAUDE_CODE {
+            command.env_remove(var);
+        }
+        let mut child = command
             .stdin(util::command::Stdio::piped())
             .stdout(util::command::Stdio::piped())
             .stderr(util::command::Stdio::null())

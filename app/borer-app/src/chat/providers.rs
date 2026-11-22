@@ -38,6 +38,31 @@ const MODELS_MAX: usize = 200;
 /// The context window assumed for a model an OpenAI-compatible list gives no size for.
 const OPEN_AI_WINDOW: u64 = 128_000;
 
+/// The environment variable that holds Anthropic's key.
+const ANTHROPIC_KEY: &str = "ANTHROPIC_API_KEY";
+
+/// The environment variable that holds `OpenAI`'s key.
+const OPENAI_KEY: &str = "OPENAI_API_KEY";
+
+/// The environment variable that holds Google AI's key.
+const GEMINI_KEY: &str = "GEMINI_API_KEY";
+
+/// The environment variable that holds `OpenRouter`'s key.
+const OPENROUTER_KEY: &str = "OPENROUTER_API_KEY";
+
+/// The provider keys and addresses kept out of a Claude Code's environment.
+///
+/// So a Claude Code the chat starts runs on its own sign-in: every key the chat reads
+/// ([`Offered::key_var`]), and the token and base URL that would send it elsewhere.
+pub const KEPT_FROM_CLAUDE_CODE: [&str; 6] = [
+    ANTHROPIC_KEY,
+    OPENAI_KEY,
+    GEMINI_KEY,
+    OPENROUTER_KEY,
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+];
+
 /// A provider the chat offers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Offered {
@@ -110,10 +135,10 @@ impl Offered {
     #[must_use]
     pub const fn key_var(self) -> Option<&'static str> {
         match self {
-            Self::Anthropic => Some("ANTHROPIC_API_KEY"),
-            Self::OpenAi => Some("OPENAI_API_KEY"),
-            Self::Google => Some("GEMINI_API_KEY"),
-            Self::OpenRouter => Some("OPENROUTER_API_KEY"),
+            Self::Anthropic => Some(ANTHROPIC_KEY),
+            Self::OpenAi => Some(OPENAI_KEY),
+            Self::Google => Some(GEMINI_KEY),
+            Self::OpenRouter => Some(OPENROUTER_KEY),
             Self::Ollama | Self::LmStudio | Self::ClaudeCode => None,
         }
     }
@@ -892,6 +917,16 @@ mod tests {
                 | Offered::ClaudeCode => {
                     assert!(!said.contains("cache"), "{said}");
                 }
+            }
+        }
+    }
+
+    /// Every key the chat reads is kept out of a Claude Code it starts.
+    #[test]
+    fn every_key_the_chat_reads_is_kept_from_claude_code() {
+        for offered in Offered::ALL {
+            if let Some(var) = offered.key_var() {
+                assert!(super::KEPT_FROM_CLAUDE_CODE.contains(&var), "{var}");
             }
         }
     }
