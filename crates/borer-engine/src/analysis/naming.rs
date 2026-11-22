@@ -882,7 +882,7 @@ fn declares(head: &str, name: &str, params: &str, bound: impl Fn(&str) -> bool) 
 /// `x << ns::f()` are too (old GCC's spaced `pair<int> >` stays a type). A reference or pointer return keeps its `&` or `*` beside
 /// the type or the name (`Foo &ns::Get()`, `Foo&& ns::Take()`), never with a
 /// space on both sides; and the type before it is no lone lowercase word
-/// that is neither a builtin type nor a `_t` name, so `x& ns::Mask()`,
+/// that is neither a builtin type, a `_t` name nor a sized name (`uint8`, `vec3`), so `x& ns::Mask()`,
 /// `x &ns::Mask()` and `x *ns::Scale()` are a bitwise and and a product.
 /// A `const`, `struct` or qualified type before it stays a type.
 ///
@@ -910,7 +910,8 @@ fn expression(ret: &str, name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
         && !TYPE_WORDS.contains(&core)
         && !SPECIFIERS.contains(&core)
-        && !core.ends_with("_t");
+        && !core.ends_with("_t")
+        && !core.bytes().any(|b| b.is_ascii_digit());
     let unbalanced = ret.matches('<').count() != ret.matches('>').count();
     lone || unbalanced
         || ret.contains(['=', '!', '|', '?', '+', '"'])
@@ -1372,6 +1373,9 @@ mod tests {
             .expect("old gcc spacing");
         assert_eq!(s.name, "ns::Get");
         for typed in [
+            "uint8 *ns::Get()",
+            "int32 &ns::Ref()",
+            "vec3 *ns::Pos()",
             "foo_t *ns::Get()",
             "const node *ns::Head()",
             "struct node *ns::Head()",
