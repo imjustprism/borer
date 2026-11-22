@@ -17,6 +17,11 @@ use crate::program::Program;
 /// Most instructions looked back over from a jump for the `pop` that
 /// gave its frame back ([`frame_gone`]).
 const FRAME_LOOK: usize = 64;
+/// Most targets [`shared_tails`] weighs in one round of [`outlines`]; the
+/// rest wait for the next round.
+const SHARED_MAX: usize = 1 << 10;
+/// Most instructions of a target's code [`tail_jump`] follows.
+const BODY_MAX: usize = 1 << 14;
 
 /// Promotes a tail call that was walked as a block of its caller.
 ///
@@ -28,7 +33,7 @@ const FRAME_LOOK: usize = 64;
 /// the caller's frame is gone ([`after_pop`]), and no other walked
 /// function holds it ([`owners`]): a jump into another function's body
 /// splits nothing. A block several walks hold is promoted when each of
-/// them reaches it that way ([`shared_tail`]). The caller is walked again
+/// them reaches it that way ([`shared_tails`]). The caller is walked again
 /// and the jump becomes a tail call.
 ///
 /// # Arguments
@@ -67,11 +72,8 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             }
         }
     }
-    promote.extend(
-        shared
-            .into_iter()
-            .filter(|&t| shared_tail(program, walks, t)),
-    );
+    let shared: Vec<u64> = shared.into_iter().take(SHARED_MAX).collect();
+    promote.extend(shared_tails(program, walks, &shared));
     promote.sort_unstable();
     promote.dedup();
     let promoted = !promote.is_empty();
@@ -82,82 +84,160 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
     promoted
 }
 
-/// Tells whether every walk that holds `t` reaches it by a tail call.
+/// Returns the targets among `cands` that every walk holding them reaches
+/// by a tail call.
 ///
-/// The code before `t` ends a path or is data, so no walk falls into it
-/// ([`super::guess::ends_before`]), and each walk holding it reaches it
+/// The code before a target ends a path or is data, so no walk falls into
+/// it ([`super::guess::ends_before`]), and each walk holding it reaches it
 /// as [`tail_jump`] says. That is how two thin wrappers jumping on to one
 /// function they set arguments up for look, a frameless `mov r1, #1; b
 /// f` as well as one that pops its frame first. Code several functions
 /// jump to that way is shared, so a function wherever it lies; code one
 /// function jumps to must lie away from it, as [`tail_jump`] says.
 ///
+/// Each walk's [`Shape`] is built once, and the work is charged to the
+/// walks' fuel: when it runs out, or the cancel flag in force is raised,
+/// the targets not yet weighed stay blocks and the discovery is marked
+/// incomplete.
+///
 /// # Arguments
 ///
 /// * `program` - The image.
-/// * `walks` - The walks.
-/// * `t` - The jump target.
-fn shared_tail(program: &Program, walks: &Walks<'_>, t: u64) -> bool {
-    if !super::guess::ends_before(program, walks, t) {
-        return false;
-    }
-    let holders: Vec<(u64, &Walked)> = walks
-        .walked
+/// * `walks` - The walks; their fuel is spent.
+/// * `cands` - The targets, at most [`SHARED_MAX`].
+fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<u64> {
+    let cands: BTreeSet<u64> = cands
         .iter()
-        .filter(|(_, w)| w.seen.contains_key(&t))
-        .map(|(&e, w)| (e, w))
+        .copied()
+        .filter(|&t| super::guess::ends_before(program, walks, t))
         .collect();
-    let alone = holders.len() == 1;
-    !holders.is_empty()
-        && holders
-            .iter()
-            .all(|&(entry, w)| tail_jump(&walks.starts, entry, w, t, alone))
+    let mut holders: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for (&entry, w) in &walks.walked {
+        if let (Some((&lo, _)), Some((&hi, _))) =
+            (w.seen.first_key_value(), w.seen.last_key_value())
+        {
+            for &t in cands.range(lo..=hi).filter(|t| w.seen.contains_key(t)) {
+                holders.entry(t).or_default().push(entry);
+            }
+        }
+    }
+    let mut shapes: BTreeMap<u64, Shape> = BTreeMap::new();
+    let mut spent = 0u64;
+    let mut found = Vec::new();
+    for (t, held) in holders {
+        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
+            walks.incomplete = true;
+            break;
+        }
+        let alone = held.len() == 1;
+        let tail = held.iter().all(|entry| {
+            let Some(w) = walks.walked.get(entry) else {
+                return false;
+            };
+            let shape = shapes.entry(*entry).or_insert_with(|| {
+                spent = spent.saturating_add(crate::num::from_usize(w.seen.len()));
+                Shape::of(w)
+            });
+            tail_jump(&walks.starts, *entry, w, shape, t, alone, &mut spent)
+        });
+        if tail {
+            found.push(t);
+        }
+    }
+    walks.fuel = walks.fuel.saturating_sub(spent);
+    found
+}
+
+/// What [`tail_jump`] reads off one walk, built once per round.
+struct Shape {
+    /// Every instruction that falls, jumps or dispatches to each address
+    /// of the walk.
+    preds: BTreeMap<u64, Vec<u64>>,
+}
+
+impl Shape {
+    /// Builds a walk's shape.
+    ///
+    /// # Arguments
+    ///
+    /// * `w` - The walk.
+    fn of(w: &Walked) -> Self {
+        let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        for i in w.seen.values() {
+            edges(i, &mut |to| {
+                if w.seen.contains_key(&to) {
+                    preds.entry(to).or_default().push(i.va);
+                }
+            });
+        }
+        for t in &w.tables {
+            for &target in &t.targets {
+                preds.entry(target).or_default().push(t.site);
+            }
+        }
+        Self { preds }
+    }
 }
 
 /// Tells whether one walk reaches `t` only by jumps that leave the
 /// function.
 ///
-/// Every way in is an unconditional jump with the frame gone
-/// ([`frame_gone`]); when no other walk holds `t`, it lies before the
-/// walk's entry or past another start, so a block laid out after the jump
-/// stays the jumper's own; and nothing the entry reaches without passing
-/// `t` is reached from `t` too, so the code at `t` shares no block with
-/// the jumper.
+/// When no other walk holds `t`, it lies before the walk's entry or past
+/// another start, so a block laid out after the jump stays the jumper's
+/// own. Every way into `t` from outside the code `t` reaches is an
+/// unconditional jump with the frame gone ([`frame_gone`]); no
+/// instruction of that code is reached from outside it, and the entry is
+/// not in it, so the code at `t` shares no block with the jumper. Code of
+/// more than [`BODY_MAX`] instructions is not followed: the target stays.
 ///
 /// # Arguments
 ///
 /// * `starts` - The known function starts.
 /// * `entry` - The walk's entry.
 /// * `w` - The walk.
+/// * `shape` - Its shape.
 /// * `t` - The jump target.
 /// * `alone` - Whether no other walk holds `t`.
-fn tail_jump(starts: &BTreeSet<u64>, entry: u64, w: &Walked, t: u64, alone: bool) -> bool {
-    if t == entry || (alone && t > entry && starts.range((entry + 1)..t).next().is_none()) {
+/// * `spent` - The work done, increased by the instructions followed.
+fn tail_jump(
+    starts: &BTreeSet<u64>,
+    entry: u64,
+    w: &Walked,
+    shape: &Shape,
+    t: u64,
+    alone: bool,
+    spent: &mut u64,
+) -> bool {
+    let apart = t < entry || starts.range((entry + 1)..t).next().is_some();
+    if t == entry || (alone && !apart) {
         return false;
     }
-    let pred = predecessors(w);
-    let body = reach(w, t, t);
-    let mut ins = Vec::new();
-    for i in w.seen.values().filter(|i| !body.contains(&i.va)) {
-        edges(i, &mut |to| {
-            if to == t {
-                ins.push(i);
-            }
-        });
-    }
-    let jumps = !ins.is_empty()
-        && w.tables.iter().all(|tab| !tab.targets.contains(&t))
-        && ins.iter().all(|j| {
-            j.flow() == Flow::Jump
-                && j.target() == Some(t)
-                && !j.predicated()
-                && frame_gone(w, entry, j.va, &pred)
-        });
-    if !jumps {
+    let Some(body) = reach(w, t, BODY_MAX) else {
+        *spent = spent.saturating_add(crate::num::from_usize(BODY_MAX));
+        return false;
+    };
+    *spent = spent.saturating_add(crate::num::from_usize(body.len()));
+    let preds = |va: u64| shape.preds.get(&va).map_or(&[][..], Vec::as_slice);
+    let shut = body
+        .iter()
+        .all(|&b| b == t || preds(b).iter().all(|p| body.contains(p)));
+    if body.contains(&entry) || !shut {
         return false;
     }
-    let before = reach(w, entry, t);
-    !body.iter().any(|va| before.contains(va))
+    let ins: Vec<u64> = preds(t)
+        .iter()
+        .copied()
+        .filter(|p| !body.contains(p))
+        .collect();
+    !ins.is_empty()
+        && ins.iter().all(|p| {
+            w.seen.get(p).is_some_and(|j| {
+                j.flow() == Flow::Jump
+                    && j.target() == Some(t)
+                    && !j.predicated()
+                    && frame_gone(w, entry, *p, shape)
+            })
+        })
 }
 
 /// Tells whether the stack is as the function found it at the jump at
@@ -172,19 +252,17 @@ fn tail_jump(starts: &BTreeSet<u64>, entry: u64, w: &Walked, t: u64, alone: bool
 /// * `w` - The walk.
 /// * `entry` - The walk's entry.
 /// * `jump` - The jump's address.
-/// * `pred` - Each address's single predecessor ([`predecessors`]).
-fn frame_gone(w: &Walked, entry: u64, jump: u64, pred: &BTreeMap<u64, Option<u64>>) -> bool {
+/// * `shape` - The walk's shape.
+fn frame_gone(w: &Walked, entry: u64, jump: u64, shape: &Shape) -> bool {
     let mut va = jump;
     for _ in 0..FRAME_LOOK {
         if va == entry {
             return true;
         }
-        let Some(p) = pred
-            .get(&va)
-            .copied()
-            .flatten()
-            .and_then(|p| w.seen.get(&p))
-        else {
+        let Some(p) = shape.preds.get(&va).and_then(|p| match p.as_slice() {
+            [one] => w.seen.get(one),
+            _ => None,
+        }) else {
             return false;
         };
         if popped(p) {
@@ -198,24 +276,26 @@ fn frame_gone(w: &Walked, entry: u64, jump: u64, pred: &BTreeMap<u64, Option<u64
     false
 }
 
-/// Returns the addresses of a walk reached from `from` without passing
-/// `avoid`, `from` included.
+/// Returns the addresses of a walk reached from `from`, `from` included,
+/// or `None` past `cap` of them.
 ///
 /// # Arguments
 ///
 /// * `w` - The walk.
 /// * `from` - Where to start.
-/// * `avoid` - An address not passed through (equal to `from` to avoid
-///   nothing but returning to it).
-fn reach(w: &Walked, from: u64, avoid: u64) -> BTreeSet<u64> {
+/// * `cap` - Most addresses gathered.
+fn reach(w: &Walked, from: u64, cap: usize) -> Option<BTreeSet<u64>> {
     let mut seen = BTreeSet::from([from]);
     let mut pending = vec![from];
     while let Some(va) = pending.pop() {
+        if seen.len() > cap {
+            return None;
+        }
         let Some(i) = w.seen.get(&va) else {
             continue;
         };
         let mut go = |to: u64| {
-            if to != avoid && w.seen.contains_key(&to) && seen.insert(to) {
+            if w.seen.contains_key(&to) && seen.insert(to) {
                 pending.push(to);
             }
         };
@@ -224,7 +304,7 @@ fn reach(w: &Walked, from: u64, avoid: u64) -> BTreeSet<u64> {
             t.targets.iter().for_each(|&x| go(x));
         }
     }
-    seen
+    Some(seen)
 }
 
 /// Calls `edge` with each address an instruction passes control to inside
