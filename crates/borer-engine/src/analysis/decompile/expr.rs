@@ -15,6 +15,9 @@ use super::opaque::Evidence;
 use crate::num::{lo16, lo32};
 
 mod reach;
+mod select;
+
+use select::{arm_under, known_select};
 
 pub(super) use super::expr_render::{
     Names, TEB_FIELDS, a64_code, a64_reg, bare, compact_literal, negative_magnitude, render_const,
@@ -3582,56 +3585,6 @@ pub(super) fn abs_bits(v: u64, bits: u8) -> Option<u64> {
     Some(magnitude.cast_unsigned() & mask_bits(bits))
 }
 
-/// A compare-select of a value and its negation, as `abs`.
-///
-/// `x < 0 ? -x : x` is `abs(x)`, and so is `neg` then `cmovs` of the
-/// original: the sign flag of `0 - x`. The opposite arm order is `-abs(x)`.
-/// The compare has to be against zero, signed (`l`, `le`, `g`, `ge`) or
-/// the sign flag (`s`, `ns`), at 64 bits. A narrower select stays a
-/// ternary. A 32-bit absolute value is not the absolute value of the
-/// zero-extended bits: a negative 32-bit lane would change sign.
-///
-/// # Arguments
-///
-/// * `cond` - The select's condition.
-/// * `a` - Value when true.
-/// * `b` - Value when false.
-///
-/// # Returns
-///
-/// `abs` of the operand, or its negation, or `None` when the select is
-/// not that shape.
-fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
-    use ConditionCode as C;
-    let (src, neg_on_true) = match (a, b) {
-        (Expr::Un(UnOp::Neg, n), other) if other == n.as_ref() => (n.as_ref(), true),
-        (other, Expr::Un(UnOp::Neg, n)) if other == n.as_ref() => (n.as_ref(), false),
-        _ => return None,
-    };
-    let Flags::Cmp(l, r, bits) = &cond.flags else {
-        return None;
-    };
-    if *bits < 64 {
-        return None;
-    }
-    let src_on_left = match (l, r) {
-        (s, Expr::Const(0)) if s == src => true,
-        (Expr::Const(0), s) if s == src => false,
-        _ => return None,
-    };
-    let neg_when_abs = match (src_on_left, cond.cc.0) {
-        (true, C::l | C::le | C::s) | (false, C::g | C::ge | C::ns) => true,
-        (true, C::g | C::ge | C::ns) | (false, C::l | C::le | C::s) => false,
-        _ => return None,
-    };
-    let call = Expr::Helper(Helper::Llabs, vec![src.clone()]);
-    if neg_on_true == neg_when_abs {
-        Some(call)
-    } else {
-        Some(Expr::Un(UnOp::Neg, Box::new(call)))
-    }
-}
-
 /// Builds `cond ? a : b` with the boolean idioms folded.
 ///
 /// A decidable condition, or one [`super::opaque::constant_outcome`] proves
@@ -3640,9 +3593,10 @@ fn absolute(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// sum that set it is the saturating operation ([`saturating`]); a
 /// full-width compare that selects one of its own operands is `min`,
 /// `max`, `umin`, or `umax` ([`extremum`]); a full-width select of a
-/// value and its negation is `abs` ([`absolute`]); an unsigned
+/// value and its negation is `abs` ([`known_select`]); an unsigned
 /// full-width compare that selects zero over its own difference is
-/// `sub_sat` ([`saturating_sub`]).
+/// `sub_sat` ([`saturating_sub`]). Selects on `cond` inside an arm take
+/// the side `cond` decides there ([`arm_under`]).
 ///
 /// # Arguments
 ///
@@ -3657,12 +3611,13 @@ pub(super) fn ternary(cond: Cond, a: Expr, b: Expr) -> Expr {
     }) {
         return if outcome { a } else { b };
     }
+    let (a, b) = (arm_under(&cond, true, a), arm_under(&cond, false, b));
     if a == b {
         return a;
     }
     if let Some(e) = saturating(&cond, &a, &b)
         .or_else(|| extremum(&cond, &a, &b, 64))
-        .or_else(|| absolute(&cond, &a, &b))
+        .or_else(|| known_select(&cond, &a, &b))
         .or_else(|| saturating_sub(&cond, &a, &b))
     {
         return e;

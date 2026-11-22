@@ -633,3 +633,30 @@ pub(super) fn builders(t: &mut Tally, d: &Domain) {
         }
     }
 }
+
+/// A select whose false side selects again on the same condition, or on
+/// its inverse, reads only the side that condition takes.
+///
+/// # Arguments
+///
+/// * `t` - The tally.
+/// * `d` - The values.
+pub(super) fn nested_selects(t: &mut Tally, d: &Domain) {
+    let (w, xs, ys) = (d.w, d.xs.as_slice(), d.ys.as_slice());
+    for cc in CCS {
+        let test = cond(cc, Flags::Cmp(X, Y, w));
+        let inner = |c: Cond| Expr::Ternary(Box::new(c), Box::new(k(1)), Box::new(Y));
+        for (name, arm) in [
+            ("c ? x : (!c ? 1 : y)", inner(test.invert())),
+            ("c ? x : (c ? 1 : y)", inner(test.clone())),
+        ] {
+            let before = Expr::Ternary(Box::new(test.clone()), Box::new(X), Box::new(arm.clone()));
+            let after = ternary(test.clone(), X, arm);
+            t.same(name, &before, &after, w, xs, ys);
+            assert!(
+                !matches!(&after, Expr::Ternary(_, _, f) if matches!(**f, Expr::Ternary(..))),
+                "{cc:?} at {w}: {after:?}"
+            );
+        }
+    }
+}

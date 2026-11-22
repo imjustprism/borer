@@ -18,7 +18,7 @@ use crate::num::{lo16, lo32};
 
 mod builders;
 
-use builders::builders;
+use builders::{builders, nested_selects};
 
 /// The first variable.
 const X: Expr = Expr::Var(Key::Reg(Register::RAX));
@@ -1148,6 +1148,7 @@ fn every_rewrite_of_the_folder_holds_on_every_byte() {
     local(&mut t, &d);
     mba_stress(&mut t, &d);
     builders(&mut t, &d);
+    nested_selects(&mut t, &d);
     let magics: Vec<(u64, u64)> = (0..=255)
         .flat_map(|m| (0..8).map(move |s| (m, s)))
         .collect();
@@ -1198,6 +1199,7 @@ fn every_rewrite_of_the_folder_holds_on_sampled_words() {
         local(&mut t, &d);
         mba_stress(&mut t, &d);
         builders(&mut t, &d);
+        nested_selects(&mut t, &d);
         power_quotients(&mut t, w, &wide);
         let mut xs = wide.clone();
         let mut magics = Vec::new();

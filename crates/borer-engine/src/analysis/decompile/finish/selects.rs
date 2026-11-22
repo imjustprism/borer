@@ -1303,22 +1303,18 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
         return false;
     };
     let (cond, yes, no) = ternary(rhs).unwrap_or(("", "", ""));
-    let Some((or_out, extra, inner)) = outer_update(yes, no) else {
+    let Some((or_out, extra, base, operand, inner_or)) =
+        nested_update(cond, yes, no).or_else(|| direct_update(yes, no))
+    else {
         return false;
     };
-    let Some((q, arm_a, arm_b)) = ternary(inner) else {
-        return false;
-    };
-    if invert_condition(cond) != q || changes_state(cond) {
+    if changes_state(cond) {
         return false;
     }
-    let Some((base, operand, inner_or)) = applied_arm(arm_a, arm_b) else {
-        return false;
-    };
     let Some(store) = lines.get(k + 1).and_then(|l| any_assignment(l)) else {
         return false;
     };
-    if store.1 != temp || store.0 != base {
+    if (store.1 != temp && unparen(store.1) != unparen(rhs)) || store.0 != base {
         return false;
     }
     let (then_op, else_op, else_operand) = match (or_out, inner_or) {
@@ -1349,6 +1345,59 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     ];
     lines.splice(k..=k + 1, rewritten);
     true
+}
+
+/// The two updates of a complementary select whose false side repeats the
+/// choice under the inverse test, `c ? (!c ? base & ~bit : base) | bit :
+/// (!c ? base & ~bit : base)`.
+///
+/// # Arguments
+///
+/// * `cond` - The outer test.
+/// * `yes` - The true side.
+/// * `no` - The false side.
+///
+/// # Returns
+///
+/// Whether the true side applies `|`, its operand, the base, the false
+/// side's operand, and whether the false side applies `|`.
+fn nested_update<'a>(
+    cond: &str,
+    yes: &'a str,
+    no: &'a str,
+) -> Option<(bool, &'a str, &'a str, &'a str, bool)> {
+    let (or_out, extra, inner) = outer_update(yes, no)?;
+    let (q, arm_a, arm_b) = ternary(inner)?;
+    if invert_condition(cond) != q {
+        return None;
+    }
+    let (base, operand, inner_or) = applied_arm(arm_a, arm_b)?;
+    Some((or_out, extra, base, operand, inner_or))
+}
+
+/// The two updates of a complementary select written out on both sides,
+/// `c ? base | bit : base & ~bit`.
+///
+/// # Arguments
+///
+/// * `yes` - The true side.
+/// * `no` - The false side.
+///
+/// # Returns
+///
+/// The same five parts as [`nested_update`].
+fn direct_update<'a>(yes: &'a str, no: &'a str) -> Option<(bool, &'a str, &'a str, &'a str, bool)> {
+    if yes.is_empty() {
+        return None;
+    }
+    [(" | ", true), (" & ", false)]
+        .into_iter()
+        .find_map(|(op, inner_or)| {
+            let (left, operand) = split_last_op(no, op)?;
+            let base = unparen(left);
+            let (extra, or_out) = applied(yes, base)?;
+            Some((or_out, extra, base, operand, inner_or))
+        })
 }
 
 /// The outer update of a complementary select: the inner choice, whether
@@ -1964,6 +2013,18 @@ return 0;
             select_statements(clear, "uint64_t", &[]),
             "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 & (a4 ^ 0xffffffff));\n} else {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 | a4);\n}\nr1 = 0;\n"
         );
+        let direct = "uint32_t r3;\n\nr3 = (a2 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xffffefff);\na1->field_0xc = (a2 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xffffefff);\n";
+        assert_eq!(
+            select_statements(direct, "uint64_t", &[]),
+            "uint32_t r3;\n\nif (a2 != 8) {\n  a1->field_0xc = (uint32_t)(a1->field_0xc | 0x1000);\n} else {\n  a1->field_0xc = (uint32_t)(a1->field_0xc & 0xffffefff);\n}\n"
+        );
+        let direct_clear = "uint32_t r1;\n\nr1 = (a2 != 1 ? a1->field_0x4 & (a4 ^ 0xffffffff) : a1->field_0x4 | a4);\na1->field_0x4 = r1;\nr1 = 0;\n";
+        assert_eq!(
+            select_statements(direct_clear, "uint64_t", &[]),
+            "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 & (a4 ^ 0xffffffff));\n} else {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 | a4);\n}\nr1 = 0;\n"
+        );
+        let unrelated = "uint32_t r3;\n\nr3 = (a2 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xff);\na1->field_0xc = r3;\n";
+        assert_eq!(select_statements(unrelated, "uint64_t", &[]), unrelated);
         let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
         assert_eq!(select_statements(live, "uint64_t", &[]), live);
         let branched = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nif (a3) {\n  r3 = a4;\n}\nreturn r3;\n";

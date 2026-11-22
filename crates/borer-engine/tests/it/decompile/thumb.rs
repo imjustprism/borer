@@ -1,4 +1,4 @@
-//! T32 shapes an unoptimized build leaves.
+//! T32 shapes an unoptimized build leaves: `IT` selects and compare trees.
 
 use super::*;
 use crate::a32_emulate::{Code, image};
@@ -29,6 +29,49 @@ fn agreed(code: &[u16]) -> String {
     let r = replay_function(&p, &a, AT, 1);
     assert!(r.wrong().is_empty(), "{}", replay_tsv(&r));
     decompile(&p, &a, &Overlay::default(), AT).unwrap_or_default()
+}
+
+/// `ite ne; movne; moveq` setting 1 or 0 is the compare itself, and agrees
+/// with the emulator.
+///
+/// The second move's select holds the first's under the inverse
+/// condition, whose other side is never read.
+#[test]
+fn an_it_pair_of_moves_agrees_with_the_emulator_as_a_compare() {
+    let text = agreed(&[
+        0x4603, // ASM: mov r3, r0
+        0xf003, 0x7300, // ASM: and r3, r3, #0x2000000
+        0x2b00, // ASM: cmp r3, #0
+        0xbf14, // ASM: ite ne
+        0x2301, // ASM: movne r3, #1
+        0x2300, // ASM: moveq r3, #0
+        0xb2db, // ASM: uxtb r3, r3
+        0x4618, // ASM: mov r0, r3
+        0x4770, // ASM: bx lr
+    ]);
+    assert!(text.contains("(a1 & 0x2000000) != 0"), "{text}");
+    assert!(!text.contains('?'), "{text}");
+}
+
+/// `ite eq; biceq; orrne` on one word stored back is the `if`/`else` of
+/// the bit, and agrees with the emulator.
+///
+/// Each move's select reads the other's under the inverse condition,
+/// where the other is not taken.
+#[test]
+fn an_it_pair_of_bit_updates_agrees_with_the_emulator_as_an_if() {
+    let text = agreed(&[
+        0x68c3, // ASM: ldr r3, [r0, #0xc]
+        0x2908, // ASM: cmp r1, #8
+        0xbf0c, // ASM: ite eq
+        0xf423, 0x5380, // ASM: biceq r3, r3, #0x1000
+        0xf443, 0x5380, // ASM: orrne r3, r3, #0x1000
+        0x60c3, // ASM: str r3, [r0, #0xc]
+        0x4770, // ASM: bx lr
+    ]);
+    assert!(text.contains("if (a2 != 8) {"), "{text}");
+    assert!(text.contains("} else {"), "{text}");
+    assert!(!text.contains('?'), "{text}");
 }
 
 /// A compare tree whose last miss jumps to the default through a block

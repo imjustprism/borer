@@ -1182,13 +1182,13 @@ impl Expr {
                 }
                 render_load(a, *ty, ty.name(), n)
             }
-            Expr::Cond(c) => match &c.flags {
-                Flags::Truth(e, tcc) if c.cc == *tcc => e.render_prec(n, hex, false),
-                flags => {
+            Expr::Cond(c) => match plain_truth(c) {
+                Some(e) => e.render_prec(n, hex, false),
+                None => {
                     let text = c.render(n, false);
                     let prec = if super::structure::logical_operands(&text).is_some() {
                         LOGICAL
-                    } else if matches!(flags, Flags::Truth(e, tcc)
+                    } else if matches!(&c.flags, Flags::Truth(e, tcc)
                         if c.cc == tcc.invert() && equality(e).is_none())
                     {
                         UNARY
@@ -1596,6 +1596,22 @@ fn is_truth_chain(e: &Expr) -> bool {
             .into_iter()
             .all(|x| matches!(x, Expr::Cond(_)) || is_truth_chain(x)),
         _ => false,
+    }
+}
+
+/// Returns the value a truth test reads as itself.
+///
+/// That is the value of a [`Flags::Truth`] tested under its own code,
+/// unless it joins truth values, which read as the `||` and `&&` they mean
+/// ([`render_truth_chain`]).
+///
+/// # Arguments
+///
+/// * `c` - The test.
+fn plain_truth(c: &Cond) -> Option<&Expr> {
+    match &c.flags {
+        Flags::Truth(e, tcc) if c.cc == *tcc && !is_truth_chain(e) => Some(e),
+        _ => None,
     }
 }
 
