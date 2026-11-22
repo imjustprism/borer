@@ -204,8 +204,11 @@ impl ChatPicker {
         let id = SharedString::from(format!("chat-provider-{}", offer.label()));
         let name = Label::new(offer.label()).truncate();
         let (name, hint) = if offer == Offered::ClaudeCode {
-            let below = small("Uses the Claude Code installed on this machine and its sign-in");
-            let name = v_flex().min_w_0().child(name).child(below);
+            let below =
+                Label::new("Uses the Claude Code installed on this machine and its sign-in")
+                    .size(LabelSize::Small)
+                    .color(Color::Muted);
+            let name = v_flex().min_w_0().w_full().child(name).child(below);
             (name.into_any_element(), None)
         } else {
             let hint = small(&Endpoint::of(offer, cx).host()).into_any_element();
