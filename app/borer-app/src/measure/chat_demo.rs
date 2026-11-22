@@ -123,7 +123,7 @@ fn reply(text: &str, uses: &[(&str, &str, Value)]) -> Reply {
 /// # Errors
 ///
 /// When it still does not hold after a minute of polls ([`poll`]).
-async fn until(
+pub(super) async fn until(
     thread: &Entity<Thread>,
     cx: &mut AsyncApp,
     done: impl Fn(&Thread) -> bool,
@@ -278,7 +278,7 @@ async fn refuse_second(thread: &Entity<Thread>, cx: &mut AsyncApp) -> anyhow::Re
 /// # Errors
 ///
 /// When the window is gone, nothing opens, or it has fewer than four functions.
-async fn addresses(
+pub(super) async fn addresses(
     this: &WeakEntity<Harness>,
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<(String, Vec<String>)> {
@@ -423,6 +423,22 @@ async fn cards(panel: &Entity<ChatPanel>, cx: &mut AsyncWindowContext) -> anyhow
     stage(CHAT, "long", cx).await
 }
 
+/// Returns the chat panel, docked and focused.
+///
+/// # Errors
+///
+/// When the window is gone or has no chat panel.
+pub(super) fn docked(
+    this: &WeakEntity<Harness>,
+    cx: &mut AsyncWindowContext,
+) -> anyhow::Result<Entity<ChatPanel>> {
+    let panel = this.update_in(cx, |h, window, cx| {
+        h.workspace
+            .update(cx, |w, cx| w.focus_panel::<ChatPanel>(window, cx))
+    })?;
+    panel.ok_or_else(|| anyhow::anyhow!("no chat panel"))
+}
+
 /// Plays the canned conversation stage by stage.
 ///
 /// # Errors
@@ -433,11 +449,7 @@ pub(super) async fn demo(
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     let (entry, others) = addresses(this, cx).await?;
-    let panel = this.update_in(cx, |h, window, cx| {
-        h.workspace
-            .update(cx, |w, cx| w.focus_panel::<ChatPanel>(window, cx))
-    })?;
-    let panel = panel.ok_or_else(|| anyhow::anyhow!("no chat panel"))?;
+    let panel = docked(this, cx)?;
     let (word, held) = oneshot::channel();
     let mut replies: Vec<Reply> = first_turn(&entry, held).into();
     replies.extend(canned(&entry, &others));

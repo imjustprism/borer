@@ -58,7 +58,7 @@ impl ChatPicker {
     fn row(
         id: SharedString,
         icon: IconName,
-        name: String,
+        name: AnyElement,
         end: Option<AnyElement>,
         picked: bool,
     ) -> ListItem {
@@ -67,7 +67,7 @@ impl ChatPicker {
             .inset(true)
             .spacing(ListItemSpacing::Sparse)
             .start_slot(Icon::new(icon).size(IconSize::Small).color(color))
-            .child(Label::new(name).truncate())
+            .child(name)
             .end_slot(
                 h_flex()
                     .min_w_0()
@@ -192,22 +192,26 @@ impl ChatPicker {
     }
 
     /// Returns the row of `offer`: its icon and name, where it sends, and whether it is
-    /// picked.
+    /// picked; Claude Code's says under its name that it runs with its own sign-in.
     fn provider(&self, offer: Offered, picked: bool, cx: &App) -> impl IntoElement {
         let panel = self.panel.clone();
-        let hint = Label::new(Endpoint::of(offer, cx).host())
-            .size(LabelSize::Small)
-            .color(Color::Muted)
-            .truncate();
+        let small = |text: &str| {
+            Label::new(text.to_owned())
+                .size(LabelSize::Small)
+                .color(Color::Muted)
+                .truncate()
+        };
         let id = SharedString::from(format!("chat-provider-{}", offer.label()));
-        Self::row(
-            id,
-            offer.icon(),
-            offer.label().to_owned(),
-            Some(hint.into_any_element()),
-            picked,
-        )
-        .on_click(move |_, window, cx| {
+        let name = Label::new(offer.label()).truncate();
+        let (name, hint) = if offer == Offered::ClaudeCode {
+            let below = small("Uses the Claude Code installed on this machine and its sign-in");
+            let name = v_flex().min_w_0().child(name).child(below);
+            (name.into_any_element(), None)
+        } else {
+            let hint = small(&Endpoint::of(offer, cx).host()).into_any_element();
+            (name.into_any_element(), Some(hint))
+        };
+        Self::row(id, offer.icon(), name, hint, picked).on_click(move |_, window, cx| {
             panel
                 .update(cx, |panel, cx| panel.switch(offer, window, cx))
                 .unwrap_or(());
@@ -237,7 +241,10 @@ impl Render for ChatPicker {
         let panel = panel.read(cx);
         let picked = panel.picked;
         let chosen = panel.thread.read(cx).chosen().map(|c| c.model.id.0.clone());
-        let providers = Offered::ALL.map(|offer| self.provider(offer, picked == Some(offer), cx));
+        let providers: Vec<_> = Offered::on_offer()
+            .into_iter()
+            .map(|offer| self.provider(offer, picked == Some(offer), cx))
+            .collect();
         let weak = self.panel.clone();
         let models = panel.models.iter().map(|m| {
             let id = m.model.id.0.clone();
@@ -245,7 +252,9 @@ impl Render for ChatPicker {
             Self::row(
                 SharedString::from(format!("chat-model-{id}")),
                 m.endpoint.offered.icon(),
-                text::visible(&m.model.name.0).into_owned(),
+                Label::new(text::visible(&m.model.name.0).into_owned())
+                    .truncate()
+                    .into_any_element(),
                 None,
                 chosen.as_ref() == Some(&id),
             )

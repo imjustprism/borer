@@ -1765,7 +1765,7 @@ pub(crate) mod tests {
     }
 
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 75] {
+    fn sources() -> [(&'static str, &'static str); 78] {
         [
             ("actions.rs", include_str!("actions.rs")),
             ("annotate.rs", include_str!("annotate.rs")),
@@ -1781,10 +1781,15 @@ pub(crate) mod tests {
             ("card.rs", include_str!("card.rs")),
             ("chat.rs", include_str!("chat.rs")),
             ("chat/card.rs", include_str!("chat/card.rs")),
+            ("chat/claude_code.rs", include_str!("chat/claude_code.rs")),
             ("chat/picker.rs", include_str!("chat/picker.rs")),
             ("chat/providers.rs", include_str!("chat/providers.rs")),
             ("chat/tests.rs", include_str!("chat/tests.rs")),
             ("chat/tests/cards.rs", include_str!("chat/tests/cards.rs")),
+            (
+                "chat/tests/claude_code.rs",
+                include_str!("chat/tests/claude_code.rs"),
+            ),
             ("chat/tests/panel.rs", include_str!("chat/tests/panel.rs")),
             ("chat/thread.rs", include_str!("chat/thread.rs")),
             ("chat/tools.rs", include_str!("chat/tools.rs")),
@@ -1821,6 +1826,10 @@ pub(crate) mod tests {
                 include_str!("measure/annotate_demo.rs"),
             ),
             ("measure/chat_demo.rs", include_str!("measure/chat_demo.rs")),
+            (
+                "measure/claude_code_demo.rs",
+                include_str!("measure/claude_code_demo.rs"),
+            ),
             ("measure/drop.rs", include_str!("measure/drop.rs")),
             ("measure/input.rs", include_str!("measure/input.rs")),
             ("measure/scroll.rs", include_str!("measure/scroll.rs")),

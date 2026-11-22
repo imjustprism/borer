@@ -8,6 +8,7 @@
 //! so nothing in a model's output loads from anywhere.
 
 pub mod card;
+mod claude_code;
 mod picker;
 pub mod providers;
 pub mod thread;
@@ -475,6 +476,15 @@ impl ChatPanel {
         cx.notify();
     }
 
+    /// Returns the picked provider's models once it listed them.
+    ///
+    /// # Errors
+    ///
+    /// Returns why the pick or its listing failed.
+    pub(crate) fn listed(&self) -> Result<&[Chosen], &str> {
+        self.error.as_deref().map_or(Ok(&self.models), Err)
+    }
+
     /// Returns the handle that opens and closes the model picker.
     pub(crate) const fn picker(&self) -> &PopoverMenuHandle<ChatPicker> {
         &self.picker
@@ -572,11 +582,12 @@ impl ChatPanel {
 
     /// Picks the provider after the picked one, in the picker's order; the first when none is.
     fn next_provider(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let offered = Offered::on_offer();
         let at = self
             .picked
-            .and_then(|picked| Offered::ALL.iter().position(|o| *o == picked))
-            .map_or(0, |at| (at + 1) % Offered::ALL.len());
-        if let Some(offer) = Offered::ALL.get(at) {
+            .and_then(|picked| offered.iter().position(|o| *o == picked))
+            .map_or(0, |at| (at + 1) % offered.len());
+        if let Some(offer) = offered.get(at) {
             self.switch(*offer, window, cx);
         }
     }

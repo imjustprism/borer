@@ -53,10 +53,13 @@ pub enum Offered {
     Ollama,
     /// An LM Studio server, on this machine unless its URL in settings says otherwise.
     LmStudio,
+    /// The Claude Code installed on this machine, run with its own sign-in
+    /// ([`super::claude_code`]); offered only when `claude` is on `PATH`.
+    ClaudeCode,
 }
 
 impl Offered {
-    /// Every provider the chat offers, in the picker's order.
+    /// Every provider the chat reaches over HTTP, in the picker's order.
     pub const ALL: [Self; 6] = [
         Self::Anthropic,
         Self::OpenAi,
@@ -65,6 +68,14 @@ impl Offered {
         Self::Ollama,
         Self::LmStudio,
     ];
+
+    /// Returns every provider the chat offers now, in the picker's order: [`Self::ALL`], then
+    /// Claude Code when `claude` is on `PATH` ([`super::claude_code::program`]).
+    #[must_use]
+    pub fn on_offer() -> Vec<Self> {
+        let found = super::claude_code::program().map(|_| Self::ClaudeCode);
+        Self::ALL.into_iter().chain(found).collect()
+    }
 
     /// Returns what the picker and the change feed call the provider.
     #[must_use]
@@ -76,6 +87,7 @@ impl Offered {
             Self::OpenRouter => "OpenRouter",
             Self::Ollama => "Ollama",
             Self::LmStudio => "LM Studio",
+            Self::ClaudeCode => "Claude Code",
         }
     }
 
@@ -89,6 +101,7 @@ impl Offered {
             Self::OpenRouter => IconName::AiOpenRouter,
             Self::Ollama => IconName::AiOllama,
             Self::LmStudio => IconName::AiLmStudio,
+            Self::ClaudeCode => IconName::AiClaude,
         }
     }
 
@@ -101,7 +114,7 @@ impl Offered {
             Self::OpenAi => Some("OPENAI_API_KEY"),
             Self::Google => Some("GEMINI_API_KEY"),
             Self::OpenRouter => Some("OPENROUTER_API_KEY"),
-            Self::Ollama | Self::LmStudio => None,
+            Self::Ollama | Self::LmStudio | Self::ClaudeCode => None,
         }
     }
 
@@ -114,12 +127,14 @@ impl Offered {
             Self::OpenRouter => "openrouter",
             Self::Ollama => "ollama",
             Self::LmStudio => "lmstudio",
+            Self::ClaudeCode => "claude_code",
         })
     }
 
     /// Returns the provider's URL: its API's, or for Ollama and LM Studio the one the
     /// settings' `language_models` section names (Ollama's with `/v1`, where it speaks
-    /// `OpenAI`'s chat completions), else the default.
+    /// `OpenAI`'s chat completions), else the default; for Claude Code the path of the
+    /// `claude` program it runs, `claude` alone when none is on `PATH`.
     ///
     /// # Arguments
     ///
@@ -142,6 +157,8 @@ impl Offered {
             }
             Self::LmStudio => set(models.and_then(|m| m.lmstudio.as_ref()?.api_url.as_ref()))
                 .unwrap_or_else(|| "http://localhost:1234/api/v0".to_owned()),
+            Self::ClaudeCode => super::claude_code::program()
+                .map_or_else(|| "claude".to_owned(), |p| p.display().to_string()),
         };
         url.trim_end_matches('/').to_owned().into()
     }
@@ -367,6 +384,9 @@ pub(crate) fn listed(endpoint: &Endpoint, id: &str, name: String, window: u64) -
 /// Asks `endpoint`'s provider for its models, at most [`MODELS_MAX`], each ready to send
 /// with the provider's key ([`read_key`]).
 ///
+/// Claude Code is asked through its command line ([`super::claude_code::models`]), with
+/// no key and no HTTP.
+///
 /// # Arguments
 ///
 /// * `endpoint` - The provider and its URL.
@@ -376,12 +396,16 @@ pub(crate) fn listed(endpoint: &Endpoint, id: &str, name: String, window: u64) -
 /// # Errors
 ///
 /// Returns that a provider that takes a key has none, the keychain's error, the
-/// provider's refusal, or that its list did not read.
+/// provider's refusal, or that its list did not read; for Claude Code, that it did not
+/// start or answer.
 pub async fn models(
     endpoint: Endpoint,
     http: Arc<dyn HttpClient>,
     cx: &AsyncApp,
 ) -> anyhow::Result<Vec<Chosen>> {
+    if endpoint.offered == Offered::ClaudeCode {
+        return super::claude_code::models(endpoint, cx).await;
+    }
     let http: Arc<dyn HttpClient> = Arc::new(NoRedirects(http));
     let offered = endpoint.offered;
     let key: Arc<str> = match (
@@ -425,6 +449,7 @@ pub async fn models(
                 })
                 .collect()
         }
+        Offered::ClaudeCode => anyhow::bail!("Claude Code lists its own models"),
     };
     Ok(listed
         .into_iter()
@@ -813,6 +838,7 @@ mod tests {
                 Offered::OpenAi | Offered::OpenRouter | Offered::Ollama | Offered::LmStudio => {
                     Wire::OpenAi
                 }
+                Offered::ClaudeCode => continue,
             };
             let client = Remote {
                 endpoint: Endpoint {
@@ -859,7 +885,11 @@ mod tests {
                     let key = super::super::thread::PROMPT_CACHE_KEY;
                     assert_eq!(body["prompt_cache_key"], key, "{said}");
                 }
-                Offered::Google | Offered::OpenRouter | Offered::Ollama | Offered::LmStudio => {
+                Offered::Google
+                | Offered::OpenRouter
+                | Offered::Ollama
+                | Offered::LmStudio
+                | Offered::ClaudeCode => {
                     assert!(!said.contains("cache"), "{said}");
                 }
             }

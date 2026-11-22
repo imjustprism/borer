@@ -108,6 +108,7 @@ pub fn run() -> anyhow::Result<()> {
                     | CliMode::Measure(_)
                     | CliMode::MeasureDrop(..)
                     | CliMode::ChatDemo(_)
+                    | CliMode::ClaudeCodeDemo(_)
                     | CliMode::AnnotateDemo(_)
                     | CliMode::StartDemo) => cx
                         .open_window(options, |window, cx| {

@@ -26,6 +26,7 @@ use crate::worker::{Sources, load_binary_blocking};
 use borer_engine::analysis::edit::Author;
 
 mod cards;
+mod claude_code;
 mod panel;
 
 /// Returns a counting fake HTTP client, installed as gpui's and as the chat's, and the

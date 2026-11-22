@@ -10,6 +10,7 @@
 mod actions;
 mod annotate_demo;
 mod chat_demo;
+mod claude_code_demo;
 mod drop;
 mod input;
 mod scroll;
@@ -253,6 +254,10 @@ pub enum CliMode {
     /// Opens `<path>` (default notepad) and replays a canned conversation of a scripted model
     /// in the chat panel, printing `CHAT_STAGE <name>` at each state worth a screenshot.
     ChatDemo(PathBuf),
+    /// Opens `<path>` (default notepad), picks Claude Code in the chat, which must be on
+    /// `PATH`, and sends it one short message, printing `CHAT_STAGE picker` and
+    /// `CHAT_STAGE turn`, then `CHAT_DONE`: the one demo that sends a message off the machine.
+    ClaudeCodeDemo(PathBuf),
     /// Opens `<path>` (default notepad) and opens each inline editor over it, printing
     /// `ANNOTATE_STAGE <name>` at each state worth a screenshot, then `ANNOTATE_DONE`.
     AnnotateDemo(PathBuf),
@@ -274,6 +279,7 @@ impl CliMode {
             | Self::Measure(_)
             | Self::MeasureDrop(..)
             | Self::ChatDemo(_)
+            | Self::ClaudeCodeDemo(_)
             | Self::AnnotateDemo(_)
             | Self::StartDemo => false,
         }
@@ -344,6 +350,7 @@ pub fn evaluate_one_shot(
         | CliMode::Measure(_)
         | CliMode::MeasureDrop(..)
         | CliMode::ChatDemo(_)
+        | CliMode::ClaudeCodeDemo(_)
         | CliMode::AnnotateDemo(_)
         | CliMode::StartDemo => OneShotAction::Wait,
     }
@@ -519,6 +526,7 @@ pub fn parse_cli_args_os(args: &[OsString]) -> anyhow::Result<CliMode> {
         }
         Some("--headless") => Ok(CliMode::Headless(path_or_notepad())),
         Some("--chat-demo") => Ok(CliMode::ChatDemo(path_or_notepad())),
+        Some("--claude-code-demo") => Ok(CliMode::ClaudeCodeDemo(path_or_notepad())),
         Some("--measure-memory") => Ok(CliMode::MeasureMemory(path_or_notepad())),
         Some("--annotate-demo") => Ok(CliMode::AnnotateDemo(path_or_notepad())),
         Some("--start-demo") => Ok(CliMode::StartDemo),
@@ -890,6 +898,7 @@ impl Harness {
             CliMode::ReportOpen(p)
             | CliMode::MeasureMemory(p)
             | CliMode::ChatDemo(p)
+            | CliMode::ClaudeCodeDemo(p)
             | CliMode::AnnotateDemo(p) => Some(p.clone()),
             CliMode::Interactive(p) => p.clone(),
             CliMode::FirstFrame
@@ -932,6 +941,7 @@ impl Harness {
             | CliMode::MeasureMemory(_)
             | CliMode::MeasureDrop(..)
             | CliMode::ChatDemo(_)
+            | CliMode::ClaudeCodeDemo(_)
             | CliMode::AnnotateDemo(_)
             | CliMode::StartDemo => None,
         };
@@ -962,9 +972,24 @@ impl Harness {
         if let Some(phase) = phase {
             harness.begin(phase, window, cx);
         }
-        match &harness.mode {
+        harness.start_scripted(window, cx);
+        harness
+    }
+
+    /// Starts the scripted run the mode names on the next frame: a demo, or the folder drop;
+    /// nothing for the other modes.
+    ///
+    /// # Arguments
+    ///
+    /// * `window` - The harness's window.
+    /// * `cx` - Harness context.
+    fn start_scripted(&self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        match &self.mode {
             CliMode::ChatDemo(_) => cx.on_next_frame(window, |this, window, cx| {
                 this.run_demo("chat demo", chat_demo::demo, window, cx);
+            }),
+            CliMode::ClaudeCodeDemo(_) => cx.on_next_frame(window, |this, window, cx| {
+                this.run_demo("Claude Code demo", claude_code_demo::demo, window, cx);
             }),
             CliMode::StartDemo => cx.on_next_frame(window, |this, window, cx| {
                 this.run_demo("start demo", start_demo::demo, window, cx);
@@ -983,7 +1008,6 @@ impl Harness {
             | CliMode::MeasureMemory(_)
             | CliMode::Measure(_) => {}
         }
-        harness
     }
 
     /// Observes the functions panel once it is docked, so a change of its rows settles the

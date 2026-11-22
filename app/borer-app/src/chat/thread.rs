@@ -272,8 +272,9 @@ impl Chosen {
     }
 
     /// Returns who receives what is sent to this model: the endpoint's URL; for `OpenRouter`,
-    /// which hands each request to the vendor its model id names, that vendor; and for an
-    /// Ollama model Ollama forwards to its cloud ([`Self::forwarded`]), that cloud.
+    /// which hands each request to the vendor its model id names, that vendor; for an
+    /// Ollama model Ollama forwards to its cloud ([`Self::forwarded`]), that cloud; and for
+    /// Claude Code, the program on this machine and the service it sends to.
     #[must_use]
     pub fn receiver(&self) -> String {
         let url = &self.endpoint.url;
@@ -283,6 +284,7 @@ impl Chosen {
                 format!("{url} for {vendor}")
             }
             Offered::Ollama if self.forwarded() => format!("{url} for Ollama's cloud"),
+            Offered::ClaudeCode => format!("Claude Code ({url}), which sends to its own service"),
             Offered::Anthropic
             | Offered::OpenAi
             | Offered::Google
@@ -337,8 +339,12 @@ pub struct Thread {
     calls: Vec<Call>,
     /// The kind of each [`Entry::Error`], by its index in [`Self::entries`], in order.
     faults: Vec<(usize, Fault)>,
-    /// The running turn; dropping it stops the stream and the tool calls.
+    /// The running turn; dropping it stops the stream and the tool calls, and kills the
+    /// Claude Code it holds.
     turn: Option<Task<()>>,
+    /// The Claude Code that ran the thread's last turn, kept for its next one while no turn
+    /// runs; dropping it kills it ([`super::claude_code::Session`]).
+    pub(super) claude: Option<super::claude_code::Session>,
     /// The tool calls of the newest message the model is sent that have no answer yet;
     /// stopping the turn answers them as cancelled, as a provider requires.
     unanswered: Vec<LanguageModelToolUse>,
@@ -383,6 +389,7 @@ impl Thread {
             calls: Vec::new(),
             faults: Vec::new(),
             turn: None,
+            claude: None,
             unanswered: Vec::new(),
             budget: borer_front::budget::budget(),
             deadline: borer_front::deadline::deadline(),
@@ -484,10 +491,30 @@ impl Thread {
     ///
     /// * `fault` - What kind of failure it is, which decides what the panel offers.
     /// * `said` - What the person reads.
-    fn fail(&mut self, fault: Fault, said: String) {
+    pub(super) fn fail(&mut self, fault: Fault, said: String) {
         self.entries.push(Entry::Error(said));
         self.faults
             .push((self.entries.len().saturating_sub(1), fault));
+    }
+
+    /// Shows `chunk` of the model's reply: it joins the reply the newest entry streams, or
+    /// starts one after a tool call or a notice.
+    pub(super) fn stream_text(&mut self, chunk: &str, cx: &mut Context<'_, Self>) {
+        if let Some(Entry::Model(shown)) = self.entries.last_mut() {
+            if !shown.is_empty() {
+                shown.push_str("\n\n");
+            }
+            shown.push_str(chunk);
+        } else {
+            self.entries.push(Entry::Model(chunk.to_owned()));
+        }
+        cx.notify();
+    }
+
+    /// Shows the notice `said`, as one the person reads and need not answer.
+    pub(super) fn note(&mut self, said: String, cx: &mut Context<'_, Self>) {
+        self.entries.push(Entry::Notice(said));
+        cx.notify();
     }
 
     /// Settles the newest running call: what the model was sent for it, or why it failed.
@@ -538,6 +565,11 @@ impl Thread {
     #[must_use]
     pub const fn chosen(&self) -> Option<&Chosen> {
         self.chosen.as_ref()
+    }
+
+    /// Returns the most bytes of tool answers a turn sends; `None` for no cap.
+    pub(super) const fn budget(&self) -> Option<usize> {
+        self.budget
     }
 
     /// Caps the bytes of tool answers a turn sends at `budget`, in place of the server's.
@@ -744,6 +776,7 @@ impl Thread {
         self.calls.clear();
         self.faults.clear();
         self.held = None;
+        self.claude = None;
         self.entries.push(Entry::Notice(format!(
             "{why}: the conversation was cleared, so nothing of it is sent again"
         )));
@@ -1048,6 +1081,8 @@ impl Thread {
 /// Every answer is cut to the bytes left of the turn's budget, as the MCP server cuts one
 /// ([`cut_to`]), with the note on how to page for the rest.
 ///
+/// A turn of Claude Code runs through its command line instead ([`super::claude_code`]).
+///
 /// The turn is bound to `chosen`, the model it started with, read once: every round goes to
 /// it. Picking a model that sends elsewhere stops the turn ([`Thread::choose`]); a stopped
 /// or replaced turn, whose `generation` is no longer the thread's, writes nothing more.
@@ -1061,8 +1096,10 @@ async fn run_turn(
     generation: u64,
     cx: &mut AsyncApp,
 ) -> anyhow::Result<()> {
-    let mut calls = 0usize;
-    let mut room = step(this, generation, cx, |thread, _| thread.budget)?;
+    if chosen.endpoint.offered == Offered::ClaudeCode {
+        return super::claude_code::run_turn(this, chosen, generation, cx).await;
+    }
+    let mut spend = step(this, generation, cx, |thread, _| Spend::new(thread.budget))?;
     loop {
         let request = step(this, generation, cx, |thread, _| thread.request())?;
         let provider = chosen.model.provider_name.0.clone();
@@ -1115,39 +1152,11 @@ async fn run_turn(
         }
         let mut answers = Vec::with_capacity(uses.len());
         for call in &uses {
-            calls = calls.saturating_add(1);
-            let (is_error, text) = if calls > TOOL_CALLS_MAX {
-                let why =
-                    format!("tool call budget spent: {TOOL_CALLS_MAX} a turn; the turn ended");
-                (true, why)
-            } else if room == Some(0) {
-                let why = "the turn's byte budget for tool answers is spent; the turn ended";
-                (true, why.to_owned())
-            } else {
-                let (is_error, text) =
-                    match step(this, generation, cx, |t, cx| t.call(call, chosen, cx))?.await {
-                        Ok(text) => (false, text),
-                        Err(why) => (true, why),
-                    };
-                let narrow = if call.name.as_ref() == "query" {
-                    Narrow::Uri
-                } else {
-                    Narrow::Tool
-                };
-                let text = cut(text, &mut room, narrow);
-                let sent = fenced(&text);
-                step(this, generation, cx, |t, cx| {
-                    t.settle_call(if is_error { Err(&text) } else { Ok(&sent) }, cx);
-                })?;
-                (is_error, text)
-            };
+            let (is_error, text) =
+                answer_call(this, generation, call, chosen, &mut spend, cx).await?;
             answers.push(MessageContent::ToolResult(result(call, is_error, &text)));
         }
-        let spent = if calls > TOOL_CALLS_MAX {
-            Some(format!("its {TOOL_CALLS_MAX} tool calls are spent"))
-        } else {
-            (room == Some(0)).then(|| "its tool answers filled its byte budget".to_owned())
-        };
+        let spent = spend.spent();
         step(this, generation, cx, |thread, _| {
             thread.unanswered.clear();
             thread.messages.push(message(Role::User, answers));
@@ -1161,13 +1170,84 @@ async fn run_turn(
     }
 }
 
+/// The tool budgets of one turn: the calls it made and the bytes of answers it has left.
+pub(super) struct Spend {
+    /// Tool calls made so far.
+    calls: usize,
+    /// Bytes of tool answers left; `None` for no cap.
+    room: Option<usize>,
+}
+
+impl Spend {
+    /// Returns a turn's budgets before its first call, with `room` bytes of answers.
+    pub(super) const fn new(room: Option<usize>) -> Self {
+        Self { calls: 0, room }
+    }
+
+    /// Returns why the turn ends, once a budget is spent; `None` while both last.
+    pub(super) fn spent(&self) -> Option<String> {
+        if self.calls > TOOL_CALLS_MAX {
+            Some(format!("its {TOOL_CALLS_MAX} tool calls are spent"))
+        } else {
+            (self.room == Some(0)).then(|| "its tool answers filled its byte budget".to_owned())
+        }
+    }
+}
+
+/// Runs the model's tool `call` within the turn's budgets and settles its row.
+///
+/// A call past [`TOOL_CALLS_MAX`], or made once the bytes are spent, is refused; any other
+/// runs ([`Thread::call`]) and its answer is cut to the bytes left ([`cut`]).
+///
+/// # Returns
+///
+/// Whether it failed, and its answer before it is fenced.
+///
+/// # Errors
+///
+/// When the thread closed or the turn was stopped ([`step`]).
+pub(super) async fn answer_call(
+    this: &WeakEntity<Thread>,
+    generation: u64,
+    call: &LanguageModelToolUse,
+    chosen: &Chosen,
+    spend: &mut Spend,
+    cx: &mut AsyncApp,
+) -> anyhow::Result<(bool, String)> {
+    spend.calls = spend.calls.saturating_add(1);
+    if spend.calls > TOOL_CALLS_MAX {
+        let why = format!("tool call budget spent: {TOOL_CALLS_MAX} a turn; the turn ended");
+        return Ok((true, why));
+    }
+    if spend.room == Some(0) {
+        let why = "the turn's byte budget for tool answers is spent; the turn ended";
+        return Ok((true, why.to_owned()));
+    }
+    let (is_error, text) = match step(this, generation, cx, |t, cx| t.call(call, chosen, cx))?.await
+    {
+        Ok(text) => (false, text),
+        Err(why) => (true, why),
+    };
+    let narrow = if call.name.as_ref() == "query" {
+        Narrow::Uri
+    } else {
+        Narrow::Tool
+    };
+    let text = cut(text, &mut spend.room, narrow);
+    let sent = fenced(&text);
+    step(this, generation, cx, |t, cx| {
+        t.settle_call(if is_error { Err(&text) } else { Ok(&sent) }, cx);
+    })?;
+    Ok((is_error, text))
+}
+
 /// Runs `f` on the thread while the turn of `generation` is its running one.
 ///
 /// # Errors
 ///
 /// When the thread closed, or stopped or replaced that turn ([`Thread::generation`]): its
 /// late write is dropped.
-fn step<R>(
+pub(super) fn step<R>(
     this: &WeakEntity<Thread>,
     generation: u64,
     cx: &mut AsyncApp,
@@ -1215,7 +1295,7 @@ fn notice(chosen: &Chosen, files: &[String], open: &str) -> String {
 /// # Errors
 ///
 /// Returns that `provider` said nothing in time; `work` is dropped.
-async fn within<T>(
+pub(super) async fn within<T>(
     cx: &AsyncApp,
     provider: &str,
     work: impl Future<Output = T>,
