@@ -19,7 +19,7 @@
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock};
+use std::sync::{Arc, OnceLock};
 
 use anyhow::Context as _;
 use borer_engine::text::one_line;
@@ -52,27 +52,44 @@ const LISTING: &str = "borer-models";
 /// The context window the picker records for a Claude Code model, which manages its own.
 const WINDOW: u64 = 200_000;
 
-/// Returns the `claude` program on `PATH`, looked up once by file name alone: the native
-/// installer's `claude.exe` on Windows, `claude` elsewhere. A `claude.cmd` alone is not
-/// found, so no Claude Code row is offered for it. Nothing of Claude Code's is read to find
-/// it.
+/// The file name looked for on `PATH`: the native installer's `claude.exe` on Windows (a
+/// `claude.cmd` alone is not found, so no Claude Code row is offered for it), `claude`
+/// elsewhere.
+const NAME: &str = if cfg!(windows) {
+    "claude.exe"
+} else {
+    "claude"
+};
+
+/// What [`probe`] found, once it ran.
+static FOUND: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// Returns the absolute path of the `claude` program [`probe`] found on `PATH`; `None` before
+/// it ran or when it found none. Nothing of Claude Code's is read to find it.
 pub(crate) fn program() -> Option<&'static Path> {
-    static FOUND: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
-        let name = if cfg!(windows) {
-            "claude.exe"
-        } else {
-            "claude"
-        };
-        std::env::split_paths(&std::env::var_os("PATH")?)
-            .map(|dir| dir.join(name))
-            .find(|path| {
-                borer_engine::program::checked_metadata(path)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|meta| meta.is_file())
-            })
-    });
-    FOUND.as_deref()
+    FOUND.get()?.as_deref()
+}
+
+/// Looks for the `claude` program on `PATH` once, by file name alone ([`find`]); later calls
+/// do nothing. It stats files, so it runs off the UI thread.
+pub(crate) fn probe() {
+    FOUND.get_or_init(|| find(&std::env::var_os("PATH")?, NAME));
+}
+
+/// Returns the first file named `name` in the absolute folders of the `PATH` value `path`.
+///
+/// Relative and empty entries are skipped, so the working folder never supplies the
+/// program, and the path returned is the one spawned, never looked up again.
+fn find(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| dir.is_absolute())
+        .map(|dir| dir.join(name))
+        .find(|file| {
+            borer_engine::program::checked_metadata(file)
+                .ok()
+                .flatten()
+                .is_some_and(|meta| meta.is_file())
+        })
 }
 
 /// A running Claude Code and the pipes the app speaks to it over.
@@ -96,12 +113,14 @@ impl std::fmt::Debug for Session {
 }
 
 impl Session {
-    /// Starts `program` with the chat's flags ([`args`]) in the system's temporary folder.
+    /// Starts the `claude` program [`probe`] found with the chat's flags ([`args`]) in the
+    /// system's temporary folder.
     ///
     /// # Errors
     ///
-    /// Returns that it did not start, or gave no pipe.
-    fn start(program: &str, model: Option<&str>) -> anyhow::Result<Self> {
+    /// Returns that no `claude` was found, or that it did not start or gave no pipe.
+    fn start(model: Option<&str>) -> anyhow::Result<Self> {
+        let program = program().with_context(|| format!("no {NAME} was found on PATH"))?;
         let mut child = util::command::new_command(program)
             .args(args(model, &SYSTEM))
             .current_dir(std::env::temp_dir())
@@ -110,7 +129,10 @@ impl Session {
             .stderr(util::command::Stdio::null())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!("Claude Code did not start from {}", one_line(program)))?;
+            .with_context(|| {
+                let at = one_line(&program.display().to_string());
+                format!("Claude Code did not start from {at}")
+            })?;
         let to = child
             .stdin
             .take()
@@ -197,7 +219,7 @@ impl Session {
 ///
 /// Returns that it did not start, went silent, refused, or listed nothing.
 pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<Vec<Chosen>> {
-    let mut session = Session::start(&endpoint.url, None)?;
+    let mut session = Session::start(None)?;
     session.write(&initialize(LISTING)).await?;
     let mut left = TURN_MAX_BYTES;
     let models = loop {
@@ -291,7 +313,7 @@ pub(crate) async fn run_turn(
                     thread.note(said.to_owned(), cx);
                 })?;
             }
-            Session::start(&chosen.endpoint.url, model)?
+            Session::start(model)?
         }
     };
     session.write(&user(&said.unwrap_or_default())).await?;
@@ -360,5 +382,30 @@ impl LanguageModelClient for Itself {
     {
         let why = anyhow::anyhow!("Claude Code runs its turns itself; nothing was sent");
         futures::future::ready(Err(why.into())).boxed()
+    }
+}
+
+#[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test"
+)]
+mod tests {
+    use std::ffi::OsString;
+
+    /// Only absolute `PATH` folders are searched: `.`, an empty entry and a relative folder
+    /// that hold the file are skipped, and the absolute path found is what is returned.
+    #[test]
+    fn only_absolute_path_entries_are_searched() {
+        let here = std::env::current_dir().unwrap();
+        let relative = format!("..{}borer-app", std::path::MAIN_SEPARATOR);
+        let path = std::env::join_paths([".", "", relative.as_str()]).unwrap();
+        assert_eq!(super::find(&path, "Cargo.toml"), None);
+        let mut with_absolute = path;
+        with_absolute.push(OsString::from(if cfg!(windows) { ";" } else { ":" }));
+        with_absolute.push(here.as_os_str());
+        let found = super::find(&with_absolute, "Cargo.toml").unwrap();
+        assert!(found.is_absolute());
+        assert_eq!(found, here.join("Cargo.toml"));
     }
 }

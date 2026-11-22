@@ -31,11 +31,13 @@ pub(super) async fn demo(
     cx: &mut AsyncWindowContext,
 ) -> anyhow::Result<()> {
     addresses(this, cx).await?;
-    anyhow::ensure!(
-        Offered::on_offer().contains(&Offered::ClaudeCode),
-        "no claude program is on PATH"
-    );
     let panel = docked(this, cx)?;
+    poll("a claude program on PATH", cx, |_| {
+        Offered::on_offer()
+            .contains(&Offered::ClaudeCode)
+            .then_some(())
+    })
+    .await?;
     panel.update(cx, |panel, cx| panel.pick(Offered::ClaudeCode, cx));
     let first = poll("Claude Code's models", cx, |cx| {
         panel.read_with(cx, |panel, _| match panel.listed() {

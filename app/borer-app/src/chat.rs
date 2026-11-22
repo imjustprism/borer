@@ -330,6 +330,12 @@ impl ChatPanel {
             editor
         });
         let key = Self::key_field(window, cx);
+        let probing = cx.background_spawn(async { claude_code::probe() });
+        cx.spawn(async move |this, cx| {
+            probing.await;
+            this.update(cx, |_, cx| cx.notify()).unwrap_or(());
+        })
+        .detach();
         let list = ListState::new(0, ListAlignment::Top, px(LIST_OVERDRAW));
         list.set_follow_mode(FollowMode::Tail);
         Self {
