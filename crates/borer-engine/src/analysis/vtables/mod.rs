@@ -1365,6 +1365,35 @@ mod tests {
         );
         assert!(fs[1].signature.is_none());
     }
+
+    /// A trace name of a recovered class the function's class is not related
+    /// to is dropped like a signature name; one of its own class stays.
+    ///
+    /// # Panics
+    ///
+    /// When a name is kept or dropped against the rule.
+    #[test]
+    fn trace_names_of_a_foreign_class_are_dropped() {
+        let classes: BTreeMap<String, super::ClassInfo> =
+            [("H", vec![0x50, 0x60]), ("Other", Vec::new())]
+                .into_iter()
+                .map(|(name, slots)| {
+                    let info = super::ClassInfo {
+                        name: name.to_owned(),
+                        slots,
+                        ..super::ClassInfo::default()
+                    };
+                    (name.to_owned(), info)
+                })
+                .collect();
+        let mut fs = vec![
+            named(0x50, "Other::Ready", NameSource::Trace, Vec::new(), &[]),
+            named(0x60, "H::Ready", NameSource::Trace, Vec::new(), &[]),
+        ];
+        super::unname_foreign_signatures(&classes, &mut fs);
+        let names: Vec<Option<&str>> = fs.iter().map(|f| f.name.as_deref()).collect();
+        assert_eq!(names, vec![None, Some("H::Ready")]);
+    }
     use crate::isa::x86::Register;
     use crate::program::Program;
 

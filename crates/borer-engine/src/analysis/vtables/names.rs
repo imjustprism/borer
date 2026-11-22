@@ -428,7 +428,7 @@ pub(super) fn accessed_descriptors(
 /// Drops the signature names that belong to a method some virtual inlined.
 ///
 /// A function sitting in the tables of classes `H` took its name from the
-/// `__FUNCSIG__` string it carries; when that string names a method of a
+/// `__FUNCSIG__` (or trace) string it carries; when that string names a method of a
 /// class that is none of `H` nor any ancestor of theirs, the string came in
 /// with an inlined method of another class: a handler inlined `SetActor`
 /// and was named `Other::SetActor`. The name is dropped, so the slot passes
@@ -461,7 +461,7 @@ pub(super) fn unname_foreign_signatures(
         out
     };
     for f in functions.iter_mut() {
-        if f.name_source != NameSource::Signature {
+        if !matches!(f.name_source, NameSource::Signature | NameSource::Trace) {
             continue;
         }
         let Some(held) = holders.get(&f.entry) else {
@@ -485,8 +485,8 @@ pub(super) fn unname_foreign_signatures(
     }
 }
 
-/// Drops the signature names a function took from a method of a class it
-/// reaches through a smart pointer.
+/// Drops the signature (and trace) names a function took from a method of a
+/// class it reaches through a smart pointer.
 ///
 /// A function that calls a smart pointer's dereference (`Core::Ptr<C>::operator
 /// ->`, `std::shared_ptr<C>::operator ->`) holds a `C` it was not handed as
@@ -512,7 +512,7 @@ pub(super) fn unname_inlined_signatures(functions: &mut [Function]) {
     let inlined: Vec<usize> = functions
         .iter()
         .enumerate()
-        .filter(|(_, f)| f.name_source == NameSource::Signature)
+        .filter(|(_, f)| matches!(f.name_source, NameSource::Signature | NameSource::Trace))
         .filter_map(|(i, f)| {
             let class = f.name.as_deref().and_then(class_of)?;
             let reaches = f
