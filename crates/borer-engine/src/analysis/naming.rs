@@ -186,6 +186,40 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
     }
 }
 
+/// Drops each trace name whose text another function holds once every
+/// source has named: a pack, library, Qt, Objective-C or vtable name of the
+/// same text proves the trace a call.
+///
+/// A trace name ([`NameSource::Trace`]) is the weakest source, which every
+/// later source may overwrite; this pass runs after all of them.
+///
+/// # Arguments
+///
+/// * `analysis` - The functions; shadowed trace names are removed in place.
+pub(crate) fn drop_shadowed_traces(analysis: &mut Analysis) {
+    let traced: BTreeSet<&str> = analysis
+        .functions
+        .iter()
+        .filter(|f| f.name_source == NameSource::Trace)
+        .filter_map(|f| f.name.as_deref())
+        .collect();
+    let held: BTreeSet<String> = analysis
+        .functions
+        .iter()
+        .filter(|f| f.name_source != NameSource::Trace)
+        .filter_map(|f| f.name.as_deref())
+        .filter(|n| traced.contains(n))
+        .map(str::to_owned)
+        .collect();
+    for f in &mut analysis.functions {
+        if f.name_source == NameSource::Trace && f.name.as_ref().is_some_and(|n| held.contains(n)) {
+            f.name = None;
+            f.name_inferred = false;
+            f.name_source = NameSource::None;
+        }
+    }
+}
+
 /// Names each function by the one trace string it references
 /// ([`trace_name`]) when the evidence outside the text holds.
 ///

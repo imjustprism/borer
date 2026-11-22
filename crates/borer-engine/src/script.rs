@@ -1016,7 +1016,7 @@ pub fn run_pack_scripts(program: &Program, analysis: Analysis) -> Analysis {
             };
             if matches!(
                 f.name_source,
-                NameSource::None | NameSource::Slot | NameSource::Constants
+                NameSource::None | NameSource::Slot | NameSource::Constants | NameSource::Trace
             ) {
                 f.name = Some(name);
                 f.name_inferred = false;

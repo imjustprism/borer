@@ -718,7 +718,7 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
         let Some(f) = analysis.function(entry) else {
             continue;
         };
-        if f.name.is_some()
+        if (f.name.is_some() && f.name_source != NameSource::Trace)
             || f.thunk.is_some()
             || f.funclet.is_some()
             || f.callees.len() > CALLEES_MAX

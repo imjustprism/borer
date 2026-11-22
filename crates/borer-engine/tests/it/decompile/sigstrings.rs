@@ -421,3 +421,49 @@ fn a_trace_name_stays_out_of_an_exported_pack() {
     let f = b.function(0x1100).expect("a function");
     assert_eq!(f.name_source, NameSource::Trace);
 }
+
+/// The first bytes of a [`reporters`] function passing one string, its
+/// displacements wildcarded.
+const ONE_CALL: &str = "488D0D????????FF15????????C3";
+
+/// The first bytes of a [`reporters`] function passing two strings.
+const TWO_CALLS: &str = "488D0D????????FF15????????488D0D????????FF15????????C3";
+
+/// Returns the analysis of `p` with a pack naming functions by their first
+/// bytes loaded.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `lines` - Each function's first bytes and the name the pack gives it.
+fn with_pack(p: &Program, lines: &[(&str, &str)]) -> Analysis {
+    use borer_engine::pack::{Pack, Packs};
+    let mut text = "pack probe 1\nabout names by first bytes\n\n[names]\n".to_owned();
+    for (bytes, name) in lines {
+        text.push_str(&format!("fn {bytes} {name}\n"));
+    }
+    let pack = Pack::parse(&text, "probe.borer").map_or_else(|_| None, |(pack, _)| Some(pack));
+    let packs = Packs {
+        packs: pack.into_iter().collect(),
+    };
+    Analysis::compute_with(p, std::sync::Arc::new(packs))
+}
+
+/// A trace name is the weakest: a pack naming its function replaces it,
+/// and a pack giving another function the trace's text removes it.
+#[test]
+fn a_later_name_outranks_a_trace() {
+    use borer_engine::analysis::NameSource;
+    let p = reporters(&[&[0x240]]);
+    let a = with_pack(&p, &[(ONE_CALL, "audio::Real")]);
+    let f = a.function(0x1100).expect("a function");
+    assert_eq!(
+        (f.name.as_deref(), f.name_source),
+        (Some("audio::Real"), NameSource::Pack)
+    );
+    let p = reporters(&[&[0x240], &[0x2c0, 0x320]]);
+    let a = with_pack(&p, &[(TWO_CALLS, "audio::Load")]);
+    let names = |e: u64| a.function(e).and_then(|f| f.name.clone());
+    assert_eq!(names(0x1140).as_deref(), Some("audio::Load"));
+    assert_eq!(names(0x1100), None);
+}

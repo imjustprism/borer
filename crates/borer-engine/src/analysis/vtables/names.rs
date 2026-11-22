@@ -365,7 +365,9 @@ pub(super) fn name_descriptor_accessors(
     functions: &mut [Function],
 ) {
     for f in functions.iter_mut() {
-        if f.instr_count != 2 || !(f.name.is_none() || f.name_source == NameSource::Slot) {
+        if f.instr_count != 2
+            || !(f.name.is_none() || matches!(f.name_source, NameSource::Slot | NameSource::Trace))
+        {
             continue;
         }
         if let Some(class) = crate::analysis::messages::returned_global(program, f.entry, bitness)

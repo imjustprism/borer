@@ -1487,7 +1487,8 @@ impl Analysis {
         ended("analysis libnames")?;
         recognize::infer(program, &mut analysis);
         ended("analysis recognize")?;
-        let analysis = crate::script::run_pack_scripts(program, analysis);
+        let mut analysis = crate::script::run_pack_scripts(program, analysis);
+        naming::drop_shadowed_traces(&mut analysis);
         ended("analysis scripts")?;
         Some(analysis)
     }

@@ -380,7 +380,10 @@ pub(crate) fn apply_names(
         let Some(f) = analysis.function_mut(entry) else {
             continue;
         };
-        if matches!(f.name_source, NameSource::None | NameSource::Slot) {
+        if matches!(
+            f.name_source,
+            NameSource::None | NameSource::Slot | NameSource::Trace
+        ) {
             f.name = Some(name.clone());
             f.name_inferred = false;
             f.name_source = source;
