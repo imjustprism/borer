@@ -1281,8 +1281,12 @@ fn norm_ty(ty: &str) -> String {
 /// `r = (c != k ? (c == k ? base & ~bit : base) | bit : (c == k ? base &
 /// ~bit : base)); base = r;` is `if (c != k) { base |= bit; } else { base
 /// &= ~bit; }`. The mask may sit on the outside instead, `(c != k ? (c ==
-/// k ? base | bits : base) & ~bits : ...)`, which tests the other way. The
-/// temporary is dropped when no other line reads it.
+/// k ? base | bits : base) & ~bits : ...)`, which tests the other way, and
+/// the choice may be written out on both sides, `c != k ? base | bit : base
+/// & ~bit`. The store may repeat the choice instead of naming the
+/// temporary when the choice does not read the temporary, whose new value
+/// the repeat would read. The temporary is dropped when no other line
+/// reads it.
 ///
 /// # Arguments
 ///
@@ -1314,7 +1318,8 @@ fn complement_bits(lines: &mut Vec<String>, k: usize) -> bool {
     let Some(store) = lines.get(k + 1).and_then(|l| any_assignment(l)) else {
         return false;
     };
-    if (store.1 != temp && unparen(store.1) != unparen(rhs)) || store.0 != base {
+    let repeated = unparen(store.1) == unparen(rhs) && !mentions_ident(rhs, temp);
+    if (store.1 != temp && !repeated) || store.0 != base {
         return false;
     }
     let (then_op, else_op, else_operand) = match (or_out, inner_or) {
@@ -2023,6 +2028,12 @@ return 0;
             select_statements(direct_clear, "uint64_t", &[]),
             "uint32_t r1;\n\nif (a2 != 1) {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 & (a4 ^ 0xffffffff));\n} else {\n  a1->field_0x4 = (uint32_t)(a1->field_0x4 | a4);\n}\nr1 = 0;\n"
         );
+        let reread = "uint32_t r3;
+
+r3 = (r3 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xffffefff);
+a1->field_0xc = (r3 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xffffefff);
+";
+        assert_eq!(select_statements(reread, "uint64_t", &[]), reread);
         let unrelated = "uint32_t r3;\n\nr3 = (a2 != 8 ? a1->field_0xc | 0x1000 : a1->field_0xc & 0xff);\na1->field_0xc = r3;\n";
         assert_eq!(select_statements(unrelated, "uint64_t", &[]), unrelated);
         let live = "uint32_t r3;\n\nr3 = (a2 != 8 ? (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc) | 0x1000 : (a2 == 8 ? a1->field_0xc & 0xffffefff : a1->field_0xc));\na1->field_0xc = r3;\nreturn r3;\n";
