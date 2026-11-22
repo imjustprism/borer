@@ -178,9 +178,12 @@ pub(super) fn mentions_ident(text: &str, ident: &str) -> bool {
 /// # Arguments
 ///
 /// * `line` - The text.
-/// * `word` - The identifier.
+/// * `word` - The identifier; an empty one occurs nowhere.
 pub(super) fn word_positions(line: &str, word: &str) -> Vec<usize> {
     let mut out = Vec::new();
+    if word.is_empty() {
+        return out;
+    }
     let mut from = 0;
     while let Some(i) = line.get(from..).and_then(|t| t.find(word)) {
         let at = from + i;
@@ -900,7 +903,19 @@ pub(super) fn split_arguments(args: &str) -> Vec<&str> {
 
 #[cfg(test)]
 mod tests {
-    use super::impure;
+    use super::{impure, word_positions};
+
+    /// An empty word occurs nowhere, where it once matched at every byte
+    /// without moving on and grew the list until memory ran out.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn an_empty_word_occurs_nowhere() {
+        assert!(word_positions("#define FILE struct _IO_FILE", "").is_empty());
+        assert_eq!(word_positions("a ab a", "a"), [0, 5]);
+    }
 
     /// A call to an operator is impure, whatever symbol ends its name.
     ///
