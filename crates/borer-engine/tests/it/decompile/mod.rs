@@ -31,6 +31,7 @@ mod origins;
 mod renames;
 mod results;
 mod rounding;
+mod shifts;
 mod sigstrings;
 mod solve;
 mod switches;

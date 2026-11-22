@@ -52,6 +52,16 @@ pub(super) enum Helper {
     /// `mul_sat(a, b)` at 64 bits, `mul_satN` narrower: the unsigned
     /// product, all ones when it does not fit.
     MulSat(u8),
+    /// `lsl32(x, n)`: the A32/T32 `lsl` by a register: the low 32 bits of
+    /// `x` shifted left by the low byte of `n`, 0 from 32 on.
+    Lsl32,
+    /// `lsr32(x, n)`: the A32/T32 `lsr` by a register: the low 32 bits of
+    /// `x` shifted right by the low byte of `n`, 0 from 32 on.
+    Lsr32,
+    /// `asr32(x, n)`: the A32/T32 `asr` by a register: the low 32 bits of
+    /// `x` read signed and shifted right by the low byte of `n`, the sign
+    /// in every bit from 32 on.
+    Asr32,
     /// `parity8(x)`: 1 when the low byte has an even number of set bits.
     Parity8,
     /// `bswap(x)`: the bytes of `x` reversed at its type's width.
@@ -217,6 +227,9 @@ impl Helper {
             .iter()
             .flat_map(|make| WIDTHS.map(make))
             .chain([
+                Helper::Lsl32,
+                Helper::Lsr32,
+                Helper::Asr32,
                 Helper::Parity8,
                 Helper::Bswap,
                 Helper::Tzcnt,
@@ -284,6 +297,9 @@ impl Helper {
     /// The helper, or `None` for any other name.
     pub(super) fn parse(name: &str) -> Option<Helper> {
         let fixed = match name {
+            "lsl32" => Some(Helper::Lsl32),
+            "lsr32" => Some(Helper::Lsr32),
+            "asr32" => Some(Helper::Asr32),
             "parity8" => Some(Helper::Parity8),
             "bswap" => Some(Helper::Bswap),
             "tzcnt" => Some(Helper::Tzcnt),
@@ -373,6 +389,9 @@ impl Helper {
             | Helper::SSubO(_)
             | Helper::AddSat(_)
             | Helper::MulSat(_)
+            | Helper::Lsl32
+            | Helper::Lsr32
+            | Helper::Asr32
             | Helper::Parity8
             | Helper::Bswap
             | Helper::Tzcnt
@@ -423,7 +442,10 @@ impl Helper {
             Helper::Popcnt => Some(UnOp::Popcnt),
             Helper::Bsf => Some(UnOp::Bsf),
             Helper::Bsr => Some(UnOp::Bsr),
-            Helper::Rotl(_)
+            Helper::Lsl32
+            | Helper::Lsr32
+            | Helper::Asr32
+            | Helper::Rotl(_)
             | Helper::Rotr(_)
             | Helper::MulHi(_)
             | Helper::SMulHi(_)
@@ -474,6 +496,9 @@ impl Helper {
             | Helper::SMulHi(_)
             | Helper::SMulO(_)
             | Helper::UAddO(_)
+            | Helper::Lsl32
+            | Helper::Lsr32
+            | Helper::Asr32
             | Helper::USubO(_)
             | Helper::SAddO(_)
             | Helper::SSubO(_)
@@ -526,6 +551,7 @@ impl Helper {
             | Helper::SSubO(w)
             | Helper::AddSat(w)
             | Helper::MulSat(w) => Yields::Unsigned(w),
+            Helper::Lsl32 | Helper::Lsr32 | Helper::Asr32 => Yields::Unsigned(32),
             Helper::Parity8 => Yields::Unsigned(8),
             Helper::Bswap
             | Helper::Tzcnt
@@ -617,6 +643,7 @@ impl Helper {
                 };
                 u64::try_from(wide.min(u128::from(m))).ok()
             }
+            Helper::Lsl32 | Helper::Lsr32 | Helper::Asr32 => Some(reg_shift_bits(self, a?, b?)),
             Helper::Parity8 => Some(u64::from((a? & 0xff).count_ones().is_multiple_of(2))),
             Helper::Rbit => rbit_bits(a?, bits),
             Helper::Rev16 => rev16_bits(a?, bits),
@@ -689,6 +716,7 @@ impl Helper {
             | Helper::SSubO(w)
             | Helper::AddSat(w)
             | Helper::MulSat(w) => Some(w),
+            Helper::Lsl32 | Helper::Lsr32 | Helper::Asr32 => Some(32),
             Helper::Parity8
             | Helper::Bswap
             | Helper::Tzcnt
@@ -814,6 +842,9 @@ impl Helper {
                     ),
                 )
             }
+            Helper::Lsl32 => reg_shift_c(self, "n < 32 ? (uint32_t)((uint32_t)x << n) : 0"),
+            Helper::Lsr32 => reg_shift_c(self, "n < 32 ? (uint32_t)x >> n : 0"),
+            Helper::Asr32 => reg_shift_c(self, "(uint32_t)((int32_t)(uint32_t)x >> (n < 32 ? n : 31))"),
             Helper::Parity8 => vec![
                 "static inline uint8_t parity8(uint64_t x) { return !__builtin_parity((uint8_t)x); }"
                     .to_owned(),
@@ -869,11 +900,7 @@ impl Helper {
                 lines
             }
             Helper::UMin | Helper::UMax => {
-                let rel = if matches!(self, Helper::UMin) {
-                    "<="
-                } else {
-                    ">="
-                };
+                let rel = if self == Helper::UMin { "<=" } else { ">=" };
                 word_two(&wu, &wu, &format!("a {rel} b ? a : b"))
             }
             Helper::SubSat => word_two(&wu, &wu, "a > b ? a - b : 0"),
@@ -915,6 +942,47 @@ fn extremum(a: u64, b: u64, bits: u8, first: impl Fn(u64, u64) -> bool) -> Optio
     let m = mask_bits(bits);
     let (x, y) = (a & m, b & m);
     Some(if first(x, y) { x } else { y })
+}
+
+/// Returns the value of an A32/T32 shift by a register, as the Arm ARM
+/// computes it.
+///
+/// The low word of `x` is shifted by the low byte of `n`; a logical shift
+/// from 32 on leaves 0 and an arithmetic one the sign in every bit.
+///
+/// # Arguments
+///
+/// * `h` - The shift, [`Helper::Lsl32`], [`Helper::Lsr32`] or [`Helper::Asr32`];
+///   any other helper gives 0.
+/// * `x` - The shifted value; its low 32 bits count.
+/// * `n` - The amount register; its low byte counts.
+fn reg_shift_bits(h: Helper, x: u64, n: u64) -> u64 {
+    let (x, n) = (x & mask_bits(32), n & 0xff);
+    match (h, n < 32) {
+        (Helper::Lsl32, true) => (x << n) & mask_bits(32),
+        (Helper::Lsr32, true) => x >> n,
+        (Helper::Asr32, _) => {
+            (sext(x, 32).cast_signed() >> n.min(31)).cast_unsigned() & mask_bits(32)
+        }
+        _ => 0,
+    }
+}
+
+/// Defines an A32/T32 shift by a register, whose amount is the low byte of
+/// `n` as the Arm ARM reads it.
+///
+/// # Arguments
+///
+/// * `h` - The helper, [`Helper::Lsl32`], [`Helper::Lsr32`] or [`Helper::Asr32`].
+/// * `body` - The result over the 64-bit `x` and the amount `n`.
+///
+/// # Returns
+///
+/// The definition's line.
+fn reg_shift_c(h: Helper, body: &str) -> Vec<String> {
+    vec![format!(
+        "static inline uint32_t {h}(uint64_t x, uint64_t n) {{ n &= 0xff; return {body}; }}"
+    )]
 }
 
 /// Defines a helper whose width is its argument's type: one function per
@@ -987,6 +1055,9 @@ impl fmt::Display for Helper {
             Helper::AddSat(w) => ("add_sat", w),
             Helper::MulSat(w) => ("mul_sat", w),
             Helper::RoundToInt(round) => return f.write_str(round.name().unwrap_or("fcvtz")),
+            Helper::Lsl32 => return f.write_str("lsl32"),
+            Helper::Lsr32 => return f.write_str("lsr32"),
+            Helper::Asr32 => return f.write_str("asr32"),
             Helper::Parity8 => return f.write_str("parity8"),
             Helper::Bswap => return f.write_str("bswap"),
             Helper::Tzcnt => return f.write_str("tzcnt"),

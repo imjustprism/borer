@@ -19,6 +19,7 @@ use crate::num::lo32;
 use crate::program::{BinaryFormat, Program, SymbolKind};
 
 mod compare;
+mod reg_shift;
 use compare::{compare, int_difference};
 
 /// Name resolution for rendering: overlay names beat symbol names beat
@@ -2081,7 +2082,8 @@ fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String
 /// Renders a select, as `min` or `max` when it picks between the two
 /// sides of its own compare at the machine word ([`super::expr::extremum`]).
 ///
-/// The lift folds a 64-bit one already; a 32-bit target's word compare
+/// The select of an A32 shift by a register prints as its helper call
+/// ([`reg_shift::call`]). The lift folds a 64-bit one already; a 32-bit target's word compare
 /// waits for the word, which only the names know.
 ///
 /// # Arguments
@@ -2097,7 +2099,9 @@ fn global_element(a: &Expr, ty: Ty, name: &str, n: &Names<'_>) -> Option<(String
 /// The text and its precedence.
 fn ternary(c: &Cond, a: &Expr, b: &Expr, n: &Names<'_>, how: (bool, bool, bool)) -> (String, u8) {
     let word = if n.program.is_64 { 64 } else { 32 };
-    if let Some(call) = super::expr::extremum(c, a, b, word) {
+    if let Some(call) =
+        super::expr::extremum(c, a, b, word).or_else(|| reg_shift::call(c, a, b, n.program))
+    {
         return call.render_in(n, how.0, how.1, how.2);
     }
     let text = format!(

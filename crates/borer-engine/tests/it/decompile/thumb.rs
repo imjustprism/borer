@@ -6,7 +6,7 @@ use borer_engine::analysis::decompile::replay::{replay_function, replay_tsv};
 use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
 
 /// Where each routine is placed and entered.
-const AT: u64 = 0x2_0000;
+pub(super) const AT: u64 = 0x2_0000;
 
 /// Decompiles a T32 routine at [`AT`] and requires its lift and its text
 /// to agree with the ARM32 machine.
@@ -19,7 +19,21 @@ const AT: u64 = 0x2_0000;
 ///
 /// The text.
 fn agreed(code: &[u16]) -> String {
-    let p = image(AT, Code::Thumb(code));
+    agreed_in(Code::Thumb(code))
+}
+
+/// Decompiles an ARM32 routine at [`AT`] and requires its lift and its
+/// text to agree with the ARM32 machine.
+///
+/// # Arguments
+///
+/// * `code` - The routine, in the instruction set it starts in.
+///
+/// # Returns
+///
+/// The text.
+pub(super) fn agreed_in(code: Code<'_>) -> String {
+    let p = image(AT, code);
     let a = Analysis::compute(&p);
     for seed in 1..=8 {
         let v = verify(&p, &a, &[AT], seed);
