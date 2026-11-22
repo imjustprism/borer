@@ -288,3 +288,40 @@ fn a_failed_turn_says_why(cx: &mut TestAppContext) {
     assert!(said.contains("Not logged in"), "{said}");
     assert_eq!(fault, Some(Fault::Provider));
 }
+
+/// A line Claude Code writes after its turn's end is dropped when the next turn starts, so
+/// a stray `result` cannot end the next turn before its reply.
+#[gpui::test]
+fn a_stray_line_after_a_turn_is_dropped(cx: &mut TestAppContext) {
+    let (_app, thread, fake, model, cx) = chatting(None, cx);
+    let killed = Flag::default();
+    let (session, out, written) = fake_session(&killed, true, cx);
+    let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
+    thread.update(cx, |t, cx| {
+        t.choose(chosen, cx);
+        t.agree(cx);
+        t.claude = Some(session);
+    });
+    let first = [says("one"), DONE.to_owned(), DONE.to_owned(), says("stray")];
+    out.unbounded_send(Ok(chunk(&first))).unwrap();
+    thread.update(cx, |t, cx| t.send("First".to_owned(), cx));
+    cx.run_until_parked();
+    thread.update(cx, |t, cx| t.send("Second".to_owned(), cx));
+    cx.run_until_parked();
+    out.unbounded_send(Ok(chunk(&[says("two"), DONE.to_owned()])))
+        .unwrap();
+    cx.run_until_parked();
+    let entries = thread.read_with(cx, |t, _| t.entries().to_vec());
+    assert_eq!(
+        entries.last(),
+        Some(&Entry::Model("two".to_owned())),
+        "{entries:?}"
+    );
+    assert!(
+        !entries.iter().any(|e| matches!(e, Entry::Error(_))),
+        "{entries:?}"
+    );
+    assert!(!entries.contains(&Entry::Model("stray".to_owned())));
+    assert!(!killed.get());
+    assert_eq!(lines_of(&written).len(), 2);
+}

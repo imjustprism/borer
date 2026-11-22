@@ -256,6 +256,18 @@ impl Session {
         }
     }
 
+    /// Returns the session with every line it wrote before this turn dropped, so a line it
+    /// wrote after its last turn's end never counts in the next; `None` when it ended since.
+    fn drained(mut self) -> Option<Self> {
+        loop {
+            match self.lines.try_recv() {
+                Ok((_, Ok(_))) => {}
+                Ok((_, Err(_))) | Err(mpsc::TryRecvError::Closed) => return None,
+                Err(mpsc::TryRecvError::Empty) => return Some(self),
+            }
+        }
+    }
+
     /// Writes `line` and flushes it.
     ///
     /// # Errors
@@ -405,7 +417,8 @@ pub(crate) async fn run_turn(
             > 1;
         (thread.claude.take(), said, earlier)
     })?;
-    let mut session = match kept.filter(|s| s.model.as_deref() == model) {
+    let kept = kept.filter(|s| s.model.as_deref() == model);
+    let mut session = match kept.and_then(Session::drained) {
         Some(session) => session,
         None => {
             if earlier {
