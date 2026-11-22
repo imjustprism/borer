@@ -25,11 +25,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use anyhow::Context as _;
 use borer_engine::text::one_line;
 use borer_front::claude_code::{
-    ANSWERS_MAX, Event, LINE_MAX, Mcp, TURN_MAX_BYTES, answered, args, initialize, mcp, read,
-    refuse, respond, user,
+    ANSWERS_MAX, Event, LINE_MAX, Mcp, TESTED, TURN_MAX_BYTES, answered, args, initialize, mcp,
+    read, refuse, respond, user,
 };
 use futures::channel::mpsc;
-use futures::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite};
+use futures::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncRead, AsyncReadExt as _, AsyncWrite};
 use futures::{AsyncWriteExt as _, SinkExt as _, StreamExt as _};
 use gpui::{AsyncApp, BackgroundExecutor, Task, WeakEntity};
 use language_model::{LanguageModelToolUse, LanguageModelToolUseInput};
@@ -209,7 +209,7 @@ impl Session {
         let mut child = command
             .stdin(util::command::Stdio::piped())
             .stdout(util::command::Stdio::piped())
-            .stderr(util::command::Stdio::null())
+            .stderr(util::command::Stdio::piped())
             .kill_on_drop(true)
             .spawn()
             .with_context(|| {
@@ -224,15 +224,21 @@ impl Session {
             .stdout
             .take()
             .context("Claude Code gave no output pipe")?;
+        let err = child
+            .stderr
+            .take()
+            .context("Claude Code gave no error pipe")?;
+        let said = executor.spawn(tail(err));
         let from = futures::io::BufReader::new(from);
         Ok(Self {
             _folder: Some(folder),
-            ..Self::over(from, to, Box::new(child), model, executor)
+            ..Self::with(from, to, Box::new(child), model, executor, said)
         })
     }
 
     /// Returns a session over the pipes `from` and `to`, whose reader runs on `executor`;
-    /// dropping it drops `child`.
+    /// dropping it drops `child`. The child says nothing on its error pipe.
+    #[cfg(test)]
     pub(crate) fn over(
         from: impl AsyncBufRead + Unpin + Send + 'static,
         to: impl AsyncWrite + Unpin + Send + 'static,
@@ -240,12 +246,26 @@ impl Session {
         model: Option<&str>,
         executor: &BackgroundExecutor,
     ) -> Self {
+        let said = futures::future::ready(String::new());
+        Self::with(from, to, child, model, executor, said)
+    }
+
+    /// Returns a session as `Session::over` does, whose child's error pipe ends with `said`,
+    /// told when its output ends.
+    fn with(
+        from: impl AsyncBufRead + Unpin + Send + 'static,
+        to: impl AsyncWrite + Unpin + Send + 'static,
+        child: Box<dyn Any + Send>,
+        model: Option<&str>,
+        executor: &BackgroundExecutor,
+        said: impl Future<Output = String> + Send + 'static,
+    ) -> Self {
         let (heard, lines) = mpsc::channel(AHEAD);
         Self {
             to: Box::new(to),
             lines,
             model: model.map(str::to_owned),
-            _reader: executor.spawn(hear(from, heard)),
+            _reader: executor.spawn(hear(from, heard, said)),
             _child: child,
             _folder: None,
         }
@@ -299,17 +319,56 @@ impl Session {
 const ENDED: &str =
     "Claude Code ended before the turn did; the next message starts a new Claude Code conversation";
 
-/// Reads Claude Code's standard output line by line, each at most [`LINE_MAX`] bytes, and
-/// sends what each means to the session, until the output ends, a line does not read or
-/// the session drops.
-async fn hear(mut from: impl AsyncBufRead + Unpin, mut heard: mpsc::Sender<Heard>) {
+/// Most bytes kept of what Claude Code writes to its error pipe: the last ones.
+const TAIL: usize = 1024;
+
+/// Returns the last [`TAIL`] bytes Claude Code wrote to its error pipe `err`, read until it
+/// ends, so the pipe never fills and nothing of it reaches the app's own output.
+async fn tail(mut err: impl AsyncRead + Unpin) -> String {
+    let (mut kept, mut buf) = (Vec::new(), [0u8; 4096]);
+    while let Ok(n @ 1..) = err.read(&mut buf).await {
+        kept.extend_from_slice(buf.get(..n).unwrap_or_default());
+        kept.drain(..kept.len().saturating_sub(TAIL));
+    }
+    String::from_utf8_lossy(&kept).into_owned()
+}
+
+/// Returns why the turn ended when Claude Code's output ended, from what it said last on its
+/// error pipe: an older Claude Code that refuses a flag is named as such.
+fn ended(said: &str) -> anyhow::Error {
+    let said = one_line(said.trim());
+    if said.contains("unknown option") {
+        anyhow::anyhow!(
+            "this Claude Code does not take the flags borer-app passes; borer-app was checked with Claude Code {TESTED}, so update it (claude update); it said: {said}"
+        )
+    } else if said.is_empty() {
+        anyhow::anyhow!(ENDED)
+    } else {
+        anyhow::anyhow!("{ENDED}; it said: {said}")
+    }
+}
+
+/// Reads Claude Code's standard output line by line and sends what each means to the session.
+///
+/// Each line is at most [`LINE_MAX`] bytes. It stops when the output ends, a line does not
+/// read or the session drops; at the end of the output it says why from `said`, the end of
+/// the error pipe ([`ended`]).
+async fn hear(
+    mut from: impl AsyncBufRead + Unpin,
+    mut heard: mpsc::Sender<Heard>,
+    said: impl Future<Output = String>,
+) {
+    let mut said = Some(said);
     loop {
         let mut line = Vec::new();
         let cap = u64::try_from(LINE_MAX.saturating_add(1)).unwrap_or(u64::MAX);
         let read_line = (&mut from).take(cap).read_until(b'\n', &mut line).await;
         let said = match read_line {
             Err(why) => Err(anyhow::Error::new(why).context("Claude Code's output broke")),
-            Ok(0) => Err(anyhow::anyhow!(ENDED)),
+            Ok(0) => Err(ended(&match said.take() {
+                Some(said) => said.await,
+                None => String::new(),
+            })),
             Ok(_) if line.len() > LINE_MAX => Err(anyhow::anyhow!(
                 "Claude Code wrote a line over {LINE_MAX} bytes; the turn ended"
             )),
@@ -519,12 +578,35 @@ mod tests {
         let out = format!("{done}\n{long}\n{done}\n");
         let (heard, lines) = futures::channel::mpsc::channel(4);
         let from = futures::io::BufReader::new(futures::io::Cursor::new(out.into_bytes()));
-        futures::executor::block_on(super::hear(from, heard));
+        futures::executor::block_on(super::hear(from, heard, async { String::new() }));
         let said: Vec<_> = futures::executor::block_on_stream(lines).collect();
         assert_eq!(said.len(), 2);
         assert!(matches!(&said[0].1, Ok(super::Event::Done(Ok(())))));
         let why = format!("{:#}", said[1].1.as_ref().unwrap_err());
         assert!(why.contains("over"), "{why}");
+    }
+
+    /// An older Claude Code that refuses a flag is named as too old, with the version checked;
+    /// another end says what it said last, and a silent one says it ended.
+    #[test]
+    fn an_end_says_why() {
+        let old = format!(
+            "{:#}",
+            super::ended("error: unknown option '--safe-mode'\n")
+        );
+        assert!(
+            old.contains(super::TESTED) && old.contains("--safe-mode"),
+            "{old}"
+        );
+        let other = format!("{:#}", super::ended("boom"));
+        assert!(
+            other.contains("ended before") && other.contains("boom"),
+            "{other}"
+        );
+        assert_eq!(format!("{:#}", super::ended("")), super::ENDED);
+        let long = "y".repeat(10_000);
+        let kept = futures::executor::block_on(super::tail(futures::io::Cursor::new(long)));
+        assert_eq!(kept.len(), super::TAIL);
     }
 
     /// A turn's tool answers are capped below what an echoed line may hold, with no byte

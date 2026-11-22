@@ -59,6 +59,9 @@ pub const TURN_MAX_BYTES: usize = 64 << 20;
 /// as six, so a turn's answers stay well under what one line may hold ([`LINE_MAX`]).
 pub const ANSWERS_MAX: usize = LINE_MAX / 8;
 
+/// The Claude Code version the flags ([`args`]) and the lines were checked against.
+pub const TESTED: &str = "2.1.318";
+
 /// Most models kept from Claude Code's list.
 pub const MODELS_MAX: usize = 64;
 
