@@ -782,8 +782,10 @@ fn export_with(
             .then(|| named(program, analysis, overlay, entry))
             .flatten()
             .map(|text| {
+                let undeclared = super::unit::undeclared_words(&text);
                 own_callees(
-                    &super::unit::declare_globals(&text, &index.data),
+                    &super::unit::declare_globals(&text, &undeclared, &index.data),
+                    &undeclared,
                     program,
                     analysis,
                     overlay,
@@ -886,6 +888,8 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// # Arguments
 ///
 /// * `text` - The function's finished text.
+/// * `undeclared` - The words its code used undeclared before its globals
+///   were declared ([`super::unit::undeclared_words`]).
 /// * `program` - The loaded binary.
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names, types and comments to apply.
@@ -896,6 +900,7 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// The text with its callees' declarations replaced, added or dropped.
 fn own_callees(
     text: &str,
+    undeclared: &[String],
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
@@ -936,9 +941,9 @@ fn own_callees(
                 out.push_str(&d);
                 out.push('\n');
             }
-            for name in super::unit::undeclared_words(text) {
-                if let Some(g) = own(&name).filter(|&g| !stub(g)) {
-                    declare(&name, g, &mut out, &mut notes);
+            for name in undeclared {
+                if let Some(g) = own(name).filter(|&g| !stub(g)) {
+                    declare(name, g, &mut out, &mut notes);
                 }
             }
         }

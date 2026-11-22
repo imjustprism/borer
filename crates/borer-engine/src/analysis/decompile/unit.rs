@@ -33,6 +33,7 @@
 //! than describe it.
 
 use super::*;
+use crate::fxmap::FxHashSet;
 use crate::program::SymbolKind;
 use cir::{CTy, Item, Name, Proto};
 use helper::Helper;
@@ -1267,24 +1268,32 @@ fn declarations(text: &str) -> String {
 /// # Arguments
 ///
 /// * `text` - The finished decompilation.
+/// * `undeclared` - The words its code uses undeclared
+///   ([`undeclared_words`]).
 /// * `data` - The binary's data symbols as a text spells them, to their
 ///   addresses ([`Index::data`]).
 ///
 /// # Returns
 ///
 /// The text with the declarations after its own, or unchanged.
-pub(super) fn declare_globals(text: &str, data: &BTreeMap<String, u64>) -> String {
+pub(super) fn declare_globals(
+    text: &str,
+    undeclared: &[String],
+    data: &BTreeMap<String, u64>,
+) -> String {
     let comments = text.lines().take_while(|l| l.starts_with("//")).count();
     let at = declarations_end(text).unwrap_or(comments);
-    let own: Vec<&str> = text.lines().take(at).collect();
-    let lines: Vec<String> = undeclared_words(text)
-        .into_iter()
+    let own: FxHashSet<&str> = text
+        .lines()
+        .take(at)
+        .flat_map(|l| tokens(code_of(l)))
+        .collect();
+    let lines: Vec<String> = undeclared
+        .iter()
         .filter_map(|w| {
-            if !is_global_name(&w) {
-                let addr = data.get(&w)?;
-                return own
-                    .iter()
-                    .all(|l| word_positions(code_of(l), &w).is_empty())
+            if !is_global_name(w) {
+                let addr = data.get(w)?;
+                return (!own.contains(w.as_str()))
                     .then(|| format!("uint8_t {w}[]; // @ {addr:#x}"));
             }
             let (bits, addr) = w.strip_prefix('g')?.split_once('_')?;
@@ -1306,23 +1315,23 @@ pub(super) fn declare_globals(text: &str, data: &BTreeMap<String, u64>) -> Strin
 /// declarations names: a line declaring a global (`// @ 0x`) or starting
 /// `extern ` or `static `.
 ///
+/// The declared names are gathered once into a set, so the cost is one
+/// pass over the text however many words and declarations it holds.
+///
 /// # Arguments
 ///
 /// * `text` - The text.
 pub(super) fn undeclared_words(text: &str) -> Vec<String> {
-    let declarations: Vec<&str> = text
+    let declared: FxHashSet<&str> = text
         .lines()
         .filter(|l| {
             l.contains("// @ 0x") || ["extern ", "static "].iter().any(|p| l.starts_with(p))
         })
+        .flat_map(|l| tokens(code_of(l)))
         .collect();
     words(text)
         .into_iter()
-        .filter(|w| {
-            declarations
-                .iter()
-                .all(|l| word_positions(code_of(l), w).is_empty())
-        })
+        .filter(|w| !declared.contains(w.as_str()))
         .collect()
 }
 
@@ -1516,7 +1525,8 @@ fn code_of(line: &str) -> &str {
 mod tests {
     use super::{
         Index, Item, call_arities, code_of, declare_globals, implementation_named, library_items,
-        own_prototype, param, parse_proto, plain_type, platform_declarations, words,
+        own_prototype, param, parse_proto, plain_type, platform_declarations, undeclared_words,
+        words,
     };
 
     /// A parameter whose last character outside a name is wider than a byte
@@ -1544,15 +1554,37 @@ mod tests {
     fn a_named_global_is_declared() {
         let text = "// f @ 0x10\nuint64_t var1;\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n";
         assert_eq!(
-            declare_globals(text, &BTreeMap::new()),
+            declare_globals(text, &undeclared_words(text), &BTreeMap::new()),
             "// f @ 0x10\nuint64_t var1;\nuint64_t g64_3000; // @ 0x3000\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n"
         );
         let data = BTreeMap::from([("handlers".to_owned(), 0x6010), ("var1".to_owned(), 0x7000)]);
         let named = "// f @ 0x10\nuint64_t var1;\n\nvar1 = (uintptr_t)&handlers;\nreturn var1;\n";
         assert_eq!(
-            declare_globals(named, &data),
+            declare_globals(named, &undeclared_words(named), &data),
             "// f @ 0x10\nuint64_t var1;\nuint8_t handlers[]; // @ 0x6010\n\nvar1 = (uintptr_t)&handlers;\nreturn var1;\n"
         );
+    }
+    /// A text's undeclared words leave out each name a declaration line
+    /// states, and twenty thousand calls to as many declared functions
+    /// leave out every one of them, read in one pass.
+    ///
+    /// # Panics
+    ///
+    /// When a declared name is kept or an undeclared one lost.
+    #[test]
+    fn undeclared_words_leave_out_the_declared_names() {
+        let small = "// f @ 0x10\nextern uint32_t g(uint32_t a1);\nuint8_t buf[4]; // @ 0x4000\n\nreturn g(h(buf[0]));\n";
+        assert_eq!(undeclared_words(small), ["return", "h"]);
+        let mut big = String::from("// f @ 0x10\n");
+        for i in 0..20_000 {
+            big.push_str(&format!("extern void sub_{i:x}(void);\n"));
+        }
+        big.push('\n');
+        for i in 0..20_000 {
+            big.push_str(&format!("sub_{i:x}();\n"));
+        }
+        big.push_str("other();\n");
+        assert_eq!(undeclared_words(&big), ["other"]);
     }
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
