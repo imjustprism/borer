@@ -242,6 +242,39 @@ fn selects_on_unknown_flags_agree_with_the_emulator() {
     assert!(["a2", "a3", "a4"].iter().all(|a| ret.contains(a)), "{text}");
 }
 
+/// GCC's remainder by a power of two on a `w` register agrees with the
+/// emulator.
+///
+/// The form through the magnitude (`negs`, two masks, `csneg ..., mi`) is
+/// read as the signed `%` the `w` write zero-extends: on any word and on
+/// one that is always negative. `INT_MIN` is the fold tests' (its low bits
+/// fold away in any routine that makes it).
+#[test]
+fn a_signed_remainder_on_a_w_register_agrees_with_the_emulator() {
+    let tail = [
+        // ASM: negs w8, w0
+        0x6b00_03e8,
+        // ASM: and w9, w0, #0x7f
+        0x1200_1809,
+        // ASM: and w8, w8, #0x7f
+        0x1200_1908,
+        // ASM: csneg w0, w9, w8, mi
+        0x5a88_4520,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    for head in [
+        None,
+        // ASM: mvn w0, w0, lsr #1
+        Some(0x2a60_07e0),
+    ] {
+        let words: Vec<u32> = head.into_iter().chain(tail).collect();
+        agrees(&words, 1);
+        let text = text(&words);
+        assert!(text.contains("% 128"), "{head:?}: {text}");
+    }
+}
+
 /// The bitfield moves and their aliases extract, insert and extend at
 /// both widths, as do `extr` and `ror`.
 #[test]
