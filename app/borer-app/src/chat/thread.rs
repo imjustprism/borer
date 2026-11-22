@@ -497,13 +497,10 @@ impl Thread {
             .push((self.entries.len().saturating_sub(1), fault));
     }
 
-    /// Shows `chunk` of the model's reply: it joins the reply the newest entry streams, or
-    /// starts one after a tool call or a notice.
+    /// Shows `chunk` of the model's reply as it streams: it joins the reply the newest entry
+    /// shows, or starts one after a tool call or a notice.
     pub(super) fn stream_text(&mut self, chunk: &str, cx: &mut Context<'_, Self>) {
         if let Some(Entry::Model(shown)) = self.entries.last_mut() {
-            if !shown.is_empty() {
-                shown.push_str("\n\n");
-            }
             shown.push_str(chunk);
         } else {
             self.entries.push(Entry::Model(chunk.to_owned()));

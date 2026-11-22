@@ -163,9 +163,9 @@ fn tool_call(id: &str, tool: &str, args: &Value) -> String {
     json!({"type":"control_request","request_id":id,"request":{"subtype":"mcp_message","server_name":"borer","message":{"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":tool,"arguments":args}}}}).to_string()
 }
 
-/// Returns a reply of the model holding `text`.
+/// Returns a piece of the model's reply holding `text`, as it streams.
 fn says(text: &str) -> String {
-    json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":text}]},"parent_tool_use_id":null}).to_string()
+    json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":text}},"parent_tool_use_id":null}).to_string()
 }
 
 /// The line Claude Code ends a turn well with.
@@ -194,7 +194,8 @@ fn a_read_call_is_answered_and_the_reply_streams(cx: &mut TestAppContext) {
         INIT.to_owned(),
         tool_call("r1", "functions", &json!({})),
         ask.to_owned(),
-        says("It has functions."),
+        says("It has "),
+        says("functions."),
         DONE.to_owned(),
     ];
     let (thread, written, killed, cx) = with_child(|_| lines.to_vec(), Then::Ends, cx);

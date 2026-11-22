@@ -17,9 +17,11 @@
 //!
 //! Claude Code writes, of what the app reads ([`read`]); every other line is ignored:
 //!
-//! - `{"type":"assistant","message":{"content":[{"type":"text","text":".."},
-//!   {"type":"tool_use",..}]},..}`: a reply's blocks, of which the text ones are kept
-//!   ([`Event::Text`]);
+//! - `{"type":"stream_event","event":{"type":"content_block_delta","index":0,
+//!   "delta":{"type":"text_delta","text":".."}},..}`: a piece of the reply's text as it
+//!   streams (`--include-partial-messages`), kept ([`Event::Text`]); the other stream
+//!   events, thinking deltas among them, are read only as signs of life, and the whole
+//!   `{"type":"assistant",..}` messages that repeat the streamed text are ignored;
 //! - `{"type":"control_request","request_id":"<id>","request":{"subtype":"mcp_message",
 //!   "server_name":"borer","message":<JSON-RPC>}}`: a call of the MCP server [`SERVER`]
 //!   ([`Event::Mcp`]); `"subtype":"can_use_tool"` and any other subtype are refused
@@ -74,7 +76,7 @@ pub struct Model {
 /// What one line from Claude Code means to the app.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
-    /// Text of the model's reply, one block.
+    /// A piece of the model's reply text, as it streams.
     Text(String),
     /// A JSON-RPC message for the MCP server [`SERVER`], to answer under `request`.
     Mcp {
@@ -108,10 +110,10 @@ pub enum Event {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Line {
-    /// A reply of the model.
-    Assistant {
-        /// The reply.
-        message: Reply,
+    /// A piece of a reply as it streams.
+    StreamEvent {
+        /// The model's stream event.
+        event: Stream,
     },
     /// A request the app answers.
     ControlRequest {
@@ -142,24 +144,30 @@ enum Line {
     Other,
 }
 
-/// A reply of the model.
-#[derive(Deserialize)]
-struct Reply {
-    /// Its blocks.
-    #[serde(default)]
-    content: Vec<Block>,
-}
-
-/// One block of a reply.
+/// A model's stream event, of what the app reads.
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-enum Block {
+enum Stream {
+    /// A piece of a block.
+    ContentBlockDelta {
+        /// The piece.
+        delta: Delta,
+    },
+    /// Every other event: a message or block starting or stopping.
+    #[serde(other)]
+    Other,
+}
+
+/// A piece of a block.
+#[derive(Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum Delta {
     /// Text.
-    Text {
+    TextDelta {
         /// The text.
         text: String,
     },
-    /// Every other block: tool calls, thinking.
+    /// Every other piece: thinking, a tool call's arguments, a signature.
     #[serde(other)]
     Other,
 }
@@ -224,21 +232,13 @@ pub fn read(line: &str) -> Result<Event, String> {
     let parsed: Line = serde_json::from_str(line)
         .map_err(|e| format!("Claude Code wrote a line that does not read: {e}"))?;
     Ok(match parsed {
-        Line::Assistant { message } => {
-            let text: String = message
-                .content
-                .into_iter()
-                .filter_map(|b| match b {
-                    Block::Text { text } => Some(text),
-                    Block::Other => None,
-                })
-                .collect();
-            if text.is_empty() {
-                Event::Other
-            } else {
-                Event::Text(text)
-            }
-        }
+        Line::StreamEvent {
+            event:
+                Stream::ContentBlockDelta {
+                    delta: Delta::TextDelta { text },
+                },
+        } => Event::Text(text),
+        Line::StreamEvent { .. } => Event::Other,
         Line::ControlRequest {
             request_id,
             request:
@@ -281,7 +281,7 @@ pub fn read(line: &str) -> Result<Event, String> {
 /// Returns the flags `claude` is started with for the chat.
 ///
 /// They make it read and write stream-JSON (`-p --input-format stream-json --output-format
-/// stream-json --verbose`); load none of the person's customizations, slash commands or
+/// stream-json --verbose`), streaming the reply as it is written (`--include-partial-messages`); load none of the person's customizations, slash commands or
 /// saved sessions (`--safe-mode --disable-slash-commands --no-session-persistence`), since
 /// text from the binary reaches the model and no hook, skill, plugin or CLAUDE.md the person
 /// set up for other work may run on it or shape it; read no project or local settings file,
@@ -317,6 +317,7 @@ pub fn args(model: Option<&str>, system: &str) -> Vec<String> {
         "--output-format",
         "stream-json",
         "--verbose",
+        "--include-partial-messages",
         "--safe-mode",
         "--disable-slash-commands",
         "--no-session-persistence",
@@ -489,7 +490,13 @@ mod tests {
         let init = r#"{"type":"system","subtype":"init","session_id":"s","tools":["mcp__borer__decompile"],"mcp_servers":[{"name":"borer","status":"connected"}]}"#;
         assert_eq!(read(init), Ok(Event::Other));
         let text = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"ok"},{"type":"tool_use","id":"t","name":"mcp__borer__query","input":{}}]},"parent_tool_use_id":null,"session_id":"s"}"#;
-        assert_eq!(read(text), Ok(Event::Text("ok".to_owned())));
+        assert_eq!(read(text), Ok(Event::Other));
+        let delta = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"o"}},"parent_tool_use_id":null,"session_id":"s"}"#;
+        assert_eq!(read(delta), Ok(Event::Text("o".to_owned())));
+        let thinking = r#"{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hm"}}}"#;
+        assert_eq!(read(thinking), Ok(Event::Other));
+        let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#;
+        assert_eq!(read(start), Ok(Event::Other));
         let call = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"mcp_message","server_name":"borer","message":{"method":"tools/call","params":{"name":"query","arguments":{"uri":"borer://triage"}},"jsonrpc":"2.0","id":3}}}"#;
         let Ok(Event::Mcp { request, message }) = read(call) else {
             panic!("not an MCP message");
@@ -545,7 +552,7 @@ mod tests {
             Ok(Event::Done(Err("error_during_execution".to_owned())))
         );
         assert_eq!(
-            read(r#"{"type":"stream_event","event":{}}"#),
+            read(r#"{"type":"stream_event","event":{"type":"ping"}}"#),
             Ok(Event::Other)
         );
     }
@@ -555,7 +562,7 @@ mod tests {
     #[test]
     fn hostile_lines_are_errors() {
         assert!(read("not json").is_err());
-        assert!(read(r#"{"type":"assistant","message":7}"#).is_err());
+        assert!(read(r#"{"type":"stream_event","event":7}"#).is_err());
         assert!(read(r#"{"no":"type"}"#).is_err());
         let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
         assert!(read(&deep).is_err());
@@ -606,6 +613,7 @@ mod tests {
         assert_eq!(after("--tools"), "");
         assert_eq!(after("--permission-prompts"), "none");
         assert_eq!(after("--setting-sources"), "user");
+        assert!(flags.iter().any(|f| f == "--include-partial-messages"));
         assert_eq!(after("--model"), "sonnet");
         assert_eq!(after("--system-prompt"), "be brief");
         assert!(
