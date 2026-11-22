@@ -1292,7 +1292,10 @@ pub(super) fn declare_globals(text: &str, undeclared: &[String], ix: &Index) -> 
         .iter()
         .filter_map(|w| {
             if !is_global_name(w) {
-                let addr = ix.data.get(w).filter(|_| declarable(w, ix))?;
+                let addr = ix
+                    .data
+                    .get(w)
+                    .filter(|_| declarable(w, ix) && address_only(text, w))?;
                 return Some(format!("uint8_t {w}[]; // @ {addr:#x}"));
             }
             let (bits, addr) = w.strip_prefix('g')?.split_once('_')?;
@@ -1342,6 +1345,32 @@ pub(super) fn undeclared_words(text: &str) -> Vec<String> {
         .into_iter()
         .filter(|w| !declared.contains(w.as_str()))
         .collect()
+}
+
+/// Tells whether a text's code names `name` only by its address: each use
+/// is `&name`, no element, member or call after it.
+///
+/// A declaration of bytes at the address keeps such a use's meaning; one
+/// read of the name itself (`x = counter`, `handlers[i]`) would read a
+/// byte the engine never said was one.
+///
+/// # Arguments
+///
+/// * `text` - The text.
+/// * `name` - The name.
+fn address_only(text: &str, name: &str) -> bool {
+    text.lines()
+        .filter(|l| !l.trim_start().starts_with("//"))
+        .all(|l| {
+            let code = code_of(l);
+            word_positions(code, name).into_iter().all(|at| {
+                let before = code[..at].trim_end();
+                let after = code[at + name.len()..].trim_start();
+                before.ends_with('&')
+                    && !before.ends_with("&&")
+                    && !["[", ".", "->", "("].iter().any(|p| after.starts_with(p))
+            })
+        })
 }
 
 /// Tells whether an exported file may declare a name of the binary's.
@@ -1601,8 +1630,9 @@ mod tests {
     /// A global the code names undeclared is declared after the text's own
     /// declarations; one only a literal spells is not, nor one declared.
     ///
-    /// A data symbol named by its address is declared as bytes at it,
-    /// unless a local of the text has its name.
+    /// A data symbol named by its address alone is declared as bytes at
+    /// it, unless a local of the text has its name; one the code reads,
+    /// indexes or reaches a member of stays undeclared.
     ///
     /// # Panics
     ///
@@ -1623,7 +1653,21 @@ mod tests {
             declare_globals(named, &undeclared_words(named), &ix),
             "// f @ 0x10\nuint64_t var1;\nuint8_t handlers[]; // @ 0x6010\n\nvar1 = (uintptr_t)&handlers;\nreturn var1;\n"
         );
+        for read in [
+            "var1 = handlers;",
+            "var1 = (uintptr_t)&handlers + handlers[2];",
+            "var1 = &handlers[2];",
+            "var1 = &handlers->next;",
+        ] {
+            let text = format!("// f @ 0x10\nuint64_t var1;\n\n{read}\nreturn var1;\n");
+            assert_eq!(
+                declare_globals(&text, &undeclared_words(&text), &ix),
+                text,
+                "{read}"
+            );
+        }
     }
+
     /// A parameter, a local, a keyword or a name C's headers define is
     /// never declared for the binary.
     ///
