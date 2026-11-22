@@ -895,11 +895,13 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
 pub(super) struct Caller<'t> {
     /// Each name's call argument counts in the code, declarations left out.
     arities: BTreeMap<&'t str, Vec<usize>>,
-    /// The names whose call's value the code reads: a call that does not
-    /// start its statement.
+    /// The names whose call's value the code surely uses: a call that
+    /// starts an assignment's right side or a returned value. A call in any
+    /// other place (an operand, a cast to `void`, a comma expression) is
+    /// not counted, as the check cannot tell.
     read: BTreeSet<&'t str>,
-    /// The names whose call the code returns as its own result
-    /// (`return f(...)`).
+    /// The names whose call is the whole of a returned value
+    /// (`return f(...);`).
     returned: BTreeSet<&'t str>,
     /// The caller's own result type, from its `// signature:`.
     ret: Option<CTy>,
@@ -937,13 +939,17 @@ impl<'t> Caller<'t> {
             }
             let code = code_of(line);
             let start = code.len() - code.trim_start().len();
-            let returns = code[start..].starts_with("return ");
             each_call(code, |at, w, n| {
                 out.arities.entry(w).or_default().push(n);
-                if at != start {
+                let before = code[start..at].trim_end();
+                let assigned = before.ends_with('=')
+                    && !["==", "!=", "<=", ">="].iter().any(|o| before.ends_with(o));
+                if assigned || before == "return" {
                     out.read.insert(w);
                 }
-                if returns && at == start + "return ".len() {
+                let whole = matching_paren(code, at + w.len())
+                    .is_some_and(|close| code[close + 1..].trim() == ";");
+                if before == "return" && whole {
                     out.returned.insert(w);
                 }
             });
@@ -2070,5 +2076,40 @@ mod tests {
             ["extern char *dcgettext(const char *domainname, const char *msgid, int category);"]
         );
         assert!(platform_declarations(text, BinaryFormat::Pe).is_empty());
+    }
+
+    /// A warning claims only what the text shows.
+    ///
+    /// A call returned with more after it is no result returned as
+    /// another type, and a call
+    /// whose value is cast away, dropped by a comma or used as an operand
+    /// is not counted as a read.
+    ///
+    /// # Panics
+    ///
+    /// When a warning is given.
+    #[test]
+    fn a_warning_claims_only_what_the_text_shows() {
+        let decl = |text: &str, sig: &str| {
+            own_prototype(&Caller::of(text), "sub_1", sig, BinaryFormat::Elf).map(|d| d.1)
+        };
+        assert_eq!(
+            decl(
+                "// signature: uint64_t f(uint64_t a1)\nreturn sub_1(a1, 0) + 1;\n",
+                "uint32_t sub_1(uint64_t a1, char *a2)"
+            ),
+            Some(Vec::new())
+        );
+        for discarded in [
+            "(void)sub_1(a1, 0);\n",
+            "x = (sub_1(a1, 0), 1);\n",
+            "y = z + sub_1(a1, 0);\n",
+        ] {
+            assert_eq!(
+                decl(discarded, "void sub_1(uint32_t a1, char *a2)"),
+                Some(Vec::new()),
+                "{discarded}"
+            );
+        }
     }
 }
