@@ -1182,13 +1182,13 @@ impl Expr {
                 }
                 render_load(a, *ty, ty.name(), n)
             }
-            Expr::Cond(c) => match plain_truth(c) {
-                Some(e) => e.render_prec(n, hex, false),
-                None => {
+            Expr::Cond(c) => match &c.flags {
+                Flags::Truth(e, tcc) if c.cc == *tcc => truth_value(e, n, hex),
+                flags => {
                     let text = c.render(n, false);
                     let prec = if super::structure::logical_operands(&text).is_some() {
                         LOGICAL
-                    } else if matches!(&c.flags, Flags::Truth(e, tcc)
+                    } else if matches!(flags, Flags::Truth(e, tcc)
                         if c.cc == tcc.invert() && equality(e).is_none())
                     {
                         UNARY
@@ -1599,19 +1599,24 @@ fn is_truth_chain(e: &Expr) -> bool {
     }
 }
 
-/// Returns the value a truth test reads as itself.
-///
-/// That is the value of a [`Flags::Truth`] tested under its own code,
-/// unless it joins truth values, which read as the `||` and `&&` they mean
-/// ([`render_truth_chain`]).
+/// Renders the value a truth test under its own code reads as: a chain of
+/// truth values as the `||` and `&&` it means ([`render_truth_chain`]),
+/// any other value as itself.
 ///
 /// # Arguments
 ///
-/// * `c` - The test.
-fn plain_truth(c: &Cond) -> Option<&Expr> {
-    match &c.flags {
-        Flags::Truth(e, tcc) if c.cc == *tcc && !is_truth_chain(e) => Some(e),
-        _ => None,
+/// * `e` - The tested value.
+/// * `n` - Name resolution.
+/// * `hex` - Whether constants render in hex.
+///
+/// # Returns
+///
+/// The text and its precedence.
+fn truth_value(e: &Expr, n: &Names<'_>, hex: bool) -> (String, u8) {
+    if is_truth_chain(e) {
+        (render_truth_chain(e, n, false), LOGICAL)
+    } else {
+        e.render_prec(n, hex, false)
     }
 }
 
