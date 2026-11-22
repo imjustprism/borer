@@ -42,6 +42,9 @@ pub(crate) mod templates;
 pub(crate) const SIG_MAX: usize = 512;
 /// Shortest text considered.
 const SIG_MIN: usize = 8;
+/// Shortest identifier string read ([`identifier`]), a `__func__` short
+/// as `Run`.
+const WORD_MIN: usize = 3;
 /// Longest inferred name kept.
 const NAME_MAX: usize = 120;
 /// Calling-convention keywords MSVC's `__FUNCSIG__` places before the name.
@@ -102,9 +105,10 @@ enum Read {
     Full(Signature),
     /// A trace: a qualified name and `()` ([`trace_name`]).
     Trace(String),
-    /// A bare qualified name, a `__FUNCTION__` spelling ([`qualified_word`]),
-    /// with its text.
-    Bare(String),
+    /// A function's name without parentheses, with its text: a bare
+    /// qualified name, a `__FUNCTION__` spelling ([`qualified_word`]), or one
+    /// identifier, a `__func__` spelling ([`identifier`]).
+    Word(String),
     /// None of these.
     Nothing,
 }
@@ -114,9 +118,9 @@ enum Read {
 struct Traces {
     /// Each trace name ([`trace_name`]) with the functions referencing it.
     calls: BTreeMap<String, BTreeSet<u64>>,
-    /// Each function's bare qualified-name strings, by address.
-    bare: BTreeMap<u64, BTreeSet<u64>>,
-    /// The text of each bare qualified-name string, by address.
+    /// Each function's word strings ([`Read::Word`]), by address.
+    words: BTreeMap<u64, BTreeSet<u64>>,
+    /// The text of each word string, by address.
     texts: BTreeMap<u64, String>,
 }
 
@@ -169,16 +173,19 @@ pub(crate) fn infer(program: &Program, analysis: &mut Analysis) {
 /// condition. So the function must reference no accepted full signature
 /// (one always wins), no other function may reference the trace (a
 /// condition is shared by every site that checks it, a trace sits in its
-/// one method), and the function must reference no second trace and no bare
-/// qualified name (a `__FUNCTION__` spelling, `ns::Cls::Run`) that differs from it:
-/// that one is the function's own name and the trace a call it checks. A
-/// bare name that agrees supports it. The name is a weaker claim
+/// one method), and the function must reference no second trace and no
+/// name word that differs from it: a bare qualified name (a `__FUNCTION__`
+/// spelling, `ns::Cls::Run`) other than the trace's, or one identifier (a
+/// `__func__` spelling, `Run`) other than its last segment. That word is
+/// the function's own name and the trace a call it checks, as Apple's
+/// `__assert_rtn(__func__, file, line, "ns::f()")` passes them. A word that
+/// agrees supports it. The name is a weaker claim
 /// ([`NameSource::Trace`]) and gives no types.
 ///
 /// # Arguments
 ///
 /// * `found` - The full signatures and the functions referencing them.
-/// * `traces` - The trace and bare qualified-name strings.
+/// * `traces` - The trace and word strings.
 /// * `named` - The functions already holding a name.
 ///
 /// # Returns
@@ -201,10 +208,18 @@ fn choose_traces<'t>(
                 return None;
             };
             let alone = traces.calls.get(*name).is_some_and(|r| r.len() == 1);
-            let disputed = traces.bare.get(&entry).is_some_and(|b| {
-                b.iter()
-                    .any(|at| traces.texts.get(at).is_some_and(|t| t != *name))
-            });
+            let last = name.rsplit("::").next().unwrap_or(name);
+            let differs = |t: &String| {
+                if t.contains("::") {
+                    t != *name
+                } else {
+                    t != last
+                }
+            };
+            let disputed = traces
+                .words
+                .get(&entry)
+                .is_some_and(|w| w.iter().any(|at| traces.texts.get(at).is_some_and(differs)));
             (alone
                 && !disputed
                 && !named.contains(&entry)
@@ -240,13 +255,14 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> (Found, Traces) {
         .filter(|&t| in_data(program, t))
         .collect();
     let parsed = super::striped(&targets, |&target| {
-        cstr_at(program, target, SIG_MIN, SIG_MAX).map_or(Read::Nothing, |(_, text)| {
-            if let Some(sig) = parse_signature(&text) {
+        cstr_at(program, target, WORD_MIN, SIG_MAX).map_or(Read::Nothing, |(_, text)| {
+            let long = text.len() >= SIG_MIN;
+            if let Some(sig) = parse_signature(&text).filter(|_| long) {
                 Read::Full(sig)
-            } else if let Some(name) = trace_name(&text) {
+            } else if let Some(name) = trace_name(&text).filter(|_| long) {
                 Read::Trace(name)
-            } else if qualified_word(&text) {
-                Read::Bare(text)
+            } else if qualified_word(&text) || identifier(&text) {
+                Read::Word(text)
             } else {
                 Read::Nothing
             }
@@ -265,9 +281,9 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> (Found, Traces) {
                 refs.extend(data_referrers(sites));
                 continue;
             }
-            Read::Bare(text) => {
+            Read::Word(text) => {
                 for from in data_referrers(sites) {
-                    traces.bare.entry(from).or_default().insert(*target);
+                    traces.words.entry(from).or_default().insert(*target);
                 }
                 traces.texts.insert(*target, text);
                 continue;
@@ -334,6 +350,18 @@ fn qualified_word(name: &str) -> bool {
         && class_of(name).is_some()
         && name.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
         && name.chars().all(|c| ident_char(c) || ":<>,*& ".contains(c))
+}
+
+/// Tells whether a text is one C identifier (`GetDefaultSourceArray`), as
+/// `__func__` spells a function's name.
+///
+/// # Arguments
+///
+/// * `text` - The text.
+fn identifier(text: &str) -> bool {
+    text.len() <= NAME_MAX
+        && text.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_')
+        && text.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 /// Names each function by the one candidate only it still references.

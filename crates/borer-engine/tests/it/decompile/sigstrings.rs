@@ -250,12 +250,30 @@ fn the_shared_pretty_function_names_the_asserting_function() {
 /// The unsure wording a name from a trace string carries.
 const UNSURE: &str = "// name: unsure: a trace string only this function references";
 
-/// A call-shaped string only one function references, and no full
-/// signature, names it with the unsure wording, no types, no `this` and no
-/// `__FUNCSIG__`, on x64 and arm64.
+/// Apple's assert passes the function's unqualified name beside the
+/// condition, and the condition names nothing.
+///
+/// `__assert_rtn(__func__, file, line, "thread_util::IsMainThread()")`: the
+/// name differs from the trace's last segment, on x64 and arm64.
 #[test]
-fn condition_text_one_function_alone_references_names_it_unsure() {
-    for (p, entry) in [(x64("audio"), 0x1000), (arm64("audio"), 0x1_0000)] {
+fn an_apple_assert_condition_names_nothing() {
+    let func = "GetDefaultSourceArray";
+    for (p, entry) in [(x64(func), 0x1000), (arm64(func), 0x1_0000)] {
+        let a = Analysis::compute(&p);
+        assert_eq!(a.function(entry).and_then(|f| f.name.clone()), None);
+        let text = decompile(&p, &a, &Overlay::default(), entry).expect("decompiles");
+        assert!(text.contains(&format!("\"{COND1}\"")), "{text}");
+        assert!(!text.contains("__FUNCSIG__"), "{text}");
+    }
+}
+
+/// A call-shaped string only one function references, with no full
+/// signature and no name word beside it, names it with the unsure wording,
+/// no types, no `this` and no `__FUNCSIG__`, on x64 and arm64.
+#[test]
+fn a_lone_trace_names_its_function_unsure() {
+    let last = "(no name)";
+    for (p, entry) in [(x64(last), 0x1000), (arm64(last), 0x1_0000)] {
         let a = Analysis::compute(&p);
         let f = a.function(entry).expect("a function");
         assert_eq!(f.name.as_deref(), Some("thread_util::IsMainThread"));
@@ -270,9 +288,11 @@ fn condition_text_one_function_alone_references_names_it_unsure() {
     }
 }
 
-/// The trace-like string at offset 0x240 of the data page, a second
-/// candidate beside [`COND1`]; bare names follow it, `audio::Store` at
-/// 0x280 and `audio::Load` at 0x2c0.
+/// The trace-like string at offset 0x240 of the data page.
+///
+/// A second candidate beside [`COND1`]; name words follow it,
+/// `audio::Store` at 0x280, `audio::Load` at 0x2c0, `Load` at 0x300 and
+/// `Store` at 0x320.
 const OTHER: &str = "audio::Load()";
 
 /// Returns an x64 image whose `main` at 0x1000 calls one function per
@@ -306,6 +326,8 @@ fn reporters(funcs: &[&[u64]]) -> Program {
         (0x240, OTHER),
         (0x280, "audio::Store"),
         (0x2c0, "audio::Load"),
+        (0x300, "Load"),
+        (0x320, "Store"),
     ] {
         page[off..off + text.len()].copy_from_slice(text.as_bytes());
     }
@@ -355,11 +377,13 @@ fn a_trace_names_only_the_one_function_with_no_better_evidence() {
     assert_eq!(names(&[&[0x240]]), [Some("audio::Load".to_owned())]);
 }
 
-/// A bare `__FUNCTION__`-style name that differs from the trace blocks it,
-/// and one that agrees keeps it.
+/// A bare `__FUNCTION__`-style name or a `__func__`-style identifier that
+/// differs from the trace blocks it, and one that agrees keeps it.
 #[test]
 fn a_bare_function_name_decides_a_trace() {
     assert_eq!(names(&[&[0x240, 0x280]]), [None]);
     assert_eq!(names(&[&[0x240, 0x2c0]]), [Some("audio::Load".to_owned())]);
     assert_eq!(names(&[&[0x280]]), [None]);
+    assert_eq!(names(&[&[0x240, 0x320]]), [None]);
+    assert_eq!(names(&[&[0x240, 0x300]]), [Some("audio::Load".to_owned())]);
 }
