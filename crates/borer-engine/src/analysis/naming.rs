@@ -95,13 +95,29 @@ struct Found {
     referrers: Vec<BTreeSet<u64>>,
 }
 
+/// What a string the code references reads as.
+enum Read {
+    /// A full signature: a return type or a constructor, destructor or
+    /// conversion ([`parse_signature`]).
+    Full(Signature),
+    /// A trace: a qualified name and `()` ([`trace_name`]).
+    Trace(String),
+    /// A bare qualified name, a `__FUNCTION__` spelling ([`qualified_word`]),
+    /// with its text.
+    Bare(String),
+    /// None of these.
+    Nothing,
+}
+
 /// The strings that name a function without declaring it.
 #[derive(Default)]
 struct Traces {
     /// Each trace name ([`trace_name`]) with the functions referencing it.
     calls: BTreeMap<String, BTreeSet<u64>>,
-    /// Each function's bare qualified-name strings ([`qualified_word`]).
-    bare: BTreeMap<u64, BTreeSet<String>>,
+    /// Each function's bare qualified-name strings, by address.
+    bare: BTreeMap<u64, BTreeSet<u64>>,
+    /// The text of each bare qualified-name string, by address.
+    texts: BTreeMap<u64, String>,
 }
 
 /// Fills the name and signature of every unnamed function that references a
@@ -185,10 +201,10 @@ fn choose_traces<'t>(
                 return None;
             };
             let alone = traces.calls.get(*name).is_some_and(|r| r.len() == 1);
-            let disputed = traces
-                .bare
-                .get(&entry)
-                .is_some_and(|b| b.iter().any(|n| n != *name));
+            let disputed = traces.bare.get(&entry).is_some_and(|b| {
+                b.iter()
+                    .any(|at| traces.texts.get(at).is_some_and(|t| t != *name))
+            });
             (alone
                 && !disputed
                 && !named.contains(&entry)
@@ -224,41 +240,39 @@ fn signatures(program: &Program, analysis: &mut Analysis) -> (Found, Traces) {
         .filter(|&t| in_data(program, t))
         .collect();
     let parsed = super::striped(&targets, |&target| {
-        cstr_at(program, target, SIG_MIN, SIG_MAX).map(|(_, text)| {
-            parse_signature(&text).map_or_else(
-                || {
-                    Err((
-                        trace_name(&text),
-                        qualified_word(&text).then(|| text.clone()),
-                    ))
-                },
-                Ok,
-            )
+        cstr_at(program, target, SIG_MIN, SIG_MAX).map_or(Read::Nothing, |(_, text)| {
+            if let Some(sig) = parse_signature(&text) {
+                Read::Full(sig)
+            } else if let Some(name) = trace_name(&text) {
+                Read::Trace(name)
+            } else if qualified_word(&text) {
+                Read::Bare(text)
+            } else {
+                Read::Nothing
+            }
         })
     });
     let mut setters: BTreeMap<String, Vec<(u64, String)>> = BTreeMap::new();
     let mut traces = Traces::default();
     for (target, read) in targets.iter().zip(parsed) {
-        let (Some(read), Some(sites)) = (read, analysis.xrefs.get(target)) else {
+        let Some(sites) = analysis.xrefs.get(target) else {
             continue;
         };
         let sig = match read {
-            Ok(sig) => sig,
-            Err((trace, word)) => {
-                if let Some(word) = word {
-                    for from in data_referrers(sites) {
-                        traces.bare.entry(from).or_default().insert(word.clone());
-                    }
-                }
-                if let Some(name) = trace {
-                    traces
-                        .calls
-                        .entry(name)
-                        .or_default()
-                        .extend(data_referrers(sites));
-                }
+            Read::Full(sig) => sig,
+            Read::Trace(name) => {
+                let refs = traces.calls.entry(name).or_default();
+                refs.extend(data_referrers(sites));
                 continue;
             }
+            Read::Bare(text) => {
+                for from in data_referrers(sites) {
+                    traces.bare.entry(from).or_default().insert(*target);
+                }
+                traces.texts.insert(*target, text);
+                continue;
+            }
+            Read::Nothing => continue,
         };
         if let Some(class) = class_of(&sig.name)
             && let Some(member) = setter_member(&sig.name)
