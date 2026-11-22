@@ -878,7 +878,8 @@ fn declares(head: &str, name: &str, params: &str, bound: impl Fn(&str) -> bool) 
 /// constructor's, a destructor's and a conversion operator's, so
 /// `thread_util::IsMainThread()` is a call; and a return type spells no
 /// operator, so `ok && ns::Ready()` and `n == ns::Count()` are
-/// comparisons. A reference or pointer return keeps its `&` or `*` beside
+/// comparisons, and holds its `<` and `>` in pairs, so `n > ns::Min()` and
+/// `x << ns::f()` are too (old GCC's spaced `pair<int> >` stays a type). A reference or pointer return keeps its `&` or `*` beside
 /// the type or the name (`Foo &ns::Get()`, `Foo&& ns::Take()`), never with a
 /// space on both sides; and the type before it is no lone lowercase word
 /// that is neither a builtin type nor a `_t` name, so `x& ns::Mask()`,
@@ -910,8 +911,12 @@ fn expression(ret: &str, name: &str) -> bool {
         && !TYPE_WORDS.contains(&core)
         && !SPECIFIERS.contains(&core)
         && !core.ends_with("_t");
-    lone || ret.contains(['=', '!', '|', '?', '+', '"'])
-        || [" && ", " & ", " * "].iter().any(|op| ret.contains(op))
+    let unbalanced = ret.matches('<').count() != ret.matches('>').count();
+    lone || unbalanced
+        || ret.contains(['=', '!', '|', '?', '+', '"'])
+        || [" && ", " & ", " * ", " - ", " / ", " % ", " ^ "]
+            .iter()
+            .any(|op| ret.contains(op))
 }
 
 /// Splits a signature at its parameter list.
@@ -1363,6 +1368,9 @@ mod tests {
         );
         let s = parse_signature("Foo&& ns::Take(Foo&&)").expect("gcc rvalue return");
         assert_eq!(s.ret, "Foo&&");
+        let s = parse_signature("std::pair<int, std::vector<int> > ns::Get()")
+            .expect("old gcc spacing");
+        assert_eq!(s.name, "ns::Get");
         for typed in [
             "foo_t *ns::Get()",
             "const node *ns::Head()",
@@ -1387,6 +1395,13 @@ mod tests {
             "x& ns::Mask()",
             "x &ns::Mask()",
             "x *ns::Scale()",
+            "n > ns::Min()",
+            "n - ns::f()",
+            "n / ns::f()",
+            "n % ns::f()",
+            "n ^ ns::f()",
+            "x << ns::f()",
+            "x >> ns::f()",
         ] {
             assert!(parse_signature(text).is_none(), "{text}");
         }
