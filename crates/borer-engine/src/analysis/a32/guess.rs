@@ -160,9 +160,7 @@ fn try_seed(program: &Program, walks: &mut Walks<'_>, va: u64, min: usize, exits
             walks.drain(program, queue);
             return true;
         }
-        walks.fuel = walks
-            .fuel
-            .saturating_sub(crate::num::from_usize(w.seen.len()));
+        walks.fuel = walks.fuel.saturating_sub(crate::num::from_usize(w.spent));
         if w.bad
             || entered.is_empty()
             || !entered.iter().all(|x| opens_after_end(program, walks, *x))

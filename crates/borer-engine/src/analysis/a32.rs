@@ -34,6 +34,8 @@ use std::collections::{BTreeMap, BTreeSet};
 mod guess;
 mod outline;
 mod returns;
+#[cfg(test)]
+mod tests;
 
 use super::functions::helpers::{exits_on_status_name, is_noreturn_name};
 use super::functions::{build_callers_and_names, fuel_for, mix, push_site};
@@ -574,6 +576,9 @@ struct Walked {
     into: BTreeSet<u64>,
     /// The known starts its jumps reach: tail calls.
     tails: BTreeSet<u64>,
+    /// The instructions decoded for it, over every time it was made
+    /// ([`walk`]): what it costs the fuel.
+    spent: usize,
     /// The functions it calls that its bytes show never return: a call
     /// of theirs that the finished walk holds runs into the walk's own
     /// literals ([`into_pool`]).
@@ -611,6 +616,7 @@ fn walk(
 ) -> Walked {
     let mut stops = BTreeSet::new();
     let mut w = walk_until(program, entry, starts, noreturn, guess, &stops);
+    let mut spent = w.seen.len();
     for _ in 0..POOL_ROUNDS {
         let into = into_pool(&w);
         if into.is_empty() {
@@ -618,7 +624,9 @@ fn walk(
         }
         stops.extend(into);
         w = walk_until(program, entry, starts, noreturn, guess, &stops);
+        spent = spent.saturating_add(w.seen.len());
     }
+    w.spent = spent;
     let ends: BTreeSet<u64> = w
         .seen
         .values()
@@ -1560,9 +1568,7 @@ impl Walks<'_> {
     /// * `w` - The walk.
     /// * `queue` - Takes the callees not yet walked.
     fn keep(&mut self, e: u64, w: Walked, queue: &mut Vec<u64>) {
-        self.fuel = self
-            .fuel
-            .saturating_sub(crate::num::from_usize(w.seen.len()));
+        self.fuel = self.fuel.saturating_sub(crate::num::from_usize(w.spent));
         for &c in &w.callees {
             if self.starts.insert(c) || !self.walked.contains_key(&c) {
                 queue.push(c);
