@@ -784,7 +784,7 @@ fn export_with(
             .map(|text| {
                 let undeclared = super::unit::undeclared_words(&text);
                 own_callees(
-                    &super::unit::declare_globals(&text, &undeclared, &index.data),
+                    &super::unit::declare_globals(&text, &undeclared, &index),
                     &undeclared,
                     program,
                     analysis,
@@ -872,7 +872,8 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// machine word; a callee that reads 32 bits of a parameter, or returns a
 /// pointer, says so in its own text, and the file defines it under that
 /// signature. A callee the text names without a declaration (a tail call,
-/// a function passed by address) is declared the same way. Where the text
+/// a function passed by address) is declared the same way, unless
+/// [`super::unit::declarable`] refuses its name. Where the text
 /// contradicts the callee's signature ([`super::unit::own_prototype`]),
 /// the signature is still the declaration, and a `// warn:` line at the
 /// top of the body says how the text disagrees. A callee with no
@@ -941,7 +942,11 @@ fn own_callees(
                 out.push_str(&d);
                 out.push('\n');
             }
-            for name in undeclared {
+            let ix = super::unit::index(program, analysis, overlay);
+            for name in undeclared
+                .iter()
+                .filter(|n| super::unit::declarable(n, &ix))
+            {
                 if let Some(g) = own(name).filter(|&g| !stub(g)) {
                     declare(name, g, &mut out, &mut notes);
                 }

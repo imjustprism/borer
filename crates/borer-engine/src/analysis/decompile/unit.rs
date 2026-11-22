@@ -112,8 +112,11 @@ pub(super) struct Index {
     pub(super) shared: BTreeSet<String>,
     /// The addresses the binary exports a symbol at.
     exported: BTreeSet<u64>,
-    /// Each data symbol's name as the text spells it, to its address.
+    /// Each data symbol's name as the text spells it, to its address; the
+    /// first address of several that share a name.
     pub(super) data: BTreeMap<String, u64>,
+    /// The names data symbols at more than one address are spelled as.
+    pub(super) shared_data: BTreeSet<String>,
     /// The imports' names, as the text spells them.
     imports: BTreeSet<String>,
 }
@@ -163,9 +166,16 @@ pub(super) fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -
                                 ix.exported.insert(s.addr);
                             }
                             if s.addr != 0 && analysis.function(s.addr).is_none() {
-                                ix.data
-                                    .entry(expr_render::data_name(&s.name))
-                                    .or_insert(s.addr);
+                                let name = expr_render::data_name(&s.name);
+                                match ix.data.get(&name) {
+                                    Some(&at) if at != s.addr => {
+                                        ix.shared_data.insert(name);
+                                    }
+                                    Some(_) => {}
+                                    None => {
+                                        ix.data.insert(name, s.addr);
+                                    }
+                                }
                             }
                         }
                         SymbolKind::Forwarder => {}
@@ -1263,38 +1273,27 @@ fn declarations(text: &str) -> String {
 /// ([`words`]). A data symbol the text names the same way, by its address
 /// alone (`&handlers`), is declared `uint8_t handlers[]; // @ 0x6010`: the
 /// engine knows no type for it, only that it is data at that address. A
-/// name the text's own declarations or signature use is theirs.
+/// name [`declarable`] refuses stays undeclared.
 ///
 /// # Arguments
 ///
 /// * `text` - The finished decompilation.
 /// * `undeclared` - The words its code uses undeclared
 ///   ([`undeclared_words`]).
-/// * `data` - The binary's data symbols as a text spells them, to their
-///   addresses ([`Index::data`]).
+/// * `ix` - The binary's names ([`index`]), its data symbols among them.
 ///
 /// # Returns
 ///
 /// The text with the declarations after its own, or unchanged.
-pub(super) fn declare_globals(
-    text: &str,
-    undeclared: &[String],
-    data: &BTreeMap<String, u64>,
-) -> String {
+pub(super) fn declare_globals(text: &str, undeclared: &[String], ix: &Index) -> String {
     let comments = text.lines().take_while(|l| l.starts_with("//")).count();
     let at = declarations_end(text).unwrap_or(comments);
-    let own: FxHashSet<&str> = text
-        .lines()
-        .take(at)
-        .flat_map(|l| tokens(code_of(l)))
-        .collect();
     let lines: Vec<String> = undeclared
         .iter()
         .filter_map(|w| {
             if !is_global_name(w) {
-                let addr = data.get(w)?;
-                return (!own.contains(w.as_str()))
-                    .then(|| format!("uint8_t {w}[]; // @ {addr:#x}"));
+                let addr = ix.data.get(w).filter(|_| declarable(w, ix))?;
+                return Some(format!("uint8_t {w}[]; // @ {addr:#x}"));
             }
             let (bits, addr) = w.strip_prefix('g')?.split_once('_')?;
             matches!(bits, "8" | "16" | "32" | "64")
@@ -1312,8 +1311,11 @@ pub(super) fn declare_globals(
 }
 
 /// Returns the identifiers a text's code uses ([`words`]) that none of its
-/// declarations names: a line declaring a global (`// @ 0x`) or starting
-/// `extern ` or `static `.
+/// declarations names.
+///
+/// The declarations are a line declaring a global (`// @ 0x`) or starting
+/// `extern ` or `static `, the signature (the parameters) and the lines
+/// before the body (the locals, types and macros).
 ///
 /// The declared names are gathered once into a set, so the cost is one
 /// pass over the text however many words and declarations it holds.
@@ -1322,17 +1324,72 @@ pub(super) fn declare_globals(
 ///
 /// * `text` - The text.
 pub(super) fn undeclared_words(text: &str) -> Vec<String> {
+    let comments = text.lines().take_while(|l| l.starts_with("//")).count();
+    let head = declarations_end(text).unwrap_or(comments);
     let declared: FxHashSet<&str> = text
         .lines()
-        .filter(|l| {
-            l.contains("// @ 0x") || ["extern ", "static "].iter().any(|p| l.starts_with(p))
+        .enumerate()
+        .filter_map(|(i, l)| {
+            let declares = (comments..head).contains(&i)
+                || l.contains("// @ 0x")
+                || ["extern ", "static "].iter().any(|p| l.starts_with(p));
+            l.strip_prefix("// signature: ")
+                .or_else(|| declares.then(|| code_of(l)))
         })
-        .flat_map(|l| tokens(code_of(l)))
+        .flat_map(tokens)
         .collect();
     words(text)
         .into_iter()
         .filter(|w| !declared.contains(w.as_str()))
         .collect()
+}
+
+/// Tells whether an exported file may declare a name of the binary's.
+///
+/// It may not when C or the prelude's headers already give the name a
+/// meaning (a keyword, `NULL`, a type, a C library function, a macro of
+/// `<stdint.h>`, `<stdlib.h>` or `<math.h>`), when both a function and a
+/// data symbol bear it, or when data symbols at several addresses do: the
+/// text does not say which it names.
+///
+/// # Arguments
+///
+/// * `name` - The name as the text spells it.
+/// * `ix` - The binary's names.
+pub(super) fn declarable(name: &str, ix: &Index) -> bool {
+    /// Macros the prelude's headers define beyond `<stdint.h>`'s limits.
+    const MACROS: [&str; 14] = [
+        "NULL",
+        "EXIT_SUCCESS",
+        "EXIT_FAILURE",
+        "RAND_MAX",
+        "MB_CUR_MAX",
+        "NAN",
+        "INFINITY",
+        "HUGE_VAL",
+        "HUGE_VALF",
+        "HUGE_VALL",
+        "SIZE_MAX",
+        "offsetof",
+        "isnan",
+        "isinf",
+    ];
+    let limit = name
+        .strip_prefix('U')
+        .unwrap_or(name)
+        .strip_prefix("INT")
+        .is_some_and(|r| r.ends_with("_MAX") || r.ends_with("_MIN") || r.ends_with("_C"));
+    let reserved = cir::KEYWORDS.contains(&name)
+        || C_WORDS.contains(&name)
+        || MACROS.contains(&name)
+        || limit
+        || name.starts_with("PTRDIFF_")
+        || name.starts_with("M_")
+        || standard_type(name)
+        || LIBC.split_whitespace().any(|n| n == name);
+    let ambiguous = ix.shared_data.contains(name)
+        || ix.functions.contains_key(name) && ix.data.contains_key(name);
+    !reserved && !ambiguous
 }
 
 /// Returns the identifiers a text's code uses, each once, in order of
@@ -1524,9 +1581,9 @@ fn code_of(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Index, Item, call_arities, code_of, declare_globals, implementation_named, library_items,
-        own_prototype, param, parse_proto, plain_type, platform_declarations, undeclared_words,
-        words,
+        Index, Item, call_arities, code_of, declarable, declare_globals, implementation_named,
+        library_items, own_prototype, param, parse_proto, plain_type, platform_declarations,
+        undeclared_words, words,
     };
 
     /// A parameter whose last character outside a name is wider than a byte
@@ -1554,16 +1611,54 @@ mod tests {
     fn a_named_global_is_declared() {
         let text = "// f @ 0x10\nuint64_t var1;\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n";
         assert_eq!(
-            declare_globals(text, &undeclared_words(text), &BTreeMap::new()),
+            declare_globals(text, &undeclared_words(text), &Index::default()),
             "// f @ 0x10\nuint64_t var1;\nuint64_t g64_3000; // @ 0x3000\nuint32_t g32_10; // @ 0x10\n\nvar1 = &g64_3000;\nputs(\"g64_4000\");\nreturn g32_10;\n"
         );
-        let data = BTreeMap::from([("handlers".to_owned(), 0x6010), ("var1".to_owned(), 0x7000)]);
+        let ix = Index {
+            data: BTreeMap::from([("handlers".to_owned(), 0x6010), ("var1".to_owned(), 0x7000)]),
+            ..Index::default()
+        };
         let named = "// f @ 0x10\nuint64_t var1;\n\nvar1 = (uintptr_t)&handlers;\nreturn var1;\n";
         assert_eq!(
-            declare_globals(named, &undeclared_words(named), &data),
+            declare_globals(named, &undeclared_words(named), &ix),
             "// f @ 0x10\nuint64_t var1;\nuint8_t handlers[]; // @ 0x6010\n\nvar1 = (uintptr_t)&handlers;\nreturn var1;\n"
         );
     }
+    /// A parameter, a local, a keyword or a name C's headers define is
+    /// never declared for the binary.
+    ///
+    /// Nor is a name both a function and a data symbol bear, or one two
+    /// data symbols at other addresses bear (two `static int lock`).
+    ///
+    /// # Panics
+    ///
+    /// When a name is declarable otherwise.
+    #[test]
+    fn names_c_or_the_text_owns_are_not_declared() {
+        let text = "// f @ 0x10\n// signature: uint32_t f(uint32_t count)\nuint32_t lock;\n\nreturn count + lock + NULL + other;\n";
+        assert_eq!(undeclared_words(text), ["return", "NULL", "other"]);
+        let ix = Index {
+            functions: BTreeMap::from([("tick".to_owned(), 0x1000)]),
+            data: BTreeMap::from([("tick".to_owned(), 0x4000), ("handlers".to_owned(), 0x4010)]),
+            shared_data: BTreeSet::from(["lock".to_owned()]),
+            ..Index::default()
+        };
+        for name in [
+            "lock",
+            "tick",
+            "NULL",
+            "while",
+            "memcpy",
+            "INT32_MAX",
+            "size_t",
+            "EXIT_FAILURE",
+        ] {
+            assert!(!declarable(name, &ix), "{name}");
+        }
+        assert!(declarable("handlers", &ix));
+        assert!(declarable("other", &ix));
+    }
+
     /// A text's undeclared words leave out each name a declaration line
     /// states, and twenty thousand calls to as many declared functions
     /// leave out every one of them, read in one pass.
@@ -1588,7 +1683,7 @@ mod tests {
     }
     use crate::analysis::decompile::cir;
     use crate::program::BinaryFormat;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     /// A text's identifiers leave out comments, literals and members.
     ///
