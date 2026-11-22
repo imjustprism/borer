@@ -139,6 +139,12 @@ fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// x & ~k : x) | k : (eq ? x & ~k : x)`, whose arms are `x | k` and `x &
 /// ~k`. Selects are looked for through operators, extensions and casts.
 ///
+/// Two conditions are the same test only when their flags name the values
+/// they were set from: every [`Flags`] variant holds those values, so equal
+/// flags are flags of equal values, except [`Flags::Unknown`], which holds
+/// nothing and stands for any flags at all. A condition on unknown flags
+/// decides nothing.
+///
 /// # Arguments
 ///
 /// * `cond` - The outer condition.
@@ -150,7 +156,7 @@ fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// The arm with those selects replaced by their taken sides.
 pub(super) fn arm_under(cond: &Cond, holds: bool, arm: Expr) -> Expr {
     let inverse = cond.invert();
-    if inverse == *cond {
+    if matches!(cond.flags, Flags::Unknown) || inverse == *cond {
         return arm;
     }
     let down = |e: Box<Expr>| Box::new(arm_under(cond, holds, *e));

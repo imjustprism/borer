@@ -64,6 +64,23 @@ fn agrees(words: &[u32], checked: usize) -> Vec<Verified> {
         .collect()
 }
 
+/// The decompiled text of the function at [`BASE`].
+///
+/// # Arguments
+///
+/// * `words` - The routine.
+fn text(words: &[u32]) -> String {
+    let p = image(words);
+    let a = Analysis::compute(&p);
+    borer_engine::analysis::decompile::decompile(
+        &p,
+        &a,
+        &borer_engine::analysis::Overlay::default(),
+        BASE,
+    )
+    .unwrap_or_default()
+}
+
 /// How many facts of a kind one seed compared.
 ///
 /// # Arguments
@@ -190,6 +207,39 @@ fn csel_agrees_with_the_emulator() {
         0xd65f_03c0,
     ];
     agrees(&words, 2);
+}
+
+/// Two selects on flags the lift does not model keep both of their arms.
+///
+/// Each `setf8` leaves flags the lift cannot name, so the second select's
+/// `ne` and the first's `eq` are not one test inverted: the machine can
+/// return any of `x1`, `x2` and `x3`.
+#[test]
+fn selects_on_unknown_flags_agree_with_the_emulator() {
+    let words = [
+        // ASM: setf8 w9
+        0x3a00_092d,
+        // ASM: csel x0, x1, x2, eq
+        0x9a82_0020,
+        // ASM: setf8 w10
+        0x3a00_094d,
+        // ASM: csel x0, x3, x0, ne
+        0x9a80_1060,
+        // ASM: ret
+        0xd65f_03c0,
+    ];
+    let p = image(&words);
+    let a = Analysis::compute(&p);
+    for seed in 1..=SEEDS {
+        let v = verify(&p, &a, &[BASE], seed);
+        assert!(v.mismatches.is_empty(), "seed {seed}: {}", verify_tsv(&v));
+    }
+    let text = text(&words);
+    let ret = text
+        .lines()
+        .find(|l| l.contains("return"))
+        .unwrap_or_default();
+    assert!(["a2", "a3", "a4"].iter().all(|a| ret.contains(a)), "{text}");
 }
 
 /// The bitfield moves and their aliases extract, insert and extend at
@@ -825,15 +875,7 @@ fn scalar_dup_agrees_with_the_emulator() {
         0xd65f_03c0,
     ];
     agrees(&words, 1);
-    let p = image(&words);
-    let a = Analysis::compute(&p);
-    let text = borer_engine::analysis::decompile::decompile(
-        &p,
-        &a,
-        &borer_engine::analysis::Overlay::default(),
-        BASE,
-    )
-    .unwrap_or_default();
+    let text = text(&words);
     assert!(
         text.contains("return ((uint64_t)v1 >> 32) + (((uint64_t)v3 >> 0x20) & 0xffff);"),
         "{text}"
