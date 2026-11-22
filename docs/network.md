@@ -30,8 +30,8 @@ borer has no telemetry or crash reporting. Only these reach the network:
   detected, and no row is shown for it), elsewhere `claude`. The app starts
   it on this machine, in a new empty folder of its own under the app's data
   folder, removed when it ends, with no built-in tool, no saved session and
-  no project or local Claude Code settings, and hands it each message over a
-  pipe. The provider keys the app reads (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+  no Claude Code settings file (the person's, the project's or the local
+  one), and hands it each message over a pipe. The provider keys the app reads (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
   `GEMINI_API_KEY`, `OPENROUTER_API_KEY`) and `ANTHROPIC_AUTH_TOKEN` and
   `ANTHROPIC_BASE_URL` are removed from its environment, so it runs on its
   own sign-in, not on a key set for the app's other providers. It runs
