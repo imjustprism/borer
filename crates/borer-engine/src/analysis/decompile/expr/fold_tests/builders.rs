@@ -635,7 +635,8 @@ pub(super) fn builders(t: &mut Tally, d: &Domain) {
 }
 
 /// A select whose false side selects again on the same condition, or on
-/// its inverse, reads only the side that condition takes.
+/// its inverse, reads only the side that condition takes; flags that do
+/// not hold every flag the code reads decide nothing.
 ///
 /// # Arguments
 ///
@@ -643,6 +644,22 @@ pub(super) fn builders(t: &mut Tally, d: &Domain) {
 /// * `d` - The values.
 pub(super) fn nested_selects(t: &mut Tally, d: &Domain) {
     let (w, xs, ys) = (d.w, d.xs.as_slice(), d.ys.as_slice());
+    for (flags, cc) in [
+        (Flags::Result(X, w), C::b),
+        (Flags::Result(X, w), C::l),
+        (Flags::Carry(X), C::o),
+        (Flags::Shift(X, w, Y), C::g),
+        (Flags::Unknown, C::e),
+    ] {
+        let test = cond(cc, flags);
+        let arm = Expr::Ternary(Box::new(test.invert()), Box::new(k(1)), Box::new(Y));
+        let after = ternary(test.clone(), X, arm.clone());
+        assert_eq!(
+            after,
+            Expr::Ternary(Box::new(test), Box::new(X), Box::new(arm)),
+            "{cc:?} at {w}"
+        );
+    }
     for cc in CCS {
         let test = cond(cc, Flags::Cmp(X, Y, w));
         let inner = |c: Cond| Expr::Ternary(Box::new(c), Box::new(k(1)), Box::new(Y));

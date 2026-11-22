@@ -146,11 +146,9 @@ fn signed_power_remainder(cond: &Cond, a: &Expr, b: &Expr) -> Option<Expr> {
 /// x & ~k : x) | k : (eq ? x & ~k : x)`, whose arms are `x | k` and `x &
 /// ~k`. Selects are looked for through operators, extensions and casts.
 ///
-/// Two conditions are the same test only when their flags name the values
-/// they were set from: every [`Flags`] variant holds those values, so equal
-/// flags are flags of equal values, except [`Flags::Unknown`], which holds
-/// nothing and stands for any flags at all. A condition on unknown flags
-/// decides nothing.
+/// Two conditions are the same test only when their flags name every flag
+/// the condition code reads ([`names_its_flags`]); a condition on flags
+/// that leave one out decides nothing.
 ///
 /// # Arguments
 ///
@@ -183,12 +181,47 @@ pub(super) fn arm_under(cond: &Cond, holds: bool, arm: Expr) -> Expr {
         }
     }
     let inverse = cond.invert();
-    if matches!(cond.flags, Flags::Unknown) || inverse == *cond {
+    if !names_its_flags(cond) || inverse == *cond {
         return arm;
     }
     if holds {
         decide(cond, &inverse, arm)
     } else {
         decide(&inverse, cond, arm)
+    }
+}
+
+/// Tells whether a condition's flags hold every flag its code reads, so
+/// that two equal conditions read the same machine flags.
+///
+/// What each [`Flags`] variant holds: a compare, a test and an addition
+/// ([`Flags::Cmp`], [`Flags::Test`], [`Flags::Add`]) and a floating-point
+/// compare ([`Flags::Float`], [`Flags::FCmp`]) hold their operands, from
+/// which every flag follows. [`Flags::Result`] holds a result, which gives
+/// the zero and sign flags alone: an A32 logical instruction leaves C and V
+/// as earlier instructions set them, and x86 `inc`, `dec` and the shifts
+/// leave or define the carry and overflow apart from the result.
+/// [`Flags::Carry`] holds the carry alone (x86 `adc` and `sbb` do not model
+/// the overflow it claims, and an A32 flags word is read for its carry).
+/// [`Flags::Shift`] holds the result and the carry. [`Flags::Truth`]
+/// answers its own code and that code's inverse. [`Flags::Unknown`] holds
+/// nothing.
+///
+/// # Arguments
+///
+/// * `cond` - The condition.
+fn names_its_flags(cond: &Cond) -> bool {
+    use ConditionCode as C;
+    let zero_sign = matches!(cond.cc.0, C::e | C::ne | C::s | C::ns);
+    let carry = matches!(cond.cc.0, C::b | C::ae);
+    match &cond.flags {
+        Flags::Cmp(..) | Flags::Test(..) | Flags::Add(..) | Flags::Float(..) | Flags::FCmp(..) => {
+            true
+        }
+        Flags::Result(..) => zero_sign,
+        Flags::Carry(_) => carry,
+        Flags::Shift(..) => zero_sign || carry,
+        Flags::Truth(_, tcc) => cond.cc == *tcc || cond.cc == tcc.invert(),
+        Flags::Unknown => false,
     }
 }
