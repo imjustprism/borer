@@ -647,6 +647,58 @@ fn a_conditional_call_before_the_literal_pool_goes_on() {
     );
 }
 
+/// A call followed by a word another function loads goes on: only the
+/// caller's own literals end its path.
+#[test]
+fn a_call_before_another_functions_literal_goes_on() {
+    let text: [u16; 16] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf804, // ASM: bl 0xe
+        0xf000, 0xf807, // ASM: bl 0x18
+        0xbd08, // ASM: pop {r3, pc}
+        0xbf00, // ASM: nop
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf805, // ASM: bl 0x1e
+        0x2001, // ASM: movs r0, #1
+        0xbd08, // ASM: pop {r3, pc}
+        0xf85f, 0x0008, // ASM: ldr.w r0, [pc, #-8]
+        0x4770, // ASM: bx lr
+        0x4770, // ASM: bx lr
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("other.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let f = a.function_at(ELF_TEXT + 0xe).expect("the caller");
+    assert!(
+        f.blocks
+            .iter()
+            .any(|b| b.start <= ELF_TEXT + 0x14 && ELF_TEXT + 0x14 < b.end)
+    );
+}
+
+/// A target one walk jumps to after its pop, but another falls into, is
+/// no start: the code before it does not end.
+#[test]
+fn a_target_another_function_falls_into_is_no_start() {
+    let text: [u16; 16] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf807, // ASM: bl 0x18
+        0xbd08, // ASM: pop {r3, pc}
+        0xb510, // ASM: push {r4, lr}
+        0x2401, // ASM: movs r4, #1
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe001, // ASM: b 0x1a
+        0xbf00, // ASM: nop
+        0x2002, // ASM: movs r0, #2
+        0xb510, // ASM: push {r4, lr}
+        0x3001, // ASM: adds r0, #1
+        0xbd10, // ASM: pop {r4, pc}
+    ];
+    assert_eq!(thumb_entries("fall.elf", &text), [0, 0xc, 0x18]);
+}
+
 /// A frameless wrapper's jump past another function is a tail call, and
 /// what it reaches a function, though it opens a frame of its own.
 #[test]
