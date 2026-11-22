@@ -164,10 +164,13 @@ fn a_shift_by_a_register_agrees_with_the_emulator_as_one_helper_call() {
 }
 
 /// Every A32 shift by a register, with its word and amount loaded as
-/// constants, decompiles to the constant the emulator leaves, at the
-/// amounts on either side of 32 and of the low byte.
+/// constants, folds to the constant the emulator leaves, at the amounts on
+/// either side of 32 and of the low byte.
+///
+/// The lift decides each select, so no helper reaches these texts; the
+/// helper's own value is held to the machine in `reg_shift`'s unit tests.
 #[test]
-fn a_shift_by_a_register_agrees_with_the_emulator_at_every_edge_amount() {
+fn a_shift_by_constants_folds_to_what_the_emulator_leaves_at_every_edge_amount() {
     for (shift, helper) in [
         (A_LSL[0], "lsl32"),
         (A_LSR[0], "lsr32"),
@@ -181,6 +184,84 @@ fn a_shift_by_a_register_agrees_with_the_emulator_at_every_edge_amount() {
                 let text = agreed_in(Code::Arm(&code));
                 assert_eq!(returned(&text), want, "{helper} {x:#x} by {n}: {text}");
             }
+        }
+    }
+}
+
+/// The prefixes that leave `r2` one of two amounts, chosen by the sign of
+/// the incoming `r3`.
+///
+/// Each pair has one amount below 32 or 256 and one at or above, so every seed of the check that draws `r3` negative and every
+/// one that draws it positive runs a different side of the helper.
+const PAIRS: [(&[u32], &str); 4] = [
+    (
+        &[
+            // ASM: lsr r2, r3, #31
+            0xe1a0_2fa3,
+            // ASM: lsl r2, r2, #5
+            0xe1a0_2282,
+        ],
+        "0 or 32",
+    ),
+    (
+        &[
+            // ASM: lsr r2, r3, #31
+            0xe1a0_2fa3,
+            // ASM: lsl r2, r2, #5
+            0xe1a0_2282,
+            // ASM: orr r2, r2, #1
+            0xe382_2001,
+        ],
+        "1 or 33",
+    ),
+    (
+        &[
+            // ASM: lsr r2, r3, #31
+            0xe1a0_2fa3,
+            // ASM: lsl r2, r2, #5
+            0xe1a0_2282,
+            // ASM: orr r2, r2, #31
+            0xe382_201f,
+        ],
+        "31 or 63",
+    ),
+    (
+        &[
+            // ASM: lsr r2, r3, #31
+            0xe1a0_2fa3,
+            // ASM: add r2, r2, #255
+            0xe282_20ff,
+        ],
+        "255 or 256",
+    ),
+];
+
+/// A shift by one of two amounts across 32 agrees with the emulator as its
+/// helper.
+///
+/// The amount comes from a register at entry the lift cannot fold and lies
+/// on either side of 32 or of the low byte; the text prints the helper, and
+/// the lift and the statements agree with the emulator.
+///
+/// The check seeds `r3` from values with the sign set and clear (zero, one,
+/// the signed and unsigned limits), so it runs both amounts of each pair.
+#[test]
+fn a_shift_by_one_of_two_amounts_across_32_agrees_with_the_emulator_as_its_helper() {
+    for (shift, helper) in [
+        (A_LSL[0], "lsl32"),
+        (A_LSR[0], "lsr32"),
+        (A_ASR[0], "asr32"),
+    ] {
+        for (prefix, amounts) in PAIRS {
+            let mut code = prefix.to_vec();
+            // ASM: bx lr
+            code.extend([shift, 0xe12f_ff1e]);
+            let text = agreed_in(Code::Arm(&code));
+            assert!(
+                text.contains(&format!("return {helper}(a2, ")),
+                "{amounts}: {text}"
+            );
+            assert!(!body(&text).contains('?'), "{amounts}: {text}");
         }
     }
 }

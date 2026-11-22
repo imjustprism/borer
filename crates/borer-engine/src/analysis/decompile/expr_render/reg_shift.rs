@@ -91,16 +91,32 @@ fn signed_word(s: &Expr) -> Option<Expr> {
 #[cfg(test)]
 mod tests {
     use super::call;
+    use crate::analysis::decompile::decompile;
     use crate::analysis::decompile::expr::{Cc, Cond, Expr, Flags, Key, Op, fold};
     use crate::analysis::decompile::helper::Helper;
+    use crate::analysis::{Analysis, Overlay};
     use crate::emulate::Stop;
     use crate::emulate::a32::Machine;
     use crate::isa::a32::{Mode, Modes};
     use crate::isa::x86::{ConditionCode, Register};
     use crate::program::{Arch, Program, Section};
 
-    /// Where the A32 routines run.
+    /// Where the routines run.
     const AT: u64 = 0x1_0000;
+
+    /// An image of one routine, entered at [`AT`].
+    ///
+    /// # Arguments
+    ///
+    /// * `bytes` - The routine.
+    /// * `mode` - The instruction set it is in.
+    fn image(bytes: Vec<u8>, mode: Mode) -> Program {
+        let len = u64::try_from(bytes.len()).unwrap_or(0);
+        let text = Section::mapped(".text", AT, 0, len, false, true);
+        let mut p = Program::raw(bytes, Arch::Arm, 0, Some(AT), vec![text]);
+        p.modes = Modes::from_marks(vec![(AT, mode)]);
+        p
+    }
 
     /// An A32 image of one instruction and its return.
     ///
@@ -109,14 +125,40 @@ mod tests {
     /// * `word` - The instruction.
     fn a32(word: u32) -> Program {
         // ASM: bx lr
-        let bytes: Vec<u8> = [word, 0xe12f_ff1e]
-            .iter()
-            .flat_map(|w| w.to_le_bytes())
-            .collect();
-        let text = Section::mapped(".text", AT, 0, 8, false, true);
-        let mut p = Program::raw(bytes, Arch::Arm, 0, Some(AT), vec![text]);
-        p.modes = Modes::from_marks(vec![(AT, Mode::Arm)]);
-        p
+        let words = [word, 0xe12f_ff1e];
+        image(
+            words.iter().flat_map(|w| w.to_le_bytes()).collect(),
+            Mode::Arm,
+        )
+    }
+
+    /// A T32 image of one wide instruction and its return.
+    ///
+    /// # Arguments
+    ///
+    /// * `halves` - The instruction's two halfwords.
+    fn t32(halves: [u16; 2]) -> Program {
+        // ASM: bx lr
+        let all = [halves[0], halves[1], 0x4770];
+        image(
+            all.iter().flat_map(|h| h.to_le_bytes()).collect(),
+            Mode::Thumb,
+        )
+    }
+
+    /// The helper a routine's decompiled text returns the call of, on its
+    /// two incoming registers.
+    ///
+    /// # Arguments
+    ///
+    /// * `p` - The routine's image.
+    fn printed(p: &Program) -> Option<Helper> {
+        let a = Analysis::compute(p);
+        let text = decompile(p, &a, &Overlay::default(), AT)?;
+        let call = text
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("return "))?;
+        Helper::parse(call.strip_suffix("(a2, a3);")?)
     }
 
     /// The register-shift select of `a` and `b` on `by < 32`.
@@ -132,28 +174,38 @@ mod tests {
         }
     }
 
-    /// Each helper is the machine's shift by a register at every edge amount.
+    /// The helper each A32 and T32 shift by a register prints as is the
+    /// machine's shift at every edge amount.
     ///
-    /// The amounts lie on either side of 32 and of the low byte, the words
-    /// are negative and positive: the amount is the low byte, a logical
-    /// shift from 32 on is 0 and an arithmetic one the sign.
+    /// The helper is read back from the decompiled text, and its value is
+    /// compared with the machine's run of the routine from registers set at
+    /// entry: amounts on either side of 32 and of the low byte, negative and
+    /// positive words. The amount is the low byte, a logical shift from 32
+    /// on is 0 and an arithmetic one the sign.
     ///
     /// # Panics
     ///
-    /// When a helper's value is not the machine's.
+    /// When a routine does not print its helper, or the helper's value is
+    /// not the machine's.
     #[test]
-    fn each_shift_helper_is_the_machine_shift_at_every_edge_amount() {
+    fn the_printed_helper_is_the_machine_shift_at_every_edge_amount() {
         let shifts = [
             // ASM: lsl r0, r1, r2
-            (0xe1a0_0211, Helper::Lsl32),
+            (a32(0xe1a0_0211), Helper::Lsl32),
             // ASM: lsr r0, r1, r2
-            (0xe1a0_0231, Helper::Lsr32),
+            (a32(0xe1a0_0231), Helper::Lsr32),
             // ASM: asr r0, r1, r2
-            (0xe1a0_0251, Helper::Asr32),
+            (a32(0xe1a0_0251), Helper::Asr32),
+            // ASM: lsl.w r0, r1, r2
+            (t32([0xfa01, 0xf002]), Helper::Lsl32),
+            // ASM: lsr.w r0, r1, r2
+            (t32([0xfa21, 0xf002]), Helper::Lsr32),
+            // ASM: asr.w r0, r1, r2
+            (t32([0xfa41, 0xf002]), Helper::Asr32),
         ];
         let amounts = [0, 1, 31, 32, 33, 255, 256, 257, 0x121, 0xffff_ffff];
-        for (word, h) in shifts {
-            let p = a32(word);
+        for (p, h) in shifts {
+            assert_eq!(printed(&p), Some(h), "{h}");
             for x in [0x8000_0001, 0x7fff_fffe, 0xffff_ffff, 1] {
                 for n in amounts {
                     let mut m = Machine::new(&p, 64).expect("an ARM32 machine");
@@ -161,6 +213,57 @@ mod tests {
                     assert_eq!(m.run(AT).stop, Stop::Returned);
                     let want = m.register("r0");
                     assert_eq!(h.eval(&[x, n], 64, 32), want, "{h}({x:#x}, {n:#x})");
+                }
+            }
+        }
+    }
+
+    /// Each helper's printed definition is the formula its value computes.
+    ///
+    /// The definition is held to its exact text, and the text's formula,
+    /// transcribed operator for operator, is held to [`Helper::eval`] at
+    /// the edge amounts: the replay reads the value, a compiler reads the
+    /// text, and the two must not drift apart.
+    ///
+    /// # Panics
+    ///
+    /// When a definition's text changes or its formula leaves the value.
+    #[test]
+    fn each_definition_is_the_formula_its_value_computes() {
+        let head = "static inline uint32_t";
+        let body = "(uint64_t x, uint64_t n) { n &= 0xff; return";
+        let defined = [
+            (
+                Helper::Lsl32,
+                format!("{head} lsl32{body} n < 32 ? (uint32_t)((uint32_t)x << n) : 0; }}"),
+            ),
+            (
+                Helper::Lsr32,
+                format!("{head} lsr32{body} n < 32 ? (uint32_t)x >> n : 0; }}"),
+            ),
+            (
+                Helper::Asr32,
+                format!(
+                    "{head} asr32{body} (uint32_t)((int32_t)(uint32_t)x >> (n < 32 ? n : 31)); }}"
+                ),
+            ),
+        ];
+        for (h, line) in &defined {
+            assert_eq!(h.define(32), vec![line.clone()], "{h}");
+        }
+        let formula = |h: Helper, x: u64, n: u64| {
+            let (x, n) = (crate::num::lo32(x), n & 0xff);
+            match h {
+                Helper::Lsl32 if n < 32 => u64::from(x << n),
+                Helper::Lsr32 if n < 32 => u64::from(x >> n),
+                Helper::Asr32 => u64::from((x.cast_signed() >> n.min(31)).cast_unsigned()),
+                _ => 0,
+            }
+        };
+        for (h, _) in defined {
+            for x in [0x8000_0001, 0x7fff_fffe, 0xffff_ffff, 1] {
+                for n in [0, 1, 31, 32, 33, 255, 256, 257, 0x121, 0xffff_ffff] {
+                    assert_eq!(h.eval(&[x, n], 64, 32), Some(formula(h, x, n)), "{h}");
                 }
             }
         }
