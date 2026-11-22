@@ -575,7 +575,8 @@ struct Walked {
     /// The known starts its jumps reach: tail calls.
     tails: BTreeSet<u64>,
     /// The functions it calls that its bytes show never return: a call
-    /// of theirs runs into the walk's own literals ([`into_pool`]).
+    /// of theirs that the finished walk holds runs into the walk's own
+    /// literals ([`into_pool`]).
     ends: BTreeSet<u64>,
 }
 
@@ -609,26 +610,46 @@ fn walk(
     guess: Option<&BTreeMap<u64, (u64, bool)>>,
 ) -> Walked {
     let mut stops = BTreeSet::new();
-    let mut ends = BTreeSet::new();
     let mut w = walk_until(program, entry, starts, noreturn, guess, &stops);
     for _ in 0..POOL_ROUNDS {
         let into = into_pool(&w);
         if into.is_empty() {
             break;
         }
-        for (stop, callee) in into {
-            stops.insert(stop);
-            ends.extend(callee);
-        }
+        stops.extend(into);
         w = walk_until(program, entry, starts, noreturn, guess, &stops);
     }
+    let ends: BTreeSet<u64> = w
+        .seen
+        .values()
+        .filter(|i| i.flow() == Flow::Call && stops.contains(&past_padding(&w, i, gap_padding)))
+        .filter_map(Insn::target)
+        .collect();
     w.ends = ends;
     w
 }
 
+/// Returns the address a call falls through to, past the padding its walk
+/// decoded after it.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+/// * `call` - The call.
+/// * `pad` - Whether an instruction is padding.
+fn past_padding(w: &Walked, call: &Insn, pad: impl Fn(&Insn) -> bool) -> u64 {
+    let mut va = call.next();
+    for _ in 0..PAD_MAX {
+        match w.seen.get(&va) {
+            Some(i) if pad(i) => va = i.next(),
+            _ => break,
+        }
+    }
+    va
+}
+
 /// Returns the instructions a call of a walk falls into, past any padding,
-/// that lie in the literals or jump tables the walk itself reads, each
-/// with the call's direct target.
+/// that lie in the literals or jump tables the walk itself reads.
 ///
 /// Such a call never returns: the compiler put data after it. Code that
 /// falls into a pool without a call before it says nothing as sure, and a
@@ -637,7 +658,7 @@ fn walk(
 /// # Arguments
 ///
 /// * `w` - The walk.
-fn into_pool(w: &Walked) -> Vec<(u64, Option<u64>)> {
+fn into_pool(w: &Walked) -> Vec<u64> {
     let mut pool: Vec<(u64, u64)> = Walks::stretches(w).map(|r| (r.start, r.end)).collect();
     pool.sort_unstable();
     let mut merged: BTreeMap<u64, (u64, bool)> = BTreeMap::new();
@@ -656,18 +677,12 @@ fn into_pool(w: &Walked) -> Vec<(u64, Option<u64>)> {
         guess::covers(&merged, i.va).is_some()
             || guess::covers(&merged, i.next().saturating_sub(1)).is_some()
     };
-    let mut into = Vec::new();
-    for call in w.seen.values().filter(|i| i.flow() == Flow::Call) {
-        let mut at = w.seen.get(&call.next());
-        for _ in 0..PAD_MAX {
-            match at {
-                Some(i) if gap_padding(i) && !data(i) => at = w.seen.get(&i.next()),
-                _ => break,
-            }
-        }
-        into.extend(at.filter(|i| data(i)).map(|i| (i.va, call.target())));
-    }
-    into
+    w.seen
+        .values()
+        .filter(|i| i.flow() == Flow::Call)
+        .map(|call| past_padding(w, call, |i| gap_padding(i) && !data(i)))
+        .filter(|va| w.seen.get(va).is_some_and(&data))
+        .collect()
 }
 
 /// Walks one function from its entry, ending a path at any of `stops`

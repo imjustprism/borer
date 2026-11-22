@@ -530,6 +530,44 @@ fn a_call_found_never_to_return_ends_earlier_callers() {
     assert_eq!(thumb_entries("noret.elf", &text), [0, 0xa, 0x10, 0x1c]);
 }
 
+/// A call the first walk decoded inside a literal teaches nothing.
+///
+/// The literal after the real call reads as a `bl` into the bytes of a
+/// function that returns; the walk made again stops before it, and the
+/// other caller of that function keeps the code after its call.
+#[test]
+fn a_call_decoded_from_a_literal_marks_nothing_noreturn() {
+    let text: [u16; 23] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf80b, // ASM: bl 0x20
+        0xbd08, // ASM: pop {r3, pc}
+        0xb508, // ASM: push {r3, lr}
+        0x4902, // ASM: ldr r1, [pc, #8]
+        0x4a02, // ASM: ldr r2, [pc, #8]
+        0xbf00, // ASM: nop
+        0xf000, 0xf80a, // ASM: bl 0x2c
+        0xf000, 0xf807, // ASM: .word (reads as bl 0x2a)
+        0x0000, 0x2000, // ASM: .word 0x20000000
+        0xb510, // ASM: push {r4, lr}
+        0xf000, 0xf802, // ASM: bl 0x2a
+        0x2005, // ASM: movs r0, #5
+        0xbd10, // ASM: pop {r4, pc}
+        0x4770, // ASM: bx lr
+        0xe7fe, // ASM: b .
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("lit.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let g = a.function_at(ELF_TEXT + 0x20).expect("the other caller");
+    assert!(
+        g.blocks
+            .iter()
+            .any(|b| b.start <= ELF_TEXT + 0x26 && ELF_TEXT + 0x26 < b.end)
+    );
+}
+
 /// A frameless wrapper's jump past another function is a tail call, and
 /// what it reaches a function, though it opens a frame of its own.
 #[test]
