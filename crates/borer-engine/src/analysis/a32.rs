@@ -1579,10 +1579,8 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         guess::gaps(program, &mut walks);
         guess::drop_inner(program, &mut walks);
     }
-    for round in 0..OUTLINE_ROUNDS {
-        if !outlines(&mut walks) && round > 0 {
-            break;
-        }
+    for _ in 0..OUTLINE_ROUNDS {
+        let promoted = outlines(&mut walks);
         let redo: Vec<u64> = walks
             .walked
             .iter()
@@ -1594,6 +1592,9 @@ pub(crate) fn discover(program: &Program) -> Analysis {
             .map(|(e, _)| *e)
             .collect();
         walks.redo(program, redo);
+        if !promoted {
+            break;
+        }
     }
     let Walks {
         walked, incomplete, ..
@@ -1667,10 +1668,11 @@ fn outlines(walks: &mut Walks<'_>) -> bool {
                 continue;
             }
             let stepped = t > entry && walks.starts.range((entry + 1)..t).next().is_some();
+            if !stepped && t > entry {
+                continue;
+            }
             let pred = pred.get_or_insert_with(|| predecessors(w));
-            if (stepped && straight_return(w, t, pred))
-                || ((stepped || t < entry) && after_pop(w, t, pred))
-            {
+            if (stepped && straight_return(w, t, pred)) || after_pop(w, t, pred) {
                 promote.push(t);
             }
         }
