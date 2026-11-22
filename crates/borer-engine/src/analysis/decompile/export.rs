@@ -775,6 +775,7 @@ fn export_with(
             .map(|f| f.blocks.len())
             .filter(|&n| n > BUDGET_BLOCKS)
     };
+    let index = super::unit::index(program, analysis, overlay);
     let render = |entry: u64| {
         over(entry)
             .is_none()
@@ -782,7 +783,7 @@ fn export_with(
             .flatten()
             .map(|text| {
                 own_callees(
-                    &super::unit::declare_globals(&text),
+                    &super::unit::declare_globals(&text, &index.data),
                     program,
                     analysis,
                     overlay,
@@ -861,20 +862,24 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
         .map(|out| super::finished(&out, program, analysis, overlay, entry))
 }
 
-/// Declares each function of the image a text calls by that function's
+/// Declares each function of the image a text names by that function's
 /// own signature, in place of the prototype its unit states from ABI
-/// facts alone.
+/// facts alone, or where it states none.
 ///
 /// A prototype from ABI facts gives every parameter and the result the
 /// machine word; a callee that reads 32 bits of a parameter, or returns a
-/// pointer, says so in its own text. A callee whose own signature is
-/// unsure is left undeclared rather than declared wrong: one over
-/// [`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions (its text is
-/// not built for a caller), one that does not decompile, one with a name
-/// several functions share, and one a call passes another argument count
-/// ([`super::unit::own_prototype`]). A function the C library or the
-/// runtime declares keeps its declaration, and one the POSIX library
-/// states in C's types is declared as it states it
+/// pointer, says so in its own text, and the file defines it under that
+/// signature. A callee the text names without a declaration (a tail call,
+/// a function passed by address) is declared the same way. Where the text
+/// contradicts the callee's signature ([`super::unit::own_prototype`]),
+/// the signature is still the declaration, and a `// warn:` line at the
+/// top of the body says how the text disagrees. A callee with no
+/// signature of its own (it does not decompile, or is over
+/// [`BUDGET_BLOCKS`]) keeps its ABI prototype, and one whose signature
+/// names a type the text cannot spell is left undeclared. A function the
+/// C library or the runtime declares keeps its declaration, a name several
+/// functions share keeps its ABI prototype, and a function the POSIX
+/// library states in C's types is declared as it states it
 /// ([`super::unit::platform_declarations`]), where a reader's headers
 /// would.
 ///
@@ -888,7 +893,7 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 ///
 /// # Returns
 ///
-/// The text with its callees' declarations replaced or dropped.
+/// The text with its callees' declarations replaced, added or dropped.
 fn own_callees(
     text: &str,
     program: &Program,
@@ -898,40 +903,61 @@ fn own_callees(
 ) -> String {
     let comments = text.lines().take_while(|l| l.starts_with("//")).count();
     let decls_end = super::declarations_end(text).unwrap_or(comments);
+    let own = |name: &str| {
+        (crate::analysis::typelib::declared(name, program.format).is_none()
+            && crate::analysis::runtime::helper(name).is_none())
+        .then(|| super::unit::function_named(program, analysis, overlay, name))
+        .flatten()
+        .filter(|&g| g != entry)
+    };
+    let stub = |g: u64| {
+        analysis
+            .function(g)
+            .is_some_and(|f| f.thunk.is_some() || f.bound.is_some())
+    };
+    let declare = |name: &str, g: u64, out: &mut String, notes: &mut String| {
+        let sig = own_signature(program, analysis, overlay, g);
+        let Some(sig) = sig.as_deref() else {
+            return false;
+        };
+        if let Some((p, note)) = super::unit::own_prototype(text, name, sig, program.format) {
+            out.push_str(&p);
+            if let Some(n) = note {
+                let _ = writeln!(notes, "// warn: {name}: {n}");
+            }
+        }
+        true
+    };
     let mut out = String::with_capacity(text.len());
+    let mut notes = String::new();
     for (i, line) in text.lines().enumerate() {
         if i == comments {
             for d in super::unit::platform_declarations(text, program.format) {
                 out.push_str(&d);
                 out.push('\n');
             }
-        }
-        let name = declared_name(line);
-        let callee = (comments..decls_end).contains(&i)
-            && line.starts_with("extern ")
-            && line.contains('(')
-            && crate::analysis::typelib::declared(&name, program.format).is_none()
-            && crate::analysis::runtime::helper(&name).is_none();
-        let own = callee
-            .then(|| super::unit::function_named(program, analysis, overlay, &name))
-            .flatten()
-            .filter(|&g| g != entry);
-        match own {
-            Some(g) => {
-                if let Some(p) = own_signature(program, analysis, overlay, g)
-                    .as_deref()
-                    .and_then(|sig| super::unit::own_prototype(text, &name, sig))
-                {
-                    out.push_str(&p);
-                    out.push('\n');
+            for name in super::unit::undeclared_words(text) {
+                if let Some(g) = own(&name).filter(|&g| !stub(g)) {
+                    declare(&name, g, &mut out, &mut notes);
                 }
             }
-            None => {
-                out.push_str(line);
-                out.push('\n');
-            }
+        }
+        if i == decls_end {
+            out.push_str(&std::mem::take(&mut notes));
+        }
+        let name = declared_name(line);
+        let callee =
+            (comments..decls_end).contains(&i) && line.starts_with("extern ") && line.contains('(');
+        let declared = callee
+            .then(|| own(&name))
+            .flatten()
+            .is_some_and(|g| declare(&name, g, &mut out, &mut notes));
+        if !declared {
+            out.push_str(line);
+            out.push('\n');
         }
     }
+    out.push_str(&notes);
     out
 }
 
@@ -948,8 +974,7 @@ fn own_callees(
 /// # Returns
 ///
 /// The signature without its prefix, `None` for a function over
-/// [`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions or one that
-/// does not decompile.
+/// [`BUDGET_BLOCKS`] blocks or one that does not decompile.
 fn own_signature(
     program: &Program,
     analysis: &Analysis,
@@ -961,9 +986,9 @@ fn own_signature(
         overlay.fingerprint(),
         entry,
         || {
-            analysis.function(entry).filter(|f| {
-                f.entry == entry && f.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX
-            })?;
+            analysis
+                .function(entry)
+                .filter(|f| f.entry == entry && f.blocks.len() <= BUDGET_BLOCKS)?;
             let text = named(program, analysis, overlay, entry)?;
             text.lines()
                 .take_while(|l| l.starts_with("//"))

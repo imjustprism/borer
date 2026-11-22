@@ -3,6 +3,7 @@
 //! compiles on its own.
 #![expect(
     clippy::missing_panics_doc,
+    clippy::expect_used,
     reason = "assertions are the point of a test"
 )]
 
@@ -328,4 +329,190 @@ fn an_exported_body_declares_its_callee_by_its_own_signature() {
         one.lines().any(|l| l == format!("  extern {odd};")),
         "{odd} in {one}"
     );
+}
+
+/// Microsoft x64 routines at [`TEXT`] that name what their units leave
+/// undeclared, with `counter` a data symbol at [`RDATA`]:
+///
+/// ```text
+/// tail()       : tail-calls twice(7)                 at +0x00
+/// twice(n)     : n + n                               at +0x20
+/// counter_at() : &counter                            at +0x30
+/// store(p, v)  : *p = v, returning nothing           at +0x40
+/// bump(p, v)   : store(p, v) + 1, reading eax after  at +0x50
+/// ```
+const NAMED: [(usize, &[u8]); 9] = [
+    (0x00, &[0xb9, 0x07, 0x00, 0x00, 0x00]), // ASM: mov ecx, 7 (tail)
+    (0x05, &[0xe9, 0x16, 0x00, 0x00, 0x00]), // ASM: jmp twice
+    (0x20, &[0x8d, 0x04, 0x09, 0xc3]),       // ASM: lea eax, [rcx + rcx]; ret (twice)
+    (0x30, &[0x48, 0x8d, 0x05, 0xc9, 0x0f, 0x00, 0x00]), // ASM: lea rax, [rip + 0xfc9] (counter_at)
+    (0x37, &[0xc3]),                         // ASM: ret
+    (0x40, &[0x89, 0x11, 0xc3]),             // ASM: mov [rcx], edx; ret (store)
+    (0x50, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28 (bump)
+    (0x54, &[0xe8, 0xe7, 0xff, 0xff, 0xff]), // ASM: call store
+    (0x59, &[0x48, 0x83, 0xc4, 0x28, 0xff, 0xc0, 0xc3]), // ASM: add rsp, 0x28; inc eax; ret
+];
+
+/// [`NAMED`] as a PE-like image, every routine and `counter` named.
+fn named_image() -> Program {
+    let mut code = vec![0xccu8; 0x80];
+    for (at, bytes) in NAMED {
+        code[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    let mut p = crate::raw::image(Arch::X86_64, &code, &[0u8; 16]);
+    p.format = BinaryFormat::Pe;
+    let named = |name: &str, addr: u64, kind: SymbolKind| Symbol {
+        name: name.to_owned(),
+        addr,
+        kind,
+    };
+    p.symbols = vec![
+        named("tail", TEXT, SymbolKind::Export),
+        named("twice", TEXT + 0x20, SymbolKind::Export),
+        named("counter_at", TEXT + 0x30, SymbolKind::Export),
+        named("store", TEXT + 0x40, SymbolKind::Export),
+        named("bump", TEXT + 0x50, SymbolKind::Export),
+        named("counter", RDATA, SymbolKind::Data),
+    ];
+    p
+}
+
+/// Exports the entries of [`named_image`] in `only` as one file.
+///
+/// # Arguments
+///
+/// * `only` - The entries to write.
+fn named_export(only: &[u64]) -> String {
+    named_export_with(&Overlay::default(), only)
+}
+
+/// Exports the entries of [`named_image`] in `only` under an overlay.
+///
+/// # Arguments
+///
+/// * `overlay` - Names and prototypes to apply.
+/// * `only` - The entries to write.
+fn named_export_with(overlay: &Overlay, only: &[u64]) -> String {
+    use borer_engine::analysis::decompile::export::{Library, export};
+    let p = named_image();
+    let a = Analysis::compute(&p);
+    let only = only.iter().copied().collect();
+    let mut bodies = String::new();
+    let hoisted = export(&p, &a, overlay, Library::Skip, Some(&only), &mut |t| {
+        bodies.push_str(t);
+        Ok(())
+    })
+    .expect("exports");
+    format!("{}{bodies}", hoisted.head("t"))
+}
+
+/// Returns the file-scope and block-scope lines that declare `name`.
+///
+/// Each ends `;`, a comment after it allowed, names it and is no
+/// statement.
+///
+/// # Arguments
+///
+/// * `file` - The exported file.
+/// * `name` - The name.
+fn declarations_of(file: &str, name: &str) -> Vec<String> {
+    file.lines()
+        .map(str::trim)
+        .filter(|l| {
+            let code = l.split(" //").next().unwrap_or(l);
+            !l.starts_with("//")
+                && code.ends_with(';')
+                && !code.starts_with("return ")
+                && !code.contains(" = ")
+                && code
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .any(|w| w == name)
+        })
+        .map(str::to_owned)
+        .collect()
+}
+
+/// A function exported alone declares the callee it tail-calls by that
+/// callee's own signature, though the file does not define it, and the
+/// declaration is stated one way only.
+#[test]
+fn an_export_of_one_entry_declares_its_tail_callee() {
+    let file = named_export(&[TEXT]);
+    assert!(file.contains("twice(7)"), "{file}");
+    let decls = declarations_of(&file, "twice");
+    assert!(!decls.is_empty(), "twice is declared: {file}");
+    let mut ways: Vec<&str> = decls
+        .iter()
+        .map(|d| d.trim_start_matches("extern "))
+        .collect();
+    ways.dedup();
+    assert_eq!(ways.len(), 1, "one way: {decls:?} in {file}");
+}
+
+/// A data symbol a function names by its address is declared in the
+/// file, once at file scope.
+#[test]
+fn an_exported_global_read_is_declared() {
+    let file = named_export(&[TEXT + 0x30]);
+    assert!(file.contains("&counter"), "{file}");
+    let decls = declarations_of(&file, "counter");
+    assert!(
+        decls.iter().any(|d| d.starts_with("uint8_t counter[];")),
+        "{file}"
+    );
+    assert_eq!(
+        decls.iter().filter(|d| !d.starts_with("extern ")).count(),
+        1,
+        "{file}"
+    );
+}
+
+/// A callee stated variadic is declared by that signature, and one the
+/// caller contradicts is declared by its own and told.
+///
+/// The variable list takes the arguments past the fixed ones. Where the
+/// caller is stated to return another type than the callee it passes on,
+/// the body says the two disagree.
+#[test]
+fn a_variadic_or_contradicted_callee_is_declared() {
+    use borer_engine::analysis::protos::Proto;
+    let stated = |entry: u64, decl: &str| {
+        let mut o = Overlay::default();
+        o.prototypes
+            .insert(entry, Proto::parse(decl).expect("a prototype"));
+        named_export_with(&o, &[TEXT])
+    };
+    let file = stated(TEXT + 0x20, "uint32_t twice(uint32_t n, ...)");
+    assert!(
+        declarations_of(&file, "twice")
+            .iter()
+            .any(|d| d.ends_with("twice(uint32_t n, ...);")),
+        "{file}"
+    );
+    let file = stated(TEXT, "uint64_t tail(void)");
+    assert!(
+        declarations_of(&file, "twice")
+            .iter()
+            .all(|d| d.contains("uint32_t twice(")),
+        "{file}"
+    );
+    assert!(
+        file.contains("// warn: twice: the text returns its result as another type"),
+        "{file}"
+    );
+}
+
+/// The whole file declares every name once at file scope.
+#[test]
+fn the_whole_export_states_each_declaration_once() {
+    let file = named_export(&[TEXT, TEXT + 0x20, TEXT + 0x30, TEXT + 0x40, TEXT + 0x50]);
+    for name in ["tail", "twice", "counter_at", "store", "bump", "counter"] {
+        let file_scope: Vec<&str> = file
+            .lines()
+            .filter(|l| !l.starts_with(' ') && !l.starts_with("//"))
+            .filter(|l| l.ends_with(';') || l.contains("; //"))
+            .filter(|l| l.contains(&format!(" {name}(")) || l.contains(&format!(" {name}[")))
+            .collect();
+        assert_eq!(file_scope.len(), 1, "{name}: {file_scope:?} in {file}");
+    }
 }
