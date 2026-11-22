@@ -15,7 +15,9 @@
 //! binary or another model drops it, which kills it, and the next message starts a new
 //! Claude Code conversation that the thread says does not see the earlier turns. A child
 //! that ends, writes a line that does not read or goes silent ends the turn as an error.
-//! Its standard error is discarded; nothing of it reaches the app's standard output.
+//! Its standard error is read as it comes, keeping only its last bytes, which name why it
+//! ended in the error banner ([`tail`], [`ended`]); nothing of it reaches the app's standard
+//! output.
 
 use std::any::Any;
 use std::path::{Path, PathBuf};
@@ -332,6 +334,12 @@ impl Session {
 
     /// Returns the session with every line it wrote before this turn dropped, so a line it
     /// wrote after its last turn's end never counts in the next; `None` when it ended since.
+    ///
+    /// Only what was already read is dropped: a `result` written later still ends the next
+    /// turn. The stream gives nothing that ties a `result` to the message that asked for it:
+    /// its `session_id` is the same for every turn of one child, and its `uuid` is its own.
+    /// `--replay-user-messages` would echo each message back, but what the echo holds was not
+    /// checked on 2.1.318, since that takes sending a prompt.
     fn drained(mut self) -> Option<Self> {
         loop {
             match self.lines.try_recv() {

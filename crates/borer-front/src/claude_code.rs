@@ -297,8 +297,9 @@ pub fn read(line: &str) -> Result<Event, String> {
 /// Returns the flags `claude` is started with for the chat.
 ///
 /// They make it read and write stream-JSON (`-p --input-format stream-json --output-format
-/// stream-json --verbose`), streaming the reply as it is written (`--include-partial-messages`); load none of the person's customizations, slash commands or
-/// saved sessions (`--safe-mode --disable-slash-commands --no-session-persistence`), since
+/// stream-json --verbose`), streaming the reply as it is written
+/// (`--include-partial-messages`); load none of the person's customizations, slash commands
+/// or saved sessions (`--safe-mode --disable-slash-commands --no-session-persistence`), since
 /// text from the binary reaches the model and no hook, skill, plugin or CLAUDE.md the person
 /// set up for other work may run on it or shape it; read no settings file at all, the
 /// person's own, the project's or the local one (`--setting-sources ""`); offer
