@@ -2073,8 +2073,8 @@ g();
     /// known to end its path, a tail longer than
     /// [`super::early::EARLY_TAIL_MAX`], or the stack protector's failure call,
     /// the checks stay nested. An `if` whose body ends in the call is the
-    /// guard already and stays, and a body that ends in a call takes no
-    /// copy.
+    /// guard already and stays, and a body that ends in a call or in a loop
+    /// with no way out takes no copy.
     #[test]
     fn a_shared_error_call_is_a_guard_per_check() {
         let shape = |tail: &str| {
@@ -2141,6 +2141,15 @@ return 1;
             ),
             guard
         );
+        for spin in [
+            "for (a3 = 0; 1; a3 += 1) {\n    work(a3);\n  }",
+            "while (1) {\n    work();\n  }",
+        ] {
+            let looped =
+                format!("if (a1 >= 0) {{\n  f();\n  g(1);\n  {spin}\n}}\nh();\nabort();\n");
+            let labelled = looped.replace("}\nh();", "}\nL_10:\nh();");
+            assert_eq!(run(&labelled, &ends), looped);
+        }
         let calls = "if (a1 >= 0) {\n  f();\n  g(1);\n  g(2);\n  g(3);\n}\nh();\nabort();\n";
         assert_eq!(
             run(

@@ -1475,8 +1475,9 @@ fn a_noreturn_import_behind_an_endbr64_stub_ends_the_text() {
 /// `f(a1, a2)` checks `a1 < 0`, calls `f`, checks `a2 < 0`, then calls `g`
 /// three times and returns 1; both failed checks jump to the one block
 /// that calls `h` and then `abort`, as GCC lays out a shared error exit.
-/// Every callee is an import, so no call is left out as doing nothing. The text tests each check where it is made and the
-/// structure check agrees with it.
+/// Every callee is an import, so no call is left out as doing nothing.
+/// The text tests each check where it is made and the structure check
+/// agrees with it.
 #[test]
 fn a_shared_error_exit_is_a_guard_per_check() {
     use borer_engine::analysis::decompile::traces::{Structure, check_structure};
@@ -1525,6 +1526,84 @@ fn a_shared_error_exit_is_a_guard_per_check() {
         Structure::Agrees,
         "{text}"
     );
+}
+
+/// glibc's `error` ends a shared error exit only with a constant nonzero
+/// status.
+///
+/// The same function as above on an ELF image, the error block calling
+/// `error(status, 0)` through its import slot, then `mov eax, 0; pop rbx;
+/// ret` where `error` returns. With `mov edi, 1` the call never returns:
+/// each check is a guard and the code after the call is gone. With
+/// `mov edi, ebx` it may return, nothing says otherwise, and the text
+/// keeps the code after the call.
+#[test]
+fn an_error_call_with_a_computed_status_is_no_guard() {
+    use borer_engine::program::{Arch, BinaryFormat, Program, Section, Symbol, SymbolKind};
+    let text = |status: [u8; 5]| {
+        let mut bytes = vec![0xccu8; 0x1000];
+        let code = [
+            &[
+                0x53, // ASM: push rbx
+                0x89, 0xf3, // ASM: mov ebx, esi
+                0x85, 0xff, // ASM: test edi, edi
+                0x78, 0x32, // ASM: js 0x1039
+                0xff, 0x15, 0xfb, 0x0f, 0x00, 0x00, // ASM: call [0x2008]
+                0x85, 0xdb, // ASM: test ebx, ebx
+                0x78, 0x28, // ASM: js 0x1039
+                0xbf, 0x01, 0x00, 0x00, 0x00, // ASM: mov edi, 1
+                0xff, 0x15, 0xf4, 0x0f, 0x00, 0x00, // ASM: call [0x2010]
+                0xbf, 0x02, 0x00, 0x00, 0x00, // ASM: mov edi, 2
+                0xff, 0x15, 0xe9, 0x0f, 0x00, 0x00, // ASM: call [0x2010]
+                0xbf, 0x03, 0x00, 0x00, 0x00, // ASM: mov edi, 3
+                0xff, 0x15, 0xde, 0x0f, 0x00, 0x00, // ASM: call [0x2010]
+                0xb8, 0x01, 0x00, 0x00, 0x00, // ASM: mov eax, 1
+                0x5b, // ASM: pop rbx
+                0xc3, // ASM: ret
+            ][..],
+            &status,
+            &[
+                0x31, 0xf6, // ASM: xor esi, esi
+                0xff, 0x15, 0xba, 0x0f, 0x00, 0x00, // ASM: call [0x2000]
+                0xb8, 0x00, 0x00, 0x00, 0x00, // ASM: mov eax, 0
+                0x5b, // ASM: pop rbx
+                0xc3, // ASM: ret
+            ][..],
+        ]
+        .concat();
+        bytes[..code.len()].copy_from_slice(&code);
+        bytes.resize(0x2000, 0);
+        let mut p = Program::raw(
+            bytes,
+            Arch::X86_64,
+            0,
+            Some(0x1000),
+            vec![
+                Section::mapped(".text", 0x1000, 0, 0x1000, false, true),
+                Section::mapped(".got", 0x2000, 0x1000, 0x1000, false, false),
+            ],
+        );
+        p.format = BinaryFormat::Elf;
+        for (name, addr) in [("error", 0x2000), ("f", 0x2008), ("g", 0x2010)] {
+            p.symbols.push(Symbol {
+                name: name.to_owned(),
+                addr,
+                kind: SymbolKind::Import,
+            });
+        }
+        decompiled(&p, 0x1000)
+    };
+    let errors = |t: &str| {
+        t.lines()
+            .filter(|l| l.trim_start().starts_with("error("))
+            .count()
+    };
+    let fixed = text([0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: mov edi, 1
+    assert_eq!(errors(&fixed), 2, "{fixed}");
+    assert!(fixed.lines().any(|l| l == "return 1;"), "{fixed}");
+    assert!(!fixed.contains("return 0;"), "{fixed}");
+    let computed = text([0x89, 0xdf, 0x90, 0x90, 0x90]); // ASM: mov edi, ebx; nop; nop; nop
+    assert!(computed.contains("return 0;"), "{computed}");
 }
 
 /// The code a catch the text could not wrap runs stays in the text.

@@ -2,7 +2,7 @@
 //! leaves into an early exit ([`flattens`]).
 
 use super::super::wrap::weighs;
-use super::super::{Stmt, StmtKind};
+use super::super::{Else, Stmt, StmtKind};
 use super::{Facts, calls_out, ends, idle, negate, stops};
 
 /// Shortest `if` body, in printed lines, worth turning into an early exit.
@@ -23,8 +23,9 @@ const EARLY_TAIL_MAX: usize = 3;
 /// a call that never returns stays: it already reads as the guard of an
 /// error path, as the source writes one.
 ///
-/// When control falls off `BODY`'s end ([`ends`]), `BODY` does not end in
-/// a call, and `TAIL` ends in a call that never returns, `TAIL` is copied
+/// When control plainly runs off `BODY`'s end ([`completes`], and [`ends`]
+/// does not prove otherwise), `BODY` does not end in a call, and `TAIL`
+/// ends in a call that never returns, `TAIL` is copied
 /// to `BODY`'s end first: `if (c) { BODY } TAIL` is
 /// `if (!c) { TAIL } BODY TAIL`, the error path a compiler laid out once
 /// for several checks written as a guard per check, as the source did.
@@ -99,7 +100,7 @@ pub(super) fn flattens(list: &mut Vec<Stmt>, f: &Facts<'_>) -> bool {
             Some(StmtKind::Return(_) | StmtKind::Goto(_) | StmtKind::Break | StmtKind::Continue)
         );
         let called = matches!(closing, Some(StmtKind::Expr(e)) if calls_out(e));
-        if copied && (!fatal || called || ends(then, f)) {
+        if copied && (!fatal || called || !completes(then) || ends(then, f)) {
             continue;
         }
         let end = k + 2 + n;
@@ -117,4 +118,37 @@ pub(super) fn flattens(list: &mut Vec<Stmt>, f: &Facts<'_>) -> bool {
         return true;
     }
     false
+}
+
+/// Tells whether control plainly runs off the end of a list: it is empty,
+/// or its last statement is an expression, an `if` with no `else`, an
+/// `if` with an arm that runs off its end, or a block that does.
+///
+/// Any other last statement, a loop, a `switch`, a jump, a raw line or a
+/// guarded region, says no: whether control leaves it at its end is not
+/// shown here, and [`ends`] proves only the other way.
+///
+/// # Arguments
+///
+/// * `list` - The statements.
+fn completes(list: &[Stmt]) -> bool {
+    let Some(s) = list.iter().rfind(|s| !idle(s)) else {
+        return true;
+    };
+    if let StmtKind::Block(b) = &s.kind {
+        return completes(b);
+    }
+    if let StmtKind::If {
+        then,
+        other: Some(other),
+        ..
+    } = &s.kind
+    {
+        return completes(then)
+            || match other {
+                Else::Block(b) => completes(b),
+                Else::If(next) => completes(std::slice::from_ref(next)),
+            };
+    }
+    matches!(s.kind, StmtKind::Expr(_) | StmtKind::If { other: None, .. })
 }
