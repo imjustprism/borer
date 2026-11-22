@@ -87,8 +87,11 @@ fn folders() -> PathBuf {
     paths::data_dir().join("claude-code")
 }
 
-/// Removes every folder in `root`, as sessions leave them when their child had not yet
-/// exited as they dropped; one still in use stays.
+/// Removes the folders in `root` whose owning process has ended, as sessions leave them when
+/// their child had not yet exited as they dropped.
+///
+/// A folder is named by the process that made it ([`Folder::new`]); one of this process, of
+/// a process that still runs, or of a name that is not a process id stays.
 fn sweep(root: &Path) {
     if borer_engine::program::unusable_path(root).is_some() {
         return;
@@ -101,7 +104,38 @@ fn sweep(root: &Path) {
         return;
     };
     for entry in entries.flatten() {
-        std::fs::remove_dir_all(entry.path()).unwrap_or(());
+        let name = entry.file_name();
+        let owner = name
+            .to_str()
+            .and_then(|n| n.split('-').next()?.parse::<u32>().ok());
+        if owner.is_some_and(|pid| pid != std::process::id() && gone(pid)) {
+            std::fs::remove_dir_all(entry.path()).unwrap_or(());
+        }
+    }
+}
+
+/// Returns whether the process `pid` has ended, as the system's own tool says: `tasklist`
+/// on Windows, `kill -0` elsewhere; false when the tool does not answer.
+///
+/// `tasklist` filtered to `pid` lists one row holding the id while the process runs, and
+/// only a note holding no such word once it has ended.
+fn gone(pid: u32) -> bool {
+    if cfg!(windows) {
+        let listed = util::command::new_std_command("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+            .output();
+        let id = pid.to_string();
+        listed.is_ok_and(|out| {
+            out.status.success()
+                && !String::from_utf8_lossy(&out.stdout)
+                    .split_whitespace()
+                    .any(|word| word == id)
+        })
+    } else {
+        let probed = util::command::new_std_command("kill")
+            .args(["-0", &pid.to_string()])
+            .status();
+        probed.is_ok_and(|status| !status.success())
     }
 }
 
@@ -660,30 +694,13 @@ mod tests {
         }
         let session = super::Session::launch(command, None, &cx.executor()).unwrap();
         let pid = session.pid.unwrap();
-        assert!(alive(pid));
+        assert!(!super::gone(pid));
         drop(session);
         let gone = (0..100).any(|_| {
             std::thread::sleep(std::time::Duration::from_millis(100));
-            !alive(pid)
+            super::gone(pid)
         });
         assert!(gone, "process {pid} outlived its session");
-    }
-
-    /// Returns whether a process `pid` runs, as the system's own tool lists it.
-    fn alive(pid: u32) -> bool {
-        if cfg!(windows) {
-            let listed = util::command::new_std_command("tasklist")
-                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-                .output()
-                .unwrap();
-            String::from_utf8_lossy(&listed.stdout).contains(&pid.to_string())
-        } else {
-            util::command::new_std_command("kill")
-                .args(["-0", &pid.to_string()])
-                .status()
-                .unwrap()
-                .success()
-        }
     }
 
     /// A turn's tool answers are capped below what an echoed line may hold, with no byte
@@ -696,8 +713,11 @@ mod tests {
         assert!(super::ANSWERS_MAX.saturating_mul(6) < super::LINE_MAX);
     }
 
-    /// A session's working folder is new and empty, gone once it drops, and a folder left
-    /// behind is swept.
+    /// A session's working folder is new and empty, and gone once it drops.
+    ///
+    /// A sweep removes a folder of an ended process (4194303: odd, so never a Windows id, and
+    /// past macOS's and Linux's usual range) and keeps one of this process and one not named
+    /// by a process.
     #[test]
     fn a_working_folder_is_private_and_removed() {
         let root = std::env::temp_dir().join(format!("borer-cc-test-{}", std::process::id()));
@@ -715,11 +735,16 @@ mod tests {
         let gone = one.0.clone();
         drop(one);
         assert!(!is_dir(&gone));
-        drop(two);
-        let left = root.join("left");
-        std::fs::create_dir(&left).unwrap();
+        let mine = two.0.clone();
+        let dead = root.join("4194303-0");
+        let unnamed = root.join("left");
+        std::fs::create_dir(&dead).unwrap();
+        std::fs::create_dir(&unnamed).unwrap();
         super::sweep(&root);
-        assert!(!is_dir(&left));
+        assert!(!is_dir(&dead), "a folder of an ended process is swept");
+        assert!(is_dir(&mine), "a folder of this process stays");
+        assert!(is_dir(&unnamed), "a folder not named by a process stays");
+        drop(two);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
