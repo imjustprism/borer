@@ -45,6 +45,9 @@ use crate::program::{Program, SymbolKind};
 /// Rounds of gap guessing: a guess the walks found after it show to be
 /// data is dropped, and the code it hid is guessed at again.
 const GAP_ROUNDS: usize = 2;
+/// Rounds of tail-call promotion ([`outlines`]): a promoted block walked as
+/// a function of its own can tail-call on into another.
+const OUTLINE_ROUNDS: usize = 4;
 /// Most instructions one walk decodes.
 const WALK_MAX: usize = 1 << 18;
 /// Most instructions one walk from a guess decodes: a guess into data can
@@ -1576,18 +1579,22 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         guess::gaps(program, &mut walks);
         guess::drop_inner(program, &mut walks);
     }
-    outlines(&mut walks);
-    let redo: Vec<u64> = walks
-        .walked
-        .iter()
-        .filter(|(e, w)| {
-            w.followed
-                .iter()
-                .any(|t| t != *e && walks.starts.contains(t))
-        })
-        .map(|(e, _)| *e)
-        .collect();
-    walks.redo(program, redo);
+    for round in 0..OUTLINE_ROUNDS {
+        if !outlines(&mut walks) && round > 0 {
+            break;
+        }
+        let redo: Vec<u64> = walks
+            .walked
+            .iter()
+            .filter(|(e, w)| {
+                w.followed
+                    .iter()
+                    .any(|t| t != *e && walks.starts.contains(t))
+            })
+            .map(|(e, _)| *e)
+            .collect();
+        walks.redo(program, redo);
+    }
     let Walks {
         walked, incomplete, ..
     } = walks;
@@ -1636,24 +1643,33 @@ pub(crate) fn discover(program: &Program) -> Analysis {
 
 /// Promotes a tail call that was walked as a block of its caller.
 ///
-/// The block is one straight run that returns without touching the stack
-/// pointer, so it is not the caller's own epilogue. Nothing but one
-/// unconditional jump reaches it, and another function already starts
-/// between the caller and the block. The caller is walked again and the
-/// jump becomes a tail call.
+/// Nothing but one unconditional jump reaches the block, and it lies
+/// before the caller's entry or past another function's start. It is a
+/// tail call when it is one straight run that returns without touching
+/// the stack pointer, so not the caller's own epilogue
+/// ([`straight_return`]), or when the jump comes right after a `pop`, so
+/// the caller's frame is gone ([`after_pop`]). The caller is walked again
+/// and the jump becomes a tail call.
 ///
 /// # Arguments
 ///
 /// * `walks` - The walks, updated in place.
-fn outlines(walks: &mut Walks<'_>) {
+///
+/// # Returns
+///
+/// Whether a block was promoted.
+fn outlines(walks: &mut Walks<'_>) -> bool {
     let mut promote = Vec::new();
     for (&entry, w) in &walks.walked {
         let mut pred = None;
         for &t in &w.followed {
-            if t > entry
-                && !walks.starts.contains(&t)
-                && walks.starts.range((entry + 1)..t).next().is_some()
-                && straight_return(w, t, pred.get_or_insert_with(|| predecessors(w)))
+            if t == entry || walks.starts.contains(&t) {
+                continue;
+            }
+            let stepped = t > entry && walks.starts.range((entry + 1)..t).next().is_some();
+            let pred = pred.get_or_insert_with(|| predecessors(w));
+            if (stepped && straight_return(w, t, pred))
+                || ((stepped || t < entry) && after_pop(w, t, pred))
             {
                 promote.push(t);
             }
@@ -1661,10 +1677,64 @@ fn outlines(walks: &mut Walks<'_>) {
     }
     promote.sort_unstable();
     promote.dedup();
+    let promoted = !promote.is_empty();
     for t in promote {
         walks.starts.insert(t);
         walks.guessed.insert(t);
     }
+    promoted
+}
+
+/// Tells whether `t` is reached only by an unconditional jump that a
+/// `pop` falls into.
+///
+/// A compiler pops a frame on the way out: a jump after the pop leaves the
+/// function with the caller's stack and return address back in place, a
+/// tail call (`pop {r4, lr}; b f`, or a leaf's `ldr r4, [sp], #4; b f`).
+///
+/// # Arguments
+///
+/// * `w` - The walk that contains `t`.
+/// * `t` - The address the jump targets.
+/// * `pred` - Each address's single predecessor ([`predecessors`]).
+fn after_pop(w: &Walked, t: u64, pred: &BTreeMap<u64, Option<u64>>) -> bool {
+    let single = |va: u64| {
+        pred.get(&va)
+            .copied()
+            .flatten()
+            .and_then(|p| w.seen.get(&p))
+    };
+    let Some(jump) = single(t) else {
+        return false;
+    };
+    let Some(pop) = single(jump.va) else {
+        return false;
+    };
+    let popped = match pop.op {
+        Op::Ldm {
+            rn: a32::SP,
+            regs,
+            wback: true,
+            ..
+        } => regs & (1 << 15) == 0,
+        Op::Load {
+            rt,
+            addr:
+                a32::Addr {
+                    base: a32::SP,
+                    offset: Offset::Imm(step),
+                    index: Index::Post,
+                },
+            ..
+        } => rt != PC && step > 0,
+        _ => false,
+    };
+    popped
+        && jump.flow() == Flow::Jump
+        && jump.target() == Some(t)
+        && !jump.predicated()
+        && !pop.predicated()
+        && pop.next() == jump.va
 }
 
 /// The one instruction that falls or jumps to each address in a walk, or

@@ -394,6 +394,71 @@ fn a_jump_past_another_function_is_a_tail_call() {
     assert!(jumper.blocks.iter().all(|b| b.start != ELF_TEXT + 0xc));
 }
 
+/// A jump right after a `pop` is a tail call.
+///
+/// What it reaches need not return in one straight run: `pop {r4, lr}; b
+/// f` and a leaf's `ldr r4, [sp], #4; b g` each leave the frame behind,
+/// past another function, and each target is a function.
+#[test]
+fn a_jump_after_a_pop_is_a_tail_call() {
+    let text: [u16; 22] = [
+        0xb510, // ASM: push {r4, lr}
+        0x2401, // ASM: movs r4, #1
+        0xe8bd, 0x4010, // ASM: pop.w {r4, lr}
+        0xe00a, // ASM: b 0x20
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0x2800, // ASM: cmp r0, #0
+        0xd001, // ASM: beq 0x18
+        0x2003, // ASM: movs r0, #3
+        0x4770, // ASM: bx lr
+        0x2004, // ASM: movs r0, #4
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0xb410, // ASM: push {r4}
+        0x2401, // ASM: movs r4, #1
+        0xf85d, 0x4b04, // ASM: ldr.w r4, [sp], #4
+        0xe7f2, // ASM: b 0x10
+        0xbf00, // ASM: nop
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("pop.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 0xa, 0x10, 0x20]);
+    let caller = a.function_at(ELF_TEXT).expect("the caller");
+    assert!(caller.blocks.iter().all(|b| b.start < ELF_TEXT + 0xa));
+}
+
+/// A block a conditional jump enters, which jumps back with the frame
+/// still up, stays in its function past another one: a cold block.
+#[test]
+fn a_cold_block_without_a_pop_stays_with_its_caller() {
+    let text: [u16; 10] = [
+        0xb510, // ASM: push {r4, lr}
+        0x2800, // ASM: cmp r0, #0
+        0xd004, // ASM: beq 0x10
+        0xbd10, // ASM: pop {r4, pc}
+        0x2002, // ASM: movs r0, #2
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xbf00, // ASM: nop
+        0x2001, // ASM: movs r0, #1
+        0xe7f8, // ASM: b 0x6
+    ];
+    let bytes: Vec<u8> = text.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("cold.elf"), elf32(&bytes, &[], ELF_TEXT | 1))
+        .expect("parses");
+    let a = Analysis::compute(&p);
+    let entries: Vec<u64> = a.functions.iter().map(|f| f.entry - ELF_TEXT).collect();
+    assert_eq!(entries, [0, 8]);
+    let caller = a.function_at(ELF_TEXT).expect("the caller");
+    assert!(caller.blocks.iter().any(|b| b.start == ELF_TEXT + 0x10));
+}
+
 /// A `pop` of the registers the caller pushed stays in that caller when
 /// the `pop` is laid out past another function.
 #[test]
