@@ -550,13 +550,13 @@ fn the_whole_export_states_each_declaration_once() {
     }
 }
 
-/// A called function over the size a caller reads through the memo is
-/// rendered once in a whole export.
+/// A called function over the size a caller reads through the memo keeps
+/// its ABI prototype in an export of its caller alone.
 ///
-/// Its caller's declaration of it comes from the text the export writes,
-/// kept once, and states the head the file defines it under.
+/// Its signature is not read, so that export decompiles no large callee
+/// only for one line.
 #[test]
-fn a_large_callee_is_rendered_once_for_its_caller_and_the_file() {
+fn a_large_callee_keeps_its_abi_prototype() {
     let mut code = vec![0x48, 0x83, 0xec, 0x28]; // ASM: sub rsp, 0x28 (caller)
     code.extend([0xe8, 0x07, 0x00, 0x00, 0x00]); // ASM: call large
     code.extend([0x48, 0x83, 0xc4, 0x28, 0xc3]); // ASM: add rsp, 0x28; ret
@@ -568,17 +568,13 @@ fn a_large_callee_is_rendered_once_for_its_caller_and_the_file() {
     let mut p = crate::raw::image(Arch::X86_64, &code, &[]);
     p.format = BinaryFormat::Pe;
     let a = Analysis::compute(&p);
-    let file = exported_file(&p, &a, &Overlay::default(), None);
-    assert_eq!(a.derived.held("export_named"), 1, "{file}");
-    let large = TEXT + 0x10;
-    let head = file
-        .lines()
-        .find(|l| {
-            l.contains(&format!("sub_{large:x}(")) && !l.ends_with(';') && !l.starts_with("//")
-        })
-        .unwrap_or_else(|| panic!("the large function is defined: {file}"));
+    let only = std::collections::BTreeSet::from([TEXT]);
+    let file = exported_file(&p, &a, &Overlay::default(), Some(&only));
+    let large = format!("sub_{:x}", TEXT + 0x10);
+    let decls = declarations_of(&file, &large);
+    assert!(!decls.is_empty(), "{large} is declared: {file}");
     assert!(
-        file.lines().any(|l| l.trim() == format!("extern {head};")),
-        "{head} in {file}"
+        decls.iter().all(|d| !d.contains(" a1")),
+        "an ABI prototype names no parameter: {decls:?}"
     );
 }
