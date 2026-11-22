@@ -474,6 +474,19 @@ fn an_export_of_one_entry_declares_its_tail_callee() {
     assert_eq!(ways, [format!("{head};")], "its own signature: {file}");
 }
 
+/// A function the C implementation's names reserve (`__twice`, as
+/// MinGW's `__main`) gets no declaration from its own signature when the
+/// text names it undeclared.
+#[test]
+fn an_implementation_named_tail_callee_gets_no_declaration() {
+    let mut p = named_image();
+    p.symbols[1].name = "__twice".to_owned();
+    let only = std::collections::BTreeSet::from([TEXT]);
+    let file = exported_file(&p, &Analysis::compute(&p), &Overlay::default(), Some(&only));
+    assert!(file.contains("__twice(7)"), "{file}");
+    assert!(declarations_of(&file, "__twice").is_empty(), "{file}");
+}
+
 /// A data symbol one function names by its address is not declared by
 /// the export, since the file would hoist that declaration above a
 /// function that reads the name itself.

@@ -669,7 +669,7 @@ fn declaration(
 ///
 /// * `name` - The function's name.
 /// * `format` - The binary's format, which picks the platform.
-fn implementation_named(name: &str, format: crate::program::BinaryFormat) -> bool {
+pub(super) fn implementation_named(name: &str, format: crate::program::BinaryFormat) -> bool {
     name.starts_with('_')
         || LIBC.split_whitespace().any(|n| n == name)
         || crate::analysis::typelib::declared(name, format).is_some()

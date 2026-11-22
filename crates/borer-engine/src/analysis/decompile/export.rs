@@ -888,7 +888,8 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// pointer, says so in its own text, and the file defines it under that
 /// signature. A callee the text names without a declaration (a tail call,
 /// a function passed by address) is declared the same way, unless
-/// [`super::unit::declarable`] refuses its name. Where the text
+/// [`super::unit::declarable`] refuses its name or it belongs to the C
+/// implementation ([`super::unit::implementation_named`], `__main`). Where the text
 /// contradicts the callee's signature ([`super::unit::own_prototype`]),
 /// the signature is still the declaration, and a `// warn:` line at the
 /// top of the body says each way the text disagrees. A callee with no
@@ -961,10 +962,10 @@ fn own_callees(
                 out.push('\n');
             }
             let ix = super::unit::index(program, analysis, overlay);
-            for name in undeclared
-                .iter()
-                .filter(|n| super::unit::declarable(n, &ix))
-            {
+            for name in undeclared.iter().filter(|n| {
+                super::unit::declarable(n, &ix)
+                    && !super::unit::implementation_named(n, program.format)
+            }) {
                 if let Some(g) = own(name).filter(|&g| !stub(g)) {
                     declare(name, g, &mut out, &mut notes);
                 }
