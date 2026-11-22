@@ -567,7 +567,7 @@ fn read_signature(text: &str) -> Option<Signature> {
         Some((pre, rest)) => (pre, rest.trim()),
         None => {
             let head = head.trim_end();
-            let name = last_token(head);
+            let name = last_token(head).trim_start_matches(['*', '&']);
             (head.get(..head.len() - name.len()).unwrap_or(""), name)
         }
     };
@@ -577,7 +577,7 @@ fn read_signature(text: &str) -> Option<Signature> {
     {
         return None;
     }
-    if conv.is_none() && !declares(head, &name, params, |_| false) {
+    if conv.is_none() && (!declares(head, &name, params, |_| false) || expression(ret_raw, &name)) {
         return None;
     }
     let ret_core = ret_raw.trim().trim_start_matches("const ").trim_start();
@@ -669,6 +669,37 @@ fn declares(head: &str, name: &str, params: &str, bound: impl Fn(&str) -> bool) 
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || " _*&,:<>[]".contains(c));
     (2..=4).contains(&words.len()) && typed && type_like
+}
+
+/// Tells whether a convention-less head reads as an expression around a
+/// call, an assert's condition text, rather than a declaration.
+///
+/// GCC and Clang write a return type before every name but a
+/// constructor's, a destructor's and a conversion operator's, so
+/// `thread_util::IsMainThread()` is a call; and a return type spells no
+/// operator, so `ok && ns::Ready()` and `n == ns::Count()` are
+/// comparisons. A reference or pointer return keeps its `&` or `*` beside
+/// the type or the name (`Foo &ns::Get()`, `Foo&& ns::Take()`), never with a
+/// space on both sides.
+///
+/// # Arguments
+///
+/// * `ret` - The text before the name, as the head spells it.
+/// * `name` - The name, elaborated-type keywords dropped.
+fn expression(ret: &str, name: &str) -> bool {
+    if ret.trim().is_empty() {
+        let special = class_of(name).is_some_and(|class| {
+            let method = name.get(class.len() + 2..).unwrap_or("");
+            let stem = |s: &str| {
+                let s = s.split('<').next().unwrap_or(s);
+                s.rsplit("::").next().unwrap_or(s).to_owned()
+            };
+            method.starts_with('~') || stem(method) == stem(class)
+        });
+        return !special && conversion_type(name).is_none();
+    }
+    ret.contains(['=', '!', '|', '?', '+', '"', '\''])
+        || [" && ", " & ", " * "].iter().any(|op| ret.contains(op))
 }
 
 /// Splits a signature at its parameter list.
@@ -1093,6 +1124,44 @@ mod tests {
             "Error in Net::open()",
             "Calling Net::Connect(%d)",
             "Net::Send(%zu bytes)",
+        ] {
+            assert!(parse_signature(text).is_none(), "{text}");
+        }
+    }
+
+    /// Clang's pointer and reference returns parse, a constructor,
+    /// destructor or conversion needs no return type, and assert condition
+    /// text, a call or an operator around one, names nothing.
+    ///
+    /// # Panics
+    ///
+    /// When a parse disagrees with its expectation.
+    #[test]
+    fn condition_text_is_no_signature() {
+        let s =
+            parse_signature("audio::SourceArray &audio::GetDefaultSourceArray(audio::SourceType)")
+                .expect("clang reference return");
+        assert_eq!(s.name, "audio::GetDefaultSourceArray");
+        assert_eq!(s.ret, "audio::SourceArray &");
+        assert!(!s.by_pointer);
+        let s = parse_signature("const char *Foo::Name() const").expect("clang pointer return");
+        assert_eq!(
+            (s.name.as_str(), s.ret.as_str()),
+            ("Foo::Name", "const char *")
+        );
+        let s = parse_signature("Foo&& ns::Take(Foo&&)").expect("gcc rvalue return");
+        assert_eq!(s.ret, "Foo&&");
+        for ctor in ["Foo::Foo(int)", "ns::Box<T>::Box()", "Foo::~Foo()"] {
+            assert!(parse_signature(ctor).is_some(), "{ctor}");
+        }
+        for text in [
+            "thread_util::IsMainThread()",
+            "ns::Find(key)",
+            "p->ns::Get()",
+            "ok && ns::Ready()",
+            "n == ns::Count()",
+            "!ns::Done()",
+            "a & ns::Mask()",
         ] {
             assert!(parse_signature(text).is_none(), "{text}");
         }
