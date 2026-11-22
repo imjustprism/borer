@@ -28,10 +28,11 @@ use borer_front::claude_code::{
     Event, LINE_MAX, Mcp, TURN_MAX_BYTES, answered, args, initialize, mcp, read, refuse, respond,
     user,
 };
+use futures::channel::mpsc;
 use futures::future::BoxFuture;
 use futures::io::{AsyncBufRead, AsyncBufReadExt as _, AsyncReadExt as _, AsyncWrite};
-use futures::{AsyncWriteExt as _, FutureExt as _};
-use gpui::{AsyncApp, WeakEntity};
+use futures::{AsyncWriteExt as _, FutureExt as _, SinkExt as _, StreamExt as _};
+use gpui::{AsyncApp, BackgroundExecutor, Task, WeakEntity};
 use language_model::{
     LanguageModel, LanguageModelClient, LanguageModelCompletionError,
     LanguageModelCompletionStream, LanguageModelRequest, LanguageModelToolUse,
@@ -149,16 +150,26 @@ fn find(path: &std::ffi::OsStr, name: &str) -> Option<PathBuf> {
         })
 }
 
-/// A running Claude Code and the pipes the app speaks to it over.
+/// One line as the reader heard it ([`hear`]): its length in bytes and what it means, or
+/// why reading stopped.
+type Heard = (usize, anyhow::Result<Event>);
+
+/// Most lines the reader holds read ahead of the turn.
+const AHEAD: usize = 8;
+
+/// A running Claude Code, the pipe the app writes to it over, and the lines its reader
+/// heard.
 pub(crate) struct Session {
     /// Its standard input.
-    to: Box<dyn AsyncWrite + Unpin>,
-    /// Its standard output.
-    from: Box<dyn AsyncBufRead + Unpin>,
+    to: Box<dyn AsyncWrite + Unpin + Send>,
+    /// What the reader heard of its standard output, in order.
+    lines: mpsc::Receiver<Heard>,
     /// What `--model` it was started with, `None` for its own choice.
     model: Option<String>,
+    /// Reads and parses its standard output on the background executor; dropped, it stops.
+    _reader: Task<()>,
     /// The child, killed when dropped.
-    _child: Box<dyn Any>,
+    _child: Box<dyn Any + Send>,
     /// Its working folder, removed after the child is dropped; `None` for a fake child.
     _folder: Option<Folder>,
 }
@@ -173,12 +184,26 @@ impl std::fmt::Debug for Session {
 
 impl Session {
     /// Starts the `claude` program [`probe`] found with the chat's flags ([`args`]) in a
-    /// new working folder of its own ([`Folder`]).
+    /// new working folder of its own ([`Folder`]), off the UI thread.
     ///
     /// # Errors
     ///
     /// Returns that no `claude` was found, or that it did not start or gave no pipe.
-    fn start(model: Option<&str>) -> anyhow::Result<Self> {
+    async fn start(model: Option<String>, cx: &AsyncApp) -> anyhow::Result<Self> {
+        let executor = cx.background_executor();
+        let spawning = executor.clone();
+        executor
+            .spawn(async move { Self::spawn(model.as_deref(), &spawning) })
+            .await
+    }
+
+    /// Spawns the child [`Self::start`] starts; it creates a process and a folder, so it is
+    /// called on the background executor.
+    ///
+    /// # Errors
+    ///
+    /// Returns that no `claude` was found, or that it did not start or gave no pipe.
+    fn spawn(model: Option<&str>, executor: &BackgroundExecutor) -> anyhow::Result<Self> {
         let program = program().with_context(|| format!("no {NAME} was found on PATH"))?;
         let folder = Folder::new(&folders())?;
         let mut command = util::command::new_command(program);
@@ -204,28 +229,28 @@ impl Session {
             .stdout
             .take()
             .context("Claude Code gave no output pipe")?;
+        let from = futures::io::BufReader::new(from);
         Ok(Self {
             _folder: Some(folder),
-            ..Self::over(
-                futures::io::BufReader::new(from),
-                to,
-                Box::new(child),
-                model,
-            )
+            ..Self::over(from, to, Box::new(child), model, executor)
         })
     }
 
-    /// Returns a session over the pipes `from` and `to`; dropping it drops `child`.
+    /// Returns a session over the pipes `from` and `to`, whose reader runs on `executor`;
+    /// dropping it drops `child`.
     pub(crate) fn over(
-        from: impl AsyncBufRead + Unpin + 'static,
-        to: impl AsyncWrite + Unpin + 'static,
-        child: Box<dyn Any>,
+        from: impl AsyncBufRead + Unpin + Send + 'static,
+        to: impl AsyncWrite + Unpin + Send + 'static,
+        child: Box<dyn Any + Send>,
         model: Option<&str>,
+        executor: &BackgroundExecutor,
     ) -> Self {
+        let (heard, lines) = mpsc::channel(AHEAD);
         Self {
             to: Box::new(to),
-            from: Box::new(from),
+            lines,
             model: model.map(str::to_owned),
+            _reader: executor.spawn(hear(from, heard)),
             _child: child,
             _folder: None,
         }
@@ -243,39 +268,48 @@ impl Session {
             .context("Claude Code stopped reading; it may have ended")
     }
 
-    /// Reads the next line, at most [`LINE_MAX`] bytes and the `left` bytes the turn has.
+    /// Returns what the next line Claude Code wrote means, within [`within`]'s wait, taking
+    /// its bytes from the `left` the turn has.
     ///
     /// # Errors
     ///
-    /// Returns that Claude Code ended, wrote too much, or wrote what is not UTF-8.
-    async fn line(&mut self, left: &mut usize) -> anyhow::Result<String> {
-        let cap = LINE_MAX.min(*left);
-        let mut line = Vec::new();
-        (&mut self.from)
-            .take(u64::try_from(cap.saturating_add(1)).unwrap_or(u64::MAX))
-            .read_until(b'\n', &mut line)
-            .await?;
-        anyhow::ensure!(
-            !line.is_empty(),
-            "Claude Code ended before the turn did; the next message starts a new Claude Code conversation"
-        );
-        anyhow::ensure!(
-            line.len() <= cap,
-            "Claude Code wrote more than {cap} bytes in a line or {TURN_MAX_BYTES} in a turn; the turn ended"
-        );
-        *left = left.saturating_sub(line.len());
-        let line = String::from_utf8(line).context("Claude Code wrote a line that is not UTF-8")?;
-        Ok(line.trim_end().to_owned())
-    }
-
-    /// Reads the next line Claude Code writes and what it means, within [`within`]'s wait.
-    ///
-    /// # Errors
-    ///
-    /// Returns that it went silent, ended, or wrote a line that does not read.
+    /// Returns that it went silent or ended, that the turn read more than
+    /// [`TURN_MAX_BYTES`], or why the line did not read ([`hear`]).
     async fn next(&mut self, left: &mut usize, cx: &AsyncApp) -> anyhow::Result<Event> {
-        let line = within(cx, WHO, self.line(left)).await??;
-        read(&line).map_err(anyhow::Error::msg)
+        let (len, heard) = within(cx, WHO, self.lines.next()).await?.context(ENDED)?;
+        *left = left.checked_sub(len).with_context(|| {
+            format!("Claude Code wrote more than {TURN_MAX_BYTES} bytes in a turn; the turn ended")
+        })?;
+        heard
+    }
+}
+
+/// What the person is told when Claude Code ends before its turn does.
+const ENDED: &str =
+    "Claude Code ended before the turn did; the next message starts a new Claude Code conversation";
+
+/// Reads Claude Code's standard output line by line, each at most [`LINE_MAX`] bytes, and
+/// sends what each means to the session, until the output ends, a line does not read or
+/// the session drops.
+async fn hear(mut from: impl AsyncBufRead + Unpin, mut heard: mpsc::Sender<Heard>) {
+    loop {
+        let mut line = Vec::new();
+        let cap = u64::try_from(LINE_MAX.saturating_add(1)).unwrap_or(u64::MAX);
+        let read_line = (&mut from).take(cap).read_until(b'\n', &mut line).await;
+        let said = match read_line {
+            Err(why) => Err(anyhow::Error::new(why).context("Claude Code's output broke")),
+            Ok(0) => Err(anyhow::anyhow!(ENDED)),
+            Ok(_) if line.len() > LINE_MAX => Err(anyhow::anyhow!(
+                "Claude Code wrote a line over {LINE_MAX} bytes; the turn ended"
+            )),
+            Ok(_) => std::str::from_utf8(&line)
+                .context("Claude Code wrote a line that is not UTF-8")
+                .and_then(|text| read(text.trim_end()).map_err(anyhow::Error::msg)),
+        };
+        let last = said.is_err();
+        if heard.send((line.len(), said)).await.is_err() || last {
+            return;
+        }
     }
 }
 
@@ -286,7 +320,7 @@ impl Session {
 ///
 /// Returns that it did not start, went silent, refused, or listed nothing.
 pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<Vec<Chosen>> {
-    let mut session = Session::start(None)?;
+    let mut session = Session::start(None, cx).await?;
     session.write(&initialize(LISTING)).await?;
     let mut left = TURN_MAX_BYTES;
     let models = loop {
@@ -380,7 +414,7 @@ pub(crate) async fn run_turn(
                     thread.note(said.to_owned(), cx);
                 })?;
             }
-            Session::start(model)?
+            Session::start(model.map(str::to_owned), cx).await?
         }
     };
     session.write(&user(&said.unwrap_or_default())).await?;
@@ -474,6 +508,23 @@ mod tests {
         let found = super::find(&with_absolute, "Cargo.toml").unwrap();
         assert!(found.is_absolute());
         assert_eq!(found, here.join("Cargo.toml"));
+    }
+
+    /// The reader parses each line apart from the UI thread and stops at the first that does
+    /// not read: here one over [`super::LINE_MAX`] bytes, after a line it heard.
+    #[test]
+    fn the_reader_parses_lines_and_stops_at_a_long_one() {
+        let done = r#"{"type":"result","subtype":"success","is_error":false}"#;
+        let long = "x".repeat(super::LINE_MAX + 10);
+        let out = format!("{done}\n{long}\n{done}\n");
+        let (heard, lines) = futures::channel::mpsc::channel(4);
+        let from = futures::io::BufReader::new(futures::io::Cursor::new(out.into_bytes()));
+        futures::executor::block_on(super::hear(from, heard));
+        let said: Vec<_> = futures::executor::block_on_stream(lines).collect();
+        assert_eq!(said.len(), 2);
+        assert!(matches!(&said[0].1, Ok(super::Event::Done(Ok(())))));
+        let why = format!("{:#}", said[1].1.as_ref().unwrap_err());
+        assert!(why.contains("over"), "{why}");
     }
 
     /// A session's working folder is new and empty, gone once it drops, and a folder left

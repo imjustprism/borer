@@ -1,12 +1,14 @@
 //! The Claude Code turn against a fake child: recorded stream lines fed through the pipes a
 //! real `claude` would hold, what the app writes back, and the child's end.
 
-use std::cell::{Cell, RefCell};
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 
-use futures::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, BufReader, Cursor};
+use futures::TryStreamExt as _;
+use futures::channel::mpsc;
+use futures::io::{AsyncWrite, BufReader};
 use gpui::{Entity, TestAppContext, VisualTestContext};
 use serde_json::{Value, json};
 
@@ -16,7 +18,10 @@ use super::super::thread::{Entry, Fault, Ran, Thread, Verdict};
 use super::{behind, chatting};
 
 /// What the app wrote to the fake child's input.
-type Written = Rc<RefCell<Vec<u8>>>;
+type Written = Arc<Mutex<Vec<u8>>>;
+
+/// Where a test writes the fake child's output, one chunk of bytes at a time.
+type Out = mpsc::UnboundedSender<std::io::Result<Vec<u8>>>;
 
 /// The fake child's input: keeps what is written.
 struct Sink(Written);
@@ -27,7 +32,7 @@ impl AsyncWrite for Sink {
         _: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<std::io::Result<usize>> {
-        self.0.borrow_mut().extend_from_slice(buf);
+        self.0.lock().unwrap().extend_from_slice(buf);
         Poll::Ready(Ok(buf.len()))
     }
 
@@ -40,25 +45,29 @@ impl AsyncWrite for Sink {
     }
 }
 
-/// An output that never writes again nor ends, as a child that hangs.
-struct Silent;
+/// Whether the fake child was dropped, as the real one is killed.
+#[derive(Clone, Default)]
+struct Flag(Arc<AtomicBool>);
 
-impl AsyncRead for Silent {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        _: &mut [u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Poll::Pending
+impl Flag {
+    /// Returns whether it was raised.
+    fn get(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
     }
 }
 
-/// The fake child itself: raises its flag when dropped, as the real one is killed.
-struct Child(Rc<Cell<bool>>);
+/// The fake child itself: raises its flag when dropped, and ends its output then when it
+/// holds it.
+struct Child {
+    /// Raised when it drops.
+    flag: Flag,
+    /// Its output, held open until it drops; `None` once it has ended.
+    _out: Option<Out>,
+}
 
 impl Drop for Child {
     fn drop(&mut self) {
-        self.0.set(true);
+        self.flag.0.store(true, Ordering::SeqCst);
     }
 }
 
@@ -67,8 +76,38 @@ impl Drop for Child {
 enum Then {
     /// It ends, as a child that exits.
     Ends,
-    /// It hangs.
+    /// It hangs until the child is dropped.
     Hangs,
+}
+
+/// Returns `lines`, each ended by a line break, as one chunk of the fake child's output.
+fn chunk(lines: &[String]) -> Vec<u8> {
+    lines
+        .iter()
+        .map(|l| format!("{l}\n"))
+        .collect::<String>()
+        .into_bytes()
+}
+
+/// Returns a session over a fake child holding `child`'s flag, writing what the test sends
+/// on the returned output, and what the app writes to it.
+fn fake_session(flag: &Flag, hangs: bool, cx: &mut VisualTestContext) -> (Session, Out, Written) {
+    let (out, output) = mpsc::unbounded();
+    let from = BufReader::new(output.into_async_read());
+    let written = Written::default();
+    let child = Box::new(Child {
+        flag: flag.clone(),
+        _out: hangs.then(|| out.clone()),
+    });
+    let executor = cx.executor();
+    let session = Session::over(
+        from,
+        Sink(written.clone()),
+        child,
+        Some("sonnet"),
+        &executor,
+    );
+    (session, out, written)
 }
 
 /// Returns a thread over the sample talking to Claude Code's model `sonnet` through a fake
@@ -80,32 +119,15 @@ fn with_child(
     script: impl FnOnce(u64) -> Vec<String>,
     then: Then,
     cx: &mut TestAppContext,
-) -> (
-    Entity<Thread>,
-    Written,
-    Rc<Cell<bool>>,
-    &mut VisualTestContext,
-) {
+) -> (Entity<Thread>, Written, Flag, &mut VisualTestContext) {
     let (app, thread, fake, model, cx) = chatting(None, cx);
     let entry = app
         .binary
         .read_with(cx, |b, _| b.loaded().unwrap().initial_rows.rows[0].entry);
-    let lines: String = script(entry).iter().map(|l| format!("{l}\n")).collect();
-    let (written, killed) = (Written::default(), Rc::new(Cell::new(false)));
-    let (out, child) = (
-        Cursor::new(lines.into_bytes()),
-        Box::new(Child(killed.clone())),
-    );
-    let sink = Sink(written.clone());
-    let session = match then {
-        Then::Ends => Session::over(BufReader::new(out), sink, child, Some("sonnet")),
-        Then::Hangs => Session::over(
-            BufReader::new(out.chain(Silent)),
-            sink,
-            child,
-            Some("sonnet"),
-        ),
-    };
+    let killed = Flag::default();
+    let (session, out, written) = fake_session(&killed, then == Then::Hangs, cx);
+    out.unbounded_send(Ok(chunk(&script(entry)))).unwrap();
+    drop(out);
     let chosen = behind(&fake, &model, (Offered::ClaudeCode, "claude"), "sonnet");
     thread.update(cx, |t, cx| {
         t.choose(chosen, cx);
@@ -133,7 +155,7 @@ const INIT: &str = r#"{"type":"system","subtype":"init","session_id":"s","mcp_se
 
 /// Returns each line the app wrote, as JSON.
 fn lines_of(written: &Written) -> Vec<Value> {
-    let bytes = written.borrow();
+    let bytes = written.lock().unwrap();
     std::str::from_utf8(&bytes)
         .unwrap()
         .lines()
