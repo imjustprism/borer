@@ -86,6 +86,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "claude_code"
+path = "fuzz_targets/claude_code.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "release"
 path = "fuzz_targets/release.rs"
 test = false
