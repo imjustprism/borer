@@ -52,8 +52,10 @@ const LISTING: &str = "borer-models";
 /// The context window the picker records for a Claude Code model, which manages its own.
 const WINDOW: u64 = 200_000;
 
-/// Returns the `claude` program on `PATH`, looked up once by file name alone: `claude.exe`
-/// on Windows, `claude` elsewhere. Nothing of Claude Code's is read to find it.
+/// Returns the `claude` program on `PATH`, looked up once by file name alone: the native
+/// installer's `claude.exe` on Windows, `claude` elsewhere. A `claude.cmd` alone is not
+/// found, so no Claude Code row is offered for it. Nothing of Claude Code's is read to find
+/// it.
 pub(crate) fn program() -> Option<&'static Path> {
     static FOUND: LazyLock<Option<PathBuf>> = LazyLock::new(|| {
         let name = if cfg!(windows) {

@@ -21,13 +21,19 @@ borer has no telemetry or crash reporting. Only these reach the network:
   turn's conversation (the person's messages, the tools' descriptions and
   the tool results, which quote the open binary) with the provider's key,
   following no redirect.
-- When the person picks Claude Code in the chat (offered only when a `claude`
-  program is on `PATH`), the app itself sends nothing over the network. It
-  starts that program on this machine, in the system's temporary folder,
-  with no built-in tool, none of the person's Claude Code customizations and
-  no saved session, and hands it each message over a pipe. Claude Code talks
-  to its own service with its own sign-in, under Anthropic's terms for it;
-  borer never reads its settings, credentials or tokens. Its tool calls come
+- When the person picks Claude Code in the chat, the app itself sends
+  nothing over the network. This mode runs the installed Claude Code command
+  line in its documented headless mode, under the person's own Claude Code
+  sign-in and terms; borer reads no Claude Code file or credential. It is
+  offered only when the program is on `PATH`, found by file name alone: on
+  Windows the native installer's `claude.exe` (a `claude.cmd` from npm is not
+  detected, and no row is shown for it), elsewhere `claude`. The app starts
+  it on this machine, in the system's temporary folder, with no built-in
+  tool and no saved session, and hands it each message over a pipe. It runs
+  in Claude Code's safe mode, so none of the person's Claude Code hooks,
+  skills, plugins or CLAUDE.md files run or load: text from the binary
+  reaches the model, and nothing configured for other work may act on it.
+  Its tool calls come
   back over the same pipe and are answered by the app's tools, so what it
   sends holds the person's messages and the tool answers, which quote the
   open binary. Picking it starts the program once to list its models: no
