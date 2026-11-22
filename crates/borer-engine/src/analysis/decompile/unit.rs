@@ -1339,8 +1339,9 @@ pub(super) fn declare_globals(text: &str, undeclared: &[String]) -> String {
 /// declarations names.
 ///
 /// The declarations are a line declaring a global (`// @ 0x`) or starting
-/// `extern ` or `static `, the signature (the parameters) and the lines
-/// before the body (the locals, types and macros).
+/// `extern ` or `static `, the signature (the parameters), the lines
+/// before the body (the locals, types and macros) and an inner block's
+/// locals.
 ///
 /// The declared names are gathered once into a set, so the cost is one
 /// pass over the text however many words and declarations it holds.
@@ -1357,7 +1358,8 @@ pub(super) fn undeclared_words(text: &str) -> Vec<String> {
         .filter_map(|(i, l)| {
             let declares = (comments..head).contains(&i)
                 || l.contains("// @ 0x")
-                || ["extern ", "static "].iter().any(|p| l.starts_with(p));
+                || ["extern ", "static "].iter().any(|p| l.starts_with(p))
+                || block_local(l);
             l.strip_prefix("// signature: ")
                 .or_else(|| declares.then(|| code_of(l)))
         })
@@ -1369,12 +1371,30 @@ pub(super) fn undeclared_words(text: &str) -> Vec<String> {
         .collect()
 }
 
+/// Tells whether a body line declares locals of an inner block
+/// (`  uint32_t x, *y;`), and is no statement such as `return x;`.
+///
+/// # Arguments
+///
+/// * `line` - One line of the body.
+fn block_local(line: &str) -> bool {
+    vars::declaration(line.trim()).is_some_and(|(ty, _)| {
+        !matches!(
+            ty.split(' ').next(),
+            Some("return" | "goto" | "case" | "else" | "do" | "break" | "continue")
+        )
+    })
+}
+
 /// Tells whether an exported file may declare a name of the binary's.
 ///
 /// It may not when C or the prelude's headers already give the name a
-/// meaning (a keyword, `NULL`, a type, a C library function, a macro of
-/// `<stdint.h>`, `<stdlib.h>` or `<math.h>`), or when both a function and
-/// a data symbol bear it: the text does not say which it names.
+/// meaning (a keyword of any C standard, `NULL`, a type, a C standard
+/// library function, a macro of `<stdint.h>`, `<stdlib.h>` or
+/// `<math.h>`), or when both a function and a data symbol bear it: the
+/// text does not say which it names. A name a platform's headers declare
+/// beyond the C standard library (POSIX `index` in `<string.h>`) is not
+/// known here, so such a clash is still possible.
 ///
 /// # Arguments
 ///
@@ -1404,6 +1424,7 @@ pub(super) fn declarable(name: &str, ix: &Index) -> bool {
         .strip_prefix("INT")
         .is_some_and(|r| r.ends_with("_MAX") || r.ends_with("_MIN") || r.ends_with("_C"));
     let reserved = cir::KEYWORDS.contains(&name)
+        || cir::LATER_KEYWORDS.contains(&name)
         || C_WORDS.contains(&name)
         || MACROS.contains(&name)
         || limit
@@ -1678,11 +1699,18 @@ mod tests {
             "INT32_MAX",
             "size_t",
             "EXIT_FAILURE",
+            "inline",
+            "bool",
+            "true",
+            "static_assert",
+            "_Bool",
         ] {
             assert!(!declarable(name, &ix), "{name}");
         }
         assert!(declarable("handlers", &ix));
         assert!(declarable("other", &ix));
+        let block = "// f @ 0x10\n// signature: void f(void)\n\nif (g()) {\n  uint32_t inner, *p;\n  inner = h(p);\n}\nreturn;\n";
+        assert_eq!(undeclared_words(block), ["if", "g", "h", "return"]);
     }
 
     /// A text's undeclared words leave out each name a declaration line

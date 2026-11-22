@@ -92,6 +92,45 @@ pub(super) const KEYWORDS: [&str; 32] = [
     "volatile", "while",
 ];
 
+/// The keywords C99, C11 and C23 add, with the names `<stdbool.h>`
+/// defines.
+///
+/// None is a name the export may declare for the binary. [`Ident::new`]
+/// still takes them, as texts the lifter builds spell `bool`, `true` and
+/// `false` as identifiers.
+pub(super) const LATER_KEYWORDS: [&str; 30] = [
+    "inline",
+    "restrict",
+    "_Bool",
+    "_Complex",
+    "_Imaginary",
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_Generic",
+    "_Noreturn",
+    "_Static_assert",
+    "_Thread_local",
+    "_BitInt",
+    "_Decimal32",
+    "_Decimal64",
+    "_Decimal128",
+    "alignas",
+    "alignof",
+    "bool",
+    "constexpr",
+    "false",
+    "nullptr",
+    "static_assert",
+    "thread_local",
+    "true",
+    "typeof",
+    "typeof_unqual",
+    "__int128",
+    "asm",
+    "_Pragma",
+];
+
 impl Ident {
     /// Builds an identifier from its text.
     ///
