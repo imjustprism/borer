@@ -268,8 +268,7 @@ fn an_edit_waits_as_a_proposal(cx: &mut TestAppContext) {
     assert!(text.contains("proposed, not applied"), "{text}");
 }
 
-/// Stop kills the child of a turn that hangs, and the next message says Claude Code starts
-/// over.
+/// Stop kills the child of a turn that hangs.
 #[gpui::test]
 fn stop_kills_the_child(cx: &mut TestAppContext) {
     let (thread, _, killed, cx) = with_child(|_| vec![INIT.to_owned()], Then::Hangs, cx);
@@ -392,4 +391,80 @@ fn a_child_that_stops_reading_ends_the_turn(cx: &mut TestAppContext) {
     };
     assert!(said.contains("no word from Claude Code"), "{said}");
     assert!(killed.get());
+}
+
+/// Returns the notice that Claude Code starts a new conversation, as the thread shows it.
+const ANEW: &str = "a new Claude Code conversation: it does not see the earlier turns";
+
+/// After Stop, the next message says Claude Code starts a new conversation that does not see
+/// the earlier turns, then starts one; a test build finds no `claude`, so it says that.
+#[gpui::test]
+fn the_message_after_stop_starts_a_new_conversation(cx: &mut TestAppContext) {
+    let (thread, _, killed, cx) = with_child(|_| vec![INIT.to_owned()], Then::Hangs, cx);
+    thread.update(cx, |t, cx| t.send("Look".to_owned(), cx));
+    cx.run_until_parked();
+    thread.update(cx, Thread::stop);
+    thread.update(cx, |t, cx| t.send("Again".to_owned(), cx));
+    cx.run_until_parked();
+    assert!(killed.get());
+    let entries = thread.read_with(cx, |t, _| t.entries().to_vec());
+    assert!(
+        entries.contains(&Entry::Notice(ANEW.to_owned())),
+        "{entries:?}"
+    );
+    let Some(Entry::Error(said)) = entries.last() else {
+        panic!("no banner: {entries:?}")
+    };
+    assert!(said.contains("was found on PATH"), "{said}");
+}
+
+/// Another model of Claude Code kills the child the last turn kept, and the next message
+/// says the new conversation does not see the earlier turns.
+#[gpui::test]
+fn another_model_restarts_claude_code(cx: &mut TestAppContext) {
+    let (thread, _, killed, cx) =
+        with_child(|_| vec![says("one"), DONE.to_owned()], Then::Hangs, cx);
+    thread.update(cx, |t, cx| t.send("First".to_owned(), cx));
+    cx.run_until_parked();
+    assert!(thread.read_with(cx, |t, _| t.claude.is_some()) && !killed.get());
+    thread.update(cx, |t, cx| {
+        let mut opus = t.chosen().unwrap().clone();
+        opus.model.id = "opus".to_owned().into();
+        t.choose(opus, cx);
+        t.send("Second".to_owned(), cx);
+    });
+    cx.run_until_parked();
+    assert!(killed.get());
+    let entries = thread.read_with(cx, |t, _| t.entries().to_vec());
+    assert!(
+        entries.contains(&Entry::Notice(ANEW.to_owned())),
+        "{entries:?}"
+    );
+}
+
+/// A turn whose tool answers spend the byte budget ends there with a budget banner, and its
+/// child is killed rather than kept.
+#[gpui::test]
+fn a_spent_budget_ends_the_turn_and_the_child(cx: &mut TestAppContext) {
+    let lines = vec![
+        tool_call("r1", "functions", &json!({})),
+        says("never"),
+        DONE.to_owned(),
+    ];
+    let (thread, _, killed, cx) = with_child(|_| lines, Then::Hangs, cx);
+    thread.update(cx, |t, cx| {
+        t.set_budget(Some(1));
+        t.send("List".to_owned(), cx);
+    });
+    cx.run_until_parked();
+    let (last, fault, kept) = thread.read_with(cx, |t, _| {
+        let at = t.entries().len() - 1;
+        (t.entries()[at].clone(), t.fault_at(at), t.claude.is_some())
+    });
+    let Entry::Error(said) = last else {
+        panic!("no banner: {last:?}")
+    };
+    assert!(said.contains("the turn ended"), "{said}");
+    assert_eq!(fault, Some(Fault::Spent));
+    assert!(killed.get() && !kept);
 }

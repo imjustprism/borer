@@ -70,9 +70,13 @@ pub(crate) fn program() -> Option<&'static Path> {
 /// Looks for the `claude` program on `PATH` once, by file name alone ([`find`]).
 ///
 /// It first removes the working folders earlier sessions left ([`sweep`]); later calls do
-/// nothing. It touches the disk, so it runs off the UI thread.
+/// nothing. It touches the disk, so it runs off the UI thread. A test build finds none, so
+/// no test ever starts the real Claude Code.
 pub(crate) fn probe() {
     FOUND.get_or_init(|| {
+        if cfg!(test) {
+            return None;
+        }
         sweep(&folders());
         find(&std::env::var_os("PATH")?, NAME)
     });
@@ -161,6 +165,8 @@ pub(crate) struct Session {
     lines: mpsc::Receiver<Heard>,
     /// What `--model` it was started with, `None` for its own choice.
     model: Option<String>,
+    /// The child's process id; `None` for a fake child.
+    pid: Option<u32>,
     /// Reads and parses its standard output on the background executor; dropped, it stops.
     _reader: Task<()>,
     /// The child, killed when dropped.
@@ -173,6 +179,7 @@ impl std::fmt::Debug for Session {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("model", &self.model)
+            .field("pid", &self.pid)
             .finish_non_exhaustive()
     }
 }
@@ -206,6 +213,22 @@ impl Session {
         for var in KEPT_FROM_CLAUDE_CODE {
             command.env_remove(var);
         }
+        Ok(Self {
+            _folder: Some(folder),
+            ..Self::launch(command, model, executor)?
+        })
+    }
+
+    /// Spawns `command` with its three pipes, killed when the session drops.
+    ///
+    /// # Errors
+    ///
+    /// Returns that it did not start or gave no pipe.
+    fn launch(
+        mut command: util::command::Command,
+        model: Option<&str>,
+        executor: &BackgroundExecutor,
+    ) -> anyhow::Result<Self> {
         let mut child = command
             .stdin(util::command::Stdio::piped())
             .stdout(util::command::Stdio::piped())
@@ -213,9 +236,10 @@ impl Session {
             .kill_on_drop(true)
             .spawn()
             .with_context(|| {
-                let at = one_line(&program.display().to_string());
+                let at = one_line(&command.get_program().to_string_lossy());
                 format!("Claude Code did not start from {at}")
             })?;
+        let pid = child.id();
         let to = child
             .stdin
             .take()
@@ -231,7 +255,7 @@ impl Session {
         let said = executor.spawn(tail(err));
         let from = futures::io::BufReader::new(from);
         Ok(Self {
-            _folder: Some(folder),
+            pid: Some(pid),
             ..Self::with(from, to, Box::new(child), model, executor, said)
         })
     }
@@ -265,6 +289,7 @@ impl Session {
             to: Box::new(to),
             lines,
             model: model.map(str::to_owned),
+            pid: None,
             _reader: executor.spawn(hear(from, heard, said)),
             _child: child,
             _folder: None,
@@ -607,6 +632,48 @@ mod tests {
         let long = "y".repeat(10_000);
         let kept = futures::executor::block_on(super::tail(futures::io::Cursor::new(long)));
         assert_eq!(kept.len(), super::TAIL);
+    }
+
+    /// Dropping a session kills its real child: a long-lived harmless program started the way
+    /// Claude Code is, through `util::command` with `kill_on_drop`, is gone once it drops.
+    #[gpui::test]
+    fn dropping_a_session_kills_its_child(cx: &mut gpui::TestAppContext) {
+        let mut command = if cfg!(windows) {
+            util::command::new_command("ping")
+        } else {
+            util::command::new_command("sleep")
+        };
+        if cfg!(windows) {
+            command.args(["-n", "60", "127.0.0.1"]);
+        } else {
+            command.arg("60");
+        }
+        let session = super::Session::launch(command, None, &cx.executor()).unwrap();
+        let pid = session.pid.unwrap();
+        assert!(alive(pid));
+        drop(session);
+        let gone = (0..100).any(|_| {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            !alive(pid)
+        });
+        assert!(gone, "process {pid} outlived its session");
+    }
+
+    /// Returns whether a process `pid` runs, as the system's own tool lists it.
+    fn alive(pid: u32) -> bool {
+        if cfg!(windows) {
+            let listed = util::command::new_std_command("tasklist")
+                .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&listed.stdout).contains(&pid.to_string())
+        } else {
+            util::command::new_std_command("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .unwrap()
+                .success()
+        }
     }
 
     /// A turn's tool answers are capped below what an echoed line may hold, with no byte
