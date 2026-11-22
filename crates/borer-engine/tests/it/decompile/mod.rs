@@ -37,6 +37,7 @@ mod solve;
 mod switches;
 mod thumb;
 mod values;
+mod variadic;
 
 /// Decompiles one fixture function with an empty overlay.
 ///

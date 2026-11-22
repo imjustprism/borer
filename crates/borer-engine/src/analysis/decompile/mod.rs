@@ -1596,36 +1596,18 @@ fn decompile_in<L: Lifter>(
         dataflow::<L>(&mut ctx, &code, &succs, &preds, &live, &edges);
     lap.end(crate::timing::Step::Lift);
 
-    let mut succs_live = succs.clone();
-    let mut preds_live = preds.clone();
-    for (b, rec) in recorded.iter().enumerate() {
-        let Some((taken, target, fall)) = rec.branch_const else {
-            continue;
-        };
-        let dead = if taken { fall } else { target };
-        let Some(d) = at(&dead) else { continue };
-        succs_live[b].retain(|s| *s != d);
-        preds_live[d].retain(|p| *p != b);
-    }
-    for (b, rec) in recorded.iter().enumerate() {
-        let Some(live) = rec
-            .switch_dest
-            .filter(|t| idx.contains_key(t))
-            .or_else(|| {
-                rec.switch_const
-                    .and_then(|k| blocks.get(b).and_then(|blk| table_target(analysis, blk, k)))
-            })
-            .and_then(|t| at(&t))
-        else {
-            continue;
-        };
-        for d in std::mem::replace(&mut succs_live[b], vec![live]) {
-            if d != live {
-                preds_live[d].retain(|p| *p != b);
-            }
-        }
-    }
-
+    let vector_saves =
+        L::vector_saves(&ctx, &code, &succs, &preds, entry_block).filter(|&(test, save)| {
+            recorded[test].branch_const.is_none() && unread_elsewhere(&recorded, save)
+        });
+    let (succs_live, preds_live) = live_edges(
+        analysis,
+        blocks,
+        &recorded,
+        (&succs, &preds),
+        at,
+        vector_saves,
+    );
     let starts = blocks
         .iter()
         .enumerate()
@@ -1646,6 +1628,7 @@ fn decompile_in<L: Lifter>(
         emitted: vec![false; n],
         dead: vec![false; n],
         twins,
+        vector_test: vector_saves.map(|(test, _)| test),
         bound: n,
         skipped: BTreeSet::new(),
         loops: Vec::new(),
@@ -1674,7 +1657,8 @@ fn decompile_in<L: Lifter>(
     let mut unreachable = 0;
     for (b, r) in reached.iter().enumerate() {
         if !r {
-            unreachable += usize::from(!st.twins.contains_key(&b));
+            let folded = vector_saves.is_some_and(|(_, save)| save == b);
+            unreachable += usize::from(!st.twins.contains_key(&b) && !folded);
             st.emitted[b] = true;
             st.dead[b] = true;
             st.succs[b].clear();
@@ -1723,6 +1707,9 @@ fn decompile_in<L: Lifter>(
         st.emitted[i] = true;
         note_jumps(&body[at..], &mut named);
         follow = trailing_goto(&body[at..]).and_then(|va| st.index_of(va));
+    }
+    if let Some((_, save)) = vector_saves {
+        run_block(&mut ctx, &st, save);
     }
     let skip = overlay.passes;
     let ends = st.ends(&ctx, cleanup, skip);
@@ -1999,6 +1986,12 @@ fn decompile_in<L: Lifter>(
     }
     if let Some(folded) = &canary {
         let _ = writeln!(out, "// folded: {}", folded.note());
+    }
+    if vector_saves.is_some() {
+        let _ = writeln!(
+            out,
+            "// folded: xmm0..xmm7 saves when al != 0 are left out (still replayed); likely va_start's: an al-guarded register save area whose address is taken"
+        );
     }
     let halves = !crate::analysis::runtime::microsoft(ctx.program.arch, ctx.program.format);
     let mut helpers: Vec<&crate::analysis::runtime::Helper> = f

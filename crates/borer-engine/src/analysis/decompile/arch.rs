@@ -194,6 +194,32 @@ pub(super) trait Lifter {
     /// * `code` - Each block's instructions.
     fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Self::Insn>]) -> bool;
 
+    /// Finds a variadic prologue's guarded saves of the vector argument
+    /// registers, which the text leaves out ([`lift::vector_saves`]).
+    ///
+    /// The default finds none, for an instruction set with no such guard.
+    ///
+    /// # Arguments
+    ///
+    /// * `ctx` - The function's convention.
+    /// * `code` - Each block's instructions.
+    /// * `succs` - Each block's successors.
+    /// * `preds` - Each block's predecessors.
+    /// * `entry` - The entry block.
+    ///
+    /// # Returns
+    ///
+    /// The guard's block and the saving block.
+    fn vector_saves(
+        _ctx: &Ctx<'_>,
+        _code: &[Vec<Self::Insn>],
+        _succs: &[Vec<usize>],
+        _preds: &[Vec<usize>],
+        _entry: usize,
+    ) -> Option<(usize, usize)> {
+        None
+    }
+
     /// Finds a Go function's stack-growth check, which the lifter folds.
     ///
     /// # Arguments
@@ -389,6 +415,16 @@ impl Lifter for X86 {
 
     fn seh_frame(ctx: &Ctx<'_>, code: &[Vec<Instruction>]) -> bool {
         seh_frame(ctx, code)
+    }
+
+    fn vector_saves(
+        ctx: &Ctx<'_>,
+        code: &[Vec<Instruction>],
+        succs: &[Vec<usize>],
+        preds: &[Vec<usize>],
+        entry: usize,
+    ) -> Option<(usize, usize)> {
+        lift::vector_saves(ctx, code, succs, preds, entry)
     }
 
     fn go_check(

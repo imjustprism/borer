@@ -74,6 +74,35 @@ pub(super) struct SlotRec {
     pub(super) flag_src: Option<Instruction>,
 }
 
+/// Tells whether no other block reads any byte of the frame one block
+/// writes, before writing it itself.
+///
+/// A variadic prologue's vector saves ([`lift::vector_saves`]) are left
+/// out of the text only when nothing reads their slots by name: `va_arg`
+/// reads them through the list's pointer, never as a slot of the frame.
+/// Each read and each store covers its width from its offset, so a word
+/// read from the high half of a vector's slot overlaps it.
+///
+/// # Arguments
+///
+/// * `recorded` - Each block's slot reads and writes, with their widths.
+/// * `save` - The block that writes the slots.
+pub(super) fn unread_elsewhere(recorded: &[SlotRec], save: usize) -> bool {
+    let bytes = |(off, bits): (&i64, &u8)| (*off, off.saturating_add(i64::from(*bits / 8)));
+    let Some(written) = recorded.get(save).map(|r| &r.stores) else {
+        return false;
+    };
+    recorded.iter().enumerate().all(|(b, r)| {
+        b == save
+            || r.reads.iter().map(bytes).all(|(lo, hi)| {
+                written
+                    .iter()
+                    .map(bytes)
+                    .all(|(start, end)| hi <= start || end <= lo)
+            })
+    })
+}
+
 /// What an equality branch establishes on one of its edges: a variable,
 /// the constant its low bits hold there, and how many of them, [`WHOLE`]
 /// when they are all the variable has.

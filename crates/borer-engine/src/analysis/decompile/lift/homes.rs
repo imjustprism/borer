@@ -349,6 +349,264 @@ impl Homes {
     }
 }
 
+/// Returns the block that saves a System V variadic prologue's vector
+/// registers, with the block whose `test al, al; je` jumps over it.
+///
+/// The saves fill the register save area of the `va_list` the function
+/// starts, which only `va_arg` reads through the list's `reg_save_area`
+/// pointer; the branch is the caller's count of filled vector registers
+/// in `al`, no test the source wrote. Every piece of the area is asked
+/// for:
+///
+/// * the run of instructions from the entry, block by block where each
+///   has one successor and that one predecessor, calls nothing, leaves
+///   `rax` as the caller set it and stores no vector register, and ends
+///   in `test al, al; je` ([`al_test`]);
+/// * the `je`'s fall-through block holds only `movaps` or `movups` (or
+///   their VEX forms) of `xmm0` to `xmm7`, each once, sixteen bytes apart
+///   in register order at the frame's stack pointer, inside the frame,
+///   and is entered only from the test and falls only into the `je`
+///   target ([`frame_vectors`]);
+/// * the save area as a whole shows a fixed argument count
+///   ([`Homes::fixed`]), with every integer register from the first
+///   variable one through `r9` saved eight bytes apart right before the
+///   vector half, and no fixed one saved before the test: an area cut
+///   short at `rcx` reads as one whose six integer registers are all
+///   fixed, and the stores it does make tell it apart;
+/// * the function takes the address of the area's start, as `va_start`
+///   does for the list's `reg_save_area` ([`area_taken`]).
+///
+/// Anything else, a partial area, a test of another register or a block
+/// that does more, finds nothing.
+///
+/// Leaving the saves out of the text keeps its meaning: they write only
+/// the list's own save area, which nothing reads but `va_arg` through the
+/// list, and C's `va_start` performs them; they stay in the lift, so the
+/// check against the emulator and the replay of the text's statements
+/// still cover their block.
+///
+/// # Arguments
+///
+/// * `ctx` - The function's convention and register width.
+/// * `code` - Each block's instructions.
+/// * `succs` - Each block's successors.
+/// * `preds` - Each block's predecessors.
+/// * `entry` - The entry block.
+///
+/// # Returns
+///
+/// The test's block and the saving block, or `None` when the function has
+/// no such prologue.
+pub(in crate::analysis::decompile) fn vector_saves(
+    ctx: &Ctx<'_>,
+    code: &[Vec<Instruction>],
+    succs: &[Vec<usize>],
+    preds: &[Vec<usize>],
+    entry: usize,
+) -> Option<(usize, usize)> {
+    let mut homes = Homes::new(ctx.bitness, ctx.conv);
+    if !homes.save_area || homes.vectors.is_empty() {
+        return None;
+    }
+    let (test, walked) = al_test(&mut homes, ctx.bitness, code, (succs, preds), entry)?;
+    let je = code.get(test)?.last()?;
+    let block_at =
+        |va: u64| (0..code.len()).find(|&b| code[b].first().is_some_and(|i| i.ip() == va));
+    let (save, join) = (block_at(je.next_ip())?, block_at(je.near_branch_target())?);
+    let out = succs.get(test)?;
+    let shaped = save != join
+        && out.len() == 2
+        && out.contains(&save)
+        && out.contains(&join)
+        && preds.get(save)?.as_slice() == [test]
+        && succs.get(save)?.as_slice() == [join];
+    let base = frame_vectors(&mut homes, ctx.bitness, code.get(save)?)?;
+    let gprs = homes.args.len();
+    let fixed = homes.fixed()?;
+    let back = |n: usize| i64::try_from(n).ok().and_then(|n| n.checked_mul(GPR));
+    let after_gprs = homes.saved.keys().all(|k| *k >= fixed)
+        && (fixed..gprs)
+            .all(|k| back(gprs - k).is_some_and(|b| homes.saved.get(&k) == Some(&(base - b))));
+    let area = base - back(gprs)?;
+    let mut skip = walked;
+    skip.extend([test, save]);
+    (shaped && after_gprs && area_taken(&mut homes, ctx.bitness, code, &skip, area))
+        .then_some((test, save))
+}
+
+/// Returns the block ending in a variadic prologue's `test al, al; je`,
+/// reached from the entry with `al` still the caller's count of vector
+/// arguments, and the blocks walked before it.
+///
+/// # Arguments
+///
+/// * `homes` - The save area's tracker, stepped through the run.
+/// * `bitness` - 64.
+/// * `code` - Each block's instructions.
+/// * `cfg` - Each block's successors and predecessors.
+/// * `entry` - The entry block.
+///
+/// # Returns
+///
+/// `None` when the entry has a predecessor, the run branches before, has
+/// a block entered from elsewhere, calls, writes any part of `rax`, stores a vector register
+/// or ends in another test. A `pop rax` right after `push rax`, GCC's
+/// stack probe, gives `rax` back the value it had.
+fn al_test(
+    homes: &mut Homes,
+    bitness: u32,
+    code: &[Vec<Instruction>],
+    cfg: (&[Vec<usize>], &[Vec<usize>]),
+    entry: usize,
+) -> Option<(usize, Vec<usize>)> {
+    /// Most blocks walked from the entry to the test.
+    const BLOCKS_MAX: usize = 8;
+    let (succs, preds) = cfg;
+    let mut info = InstructionInfoFactory::new();
+    let mut walked = Vec::new();
+    if !preds.get(entry)?.is_empty() {
+        return None;
+    }
+    let mut test = entry;
+    let mut pushed_rax = false;
+    loop {
+        for i in code.get(test)? {
+            let restores = pushed_rax && i.mnemonic() == Mnemonic::Pop;
+            pushed_rax = i.mnemonic() == Mnemonic::Push
+                && i.op0_kind() == OpKind::Register
+                && i.op0_register() == Register::RAX;
+            let writes_rax = !restores
+                && info.info(i).used_registers().iter().any(|u| {
+                    u.register().full_register() == Register::RAX
+                        && !matches!(u.access(), OpAccess::Read | OpAccess::CondRead)
+                });
+            let calls = matches!(
+                i.flow_control(),
+                FlowControl::Call | FlowControl::IndirectCall
+            );
+            if writes_rax || calls {
+                return None;
+            }
+            homes.step(i, bitness);
+        }
+        let [next] = succs.get(test)?.as_slice() else {
+            break;
+        };
+        if walked.len() + 1 == BLOCKS_MAX || preds.get(*next)?.as_slice() != [test] {
+            return None;
+        }
+        walked.push(test);
+        test = *next;
+    }
+    let [.., cmp, je] = code.get(test)?.as_slice() else {
+        return None;
+    };
+    let tests_al = cmp.mnemonic() == Mnemonic::Test
+        && cmp.op0_kind() == OpKind::Register
+        && cmp.op1_kind() == OpKind::Register
+        && cmp.op0_register() == Register::AL
+        && cmp.op1_register() == Register::AL;
+    (tests_al && je.mnemonic() == Mnemonic::Je && homes.saved_vectors.is_empty())
+        .then_some((test, walked))
+}
+
+/// Returns where a block that only saves the vector argument registers
+/// puts `xmm0`, in bytes from the entry stack pointer.
+///
+/// Every instruction must be a `movaps` or `movups`, or its VEX form, of
+/// a different one of `xmm0` to `xmm7` into the frame at the stack
+/// pointer (or a register standing for it) with no index register, each
+/// sixteen bytes past the one before in register order, the last inside
+/// the frame; all eight must be there.
+///
+/// # Arguments
+///
+/// * `homes` - The save area's tracker, stepped through the block.
+/// * `bitness` - 64.
+/// * `block` - The block's instructions.
+fn frame_vectors(homes: &mut Homes, bitness: u32, block: &[Instruction]) -> Option<i64> {
+    /// Bytes of one vector register's place in the save area.
+    const VECTOR: i64 = 16;
+    let mut at: BTreeMap<usize, i64> = BTreeMap::new();
+    for i in block {
+        let moves = matches!(
+            i.mnemonic(),
+            Mnemonic::Movaps | Mnemonic::Movups | Mnemonic::Vmovaps | Mnemonic::Vmovups
+        );
+        let j = homes.vectors.iter().position(|v| *v == i.op1_register())?;
+        let frame = base_below_of(homes.below, homes.rax, homes.rbp, i.memory_base())?;
+        let fits = moves
+            && i.op0_kind() == OpKind::Memory
+            && i.op1_kind() == OpKind::Register
+            && i.memory_index() == Register::None
+            && at
+                .insert(j, crate::disasm::displacement(i, bitness) - frame)
+                .is_none();
+        if !fits {
+            return None;
+        }
+        homes.step(i, bitness);
+    }
+    let base = *at.get(&0)?;
+    let spaced = at.len() == homes.vectors.len()
+        && at.iter().all(|(j, o)| {
+            i64::try_from(*j)
+                .ok()
+                .and_then(|j| j.checked_mul(VECTOR))
+                .is_some_and(|s| *o == base + s && *o + VECTOR <= 0)
+        });
+    spaced.then_some(base)
+}
+
+/// Tells whether a block past the prologue takes the address of the
+/// register save area's start, as `va_start` does for the list's
+/// `reg_save_area`.
+///
+/// The blocks are read in address order, each from where the prologue
+/// left the stack pointer, as [`late_fixed`] reads them, at most
+/// [`AREA_INSTRS_MAX`] instructions in all.
+///
+/// # Arguments
+///
+/// * `homes` - The save area's tracker, past the prologue.
+/// * `bitness` - 64.
+/// * `code` - Each block's instructions.
+/// * `skip` - The prologue's blocks, already read.
+/// * `area` - The area's start, in bytes from the entry stack pointer.
+fn area_taken(
+    homes: &mut Homes,
+    bitness: u32,
+    code: &[Vec<Instruction>],
+    skip: &[usize],
+    area: i64,
+) -> bool {
+    if homes.taken.contains(&area) {
+        return true;
+    }
+    let frame = homes.below;
+    let mut seen = 0usize;
+    for (b, block) in code.iter().enumerate() {
+        if skip.contains(&b) {
+            continue;
+        }
+        homes.below = frame;
+        for i in block {
+            if seen == AREA_INSTRS_MAX {
+                return false;
+            }
+            seen += 1;
+            homes.step(i, bitness);
+            if homes.taken.contains(&area) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Most instructions [`area_taken`] reads past a variadic prologue.
+const AREA_INSTRS_MAX: usize = 512;
+
 /// Bytes below the entry stack pointer that a base register stands for.
 ///
 /// # Arguments

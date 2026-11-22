@@ -30,6 +30,10 @@ pub(super) struct Emit<'e, L: Lifter> {
     /// Blocks that make the same test as an earlier block, each with that
     /// block ([`twin_tests`]): every jump to one lands on the other.
     pub(super) twins: BTreeMap<usize, usize>,
+    /// The block whose `test al, al` skips a variadic prologue's vector
+    /// saves ([`lift::vector_saves`]): its branch is written as the jump
+    /// over them, and the saving block is not written.
+    pub(super) vector_test: Option<usize>,
     /// Blocks nothing reaches once the folded branches lost their dead
     /// edges: marked emitted from the start, with no edges in or out.
     pub(super) dead: Vec<bool>,
@@ -266,7 +270,7 @@ pub(super) fn run_block_env<L: Lifter>(
     let phi = |out: &Env| phi_keys(out, succs, ins, live, processed, None);
     let live_out = |k: Key| succs.iter().any(|&s| live.is_live(s, k));
     let facts = block_facts::<L>(ctx, st.code, &st.succs, &st.live.need, st.assumes, i);
-    let out = L::exec_block(
+    let mut out = L::exec_block(
         ctx,
         &st.code[i],
         i.checked_sub(1).map(|p| st.code[p].as_slice()),
@@ -275,6 +279,11 @@ pub(super) fn run_block_env<L: Lifter>(
         Some((&phi, &live_out)),
         facts,
     );
+    if st.vector_test == Some(i)
+        && let Some(br) = out.branch.take()
+    {
+        out.goto = Some(br.target);
+    }
     if let Some(spelled) = &mut ctx.spelled {
         origin::spell(spelled, st.blocks[i].start, &out);
     }
@@ -2271,6 +2280,67 @@ pub(super) fn jump_to<L: Lifter>(st: &Emit<'_, L>, va: u64) -> String {
         Some(i) => goto(st.start(i)),
         None => format!("goto *{va:#x};"),
     }
+}
+
+/// Returns each block's successors and predecessors in the graph the
+/// text is structured from.
+///
+/// It drops the edges no run of the text takes: the dead side of a branch
+/// the dataflow folded, every target but one of a jump table whose
+/// destination is known, and the edge into a variadic prologue's vector
+/// saves ([`lift::vector_saves`]), whose test the text writes as the jump
+/// over them.
+///
+/// # Arguments
+///
+/// * `analysis` - The discovery results, for jump tables.
+/// * `blocks` - The function's blocks.
+/// * `recorded` - Each block's folded branch and jump-table facts.
+/// * `cfg` - Each block's successors and predecessors.
+/// * `at` - The block an address starts, a twin test standing for the
+///   block it repeats.
+/// * `vector_saves` - The variadic prologue's test and saving blocks.
+pub(super) fn live_edges(
+    analysis: &Analysis,
+    blocks: &[BasicBlock],
+    recorded: &[SlotRec],
+    cfg: (&[Vec<usize>], &[Vec<usize>]),
+    at: impl Fn(&u64) -> Option<usize>,
+    vector_saves: Option<(usize, usize)>,
+) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+    let (mut succs, mut preds) = (cfg.0.to_vec(), cfg.1.to_vec());
+    for (b, rec) in recorded.iter().enumerate() {
+        let Some((taken, target, fall)) = rec.branch_const else {
+            continue;
+        };
+        let dead = if taken { fall } else { target };
+        let Some(d) = at(&dead) else { continue };
+        succs[b].retain(|s| *s != d);
+        preds[d].retain(|p| *p != b);
+    }
+    for (b, rec) in recorded.iter().enumerate() {
+        let Some(live) = rec
+            .switch_dest
+            .filter(|t| at(t).is_some())
+            .or_else(|| {
+                rec.switch_const
+                    .and_then(|k| blocks.get(b).and_then(|blk| table_target(analysis, blk, k)))
+            })
+            .and_then(|t| at(&t))
+        else {
+            continue;
+        };
+        for d in std::mem::replace(&mut succs[b], vec![live]) {
+            if d != live {
+                preds[d].retain(|p| *p != b);
+            }
+        }
+    }
+    if let Some((test, save)) = vector_saves {
+        succs[test].retain(|s| *s != save);
+        preds[save].retain(|p| *p != test);
+    }
+    (succs, preds)
 }
 
 /// Deepest expression [`fold_static`] evaluates.

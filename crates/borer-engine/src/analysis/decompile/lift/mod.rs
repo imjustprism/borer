@@ -40,6 +40,7 @@ mod switch;
 pub(in crate::analysis::decompile) use conv::*;
 pub(crate) use effects::sets_without_reading;
 pub(in crate::analysis::decompile) use effects::*;
+pub(in crate::analysis::decompile) use homes::vector_saves;
 use homes::{Home, Homes, late_fixed};
 pub(in crate::analysis::decompile) use pack::*;
 pub(in crate::analysis::decompile) use record::*;
