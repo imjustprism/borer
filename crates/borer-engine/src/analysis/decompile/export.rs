@@ -876,7 +876,7 @@ fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) 
 /// [`super::unit::declarable`] refuses its name. Where the text
 /// contradicts the callee's signature ([`super::unit::own_prototype`]),
 /// the signature is still the declaration, and a `// warn:` line at the
-/// top of the body says how the text disagrees. A callee with no
+/// top of the body says each way the text disagrees. A callee with no
 /// signature of its own (it does not decompile, or is over
 /// [`BUDGET_BLOCKS`]) keeps its ABI prototype, and one whose signature
 /// names a type the text cannot spell is left undeclared. A function the
@@ -921,15 +921,18 @@ fn own_callees(
             .function(g)
             .is_some_and(|f| f.thunk.is_some() || f.bound.is_some())
     };
+    let caller = super::unit::Caller::of(text);
     let declare = |name: &str, g: u64, out: &mut String, notes: &mut String| {
         let sig = own_signature(program, analysis, overlay, g);
         let Some(sig) = sig.as_deref() else {
             return false;
         };
-        if let Some((p, note)) = super::unit::own_prototype(text, name, sig, program.format) {
+        if let Some((p, reasons)) = super::unit::own_prototype(&caller, name, sig, program.format) {
             out.push_str(&p);
-            if let Some(n) = note {
-                let _ = writeln!(notes, "// warn: {name}: {n}");
+            for reason in reasons {
+                for part in ["// warn: ", name, ": ", reason, "\n"] {
+                    notes.push_str(part);
+                }
             }
         }
         true

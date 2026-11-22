@@ -899,12 +899,75 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
     })
 }
 
+/// What a calling text says of the functions it calls, read in one pass
+/// for every callee it declares ([`own_prototype`]).
+#[derive(Debug, Default)]
+pub(super) struct Caller<'t> {
+    /// Each name's call argument counts in the code, declarations left out.
+    arities: BTreeMap<&'t str, Vec<usize>>,
+    /// The names whose call's value the code reads: a call that does not
+    /// start its statement.
+    read: BTreeSet<&'t str>,
+    /// The names whose call the code returns as its own result
+    /// (`return f(...)`).
+    returned: BTreeSet<&'t str>,
+    /// The caller's own result type, from its `// signature:`.
+    ret: Option<CTy>,
+    /// The lines that define a name: `#define` and `typedef`.
+    defines: Vec<&'t str>,
+    /// The caller's `// signature:` line.
+    signature: Option<&'t str>,
+}
+
+impl<'t> Caller<'t> {
+    /// Reads a calling text.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The calling function's text.
+    pub(super) fn of(text: &'t str) -> Self {
+        let mut out = Self::default();
+        for line in text.lines() {
+            if line.starts_with("#define ") || line.starts_with("typedef ") {
+                out.defines.push(line);
+            }
+            if let Some(own) = line.strip_prefix("// signature: ") {
+                out.signature.get_or_insert(line);
+                out.ret = out.ret.take().or_else(|| {
+                    let head = own.split_once('(')?.0.trim_end();
+                    let name = head.rsplit(|c: char| !is_ident_char(c)).next()?;
+                    parse_proto(own.trim(), name).map(|p| p.ret)
+                });
+            }
+            if ["//", "extern ", "static "]
+                .iter()
+                .any(|p| line.starts_with(p))
+            {
+                continue;
+            }
+            let code = code_of(line);
+            let start = code.len() - code.trim_start().len();
+            let returns = code[start..].starts_with("return ");
+            each_call(code, |at, w, n| {
+                out.arities.entry(w).or_default().push(n);
+                if at != start {
+                    out.read.insert(w);
+                }
+                if returns && at == start + "return ".len() {
+                    out.returned.insert(w);
+                }
+            });
+        }
+        out
+    }
+}
+
 /// Returns the declaration of a callee from its own signature, and what in
 /// the calling text contradicts it.
 ///
 /// # Arguments
 ///
-/// * `text` - The calling function's text.
+/// * `caller` - The calling function's text, read ([`Caller::of`]).
 /// * `name` - The callee's name.
 /// * `sig` - The callee's own `// signature:`, without the prefix.
 /// * `format` - The binary's format, which picks the C library whose
@@ -913,83 +976,60 @@ fn parse_proto(sig: &str, name: &str) -> Option<Proto> {
 /// # Returns
 ///
 /// `extern T name(...);`, after a `#define` for each C library type name
-/// it uses that the text does not define, and, when the text and the
-/// signature disagree, how: a call passes a count the signature does not
-/// take, the signature returns nothing where the text reads a call's
-/// value, or the text returns a call's value as its own under another
-/// type. The engine holds both; the declaration states the callee's.
-/// `None` when the signature does not parse or names a type the text
-/// cannot spell.
+/// it uses that the text does not define, and every way the text and the
+/// signature disagree: a call passes a count the signature does not take,
+/// the signature returns nothing where the text reads a call's value, the
+/// text returns a call's value as its own under another type. The engine
+/// holds both; the declaration states the callee's. `None` when the
+/// signature does not parse or names a type the text cannot spell.
 pub(super) fn own_prototype(
-    text: &str,
+    caller: &Caller<'_>,
     name: &str,
     sig: &str,
     format: crate::program::BinaryFormat,
-) -> Option<(String, Option<&'static str>)> {
+) -> Option<(String, Vec<&'static str>)> {
     let proto = parse_proto(sig, name)?;
-    let body: String = text
-        .lines()
-        .filter(|l| {
-            !["//", "extern ", "static "]
-                .iter()
-                .any(|p| l.starts_with(p))
-        })
-        .flat_map(|l| [l, "\n"])
-        .collect();
-    let value_read = body.lines().any(|l| {
-        let code = code_of(l);
-        let start = code.len() - code.trim_start().len();
-        word_positions(code, name)
-            .into_iter()
-            .any(|at| at != start && arity_at(code, at, name.len()).is_some())
-    });
-    let caller = text
-        .lines()
-        .find_map(|l| l.strip_prefix("// signature: "))
-        .and_then(|own| {
-            let head = own.split_once('(')?.0.trim_end();
-            let callee = head.rsplit(|c: char| !is_ident_char(c)).next()?;
-            parse_proto(own.trim(), callee)
-        });
-    let passed_on = body.lines().any(|l| {
-        code_of(l)
-            .trim_start()
-            .starts_with(&format!("return {name}("))
-    });
     let mut out = String::new();
     let mut aliased: Vec<&str> = Vec::new();
     for w in sig.split(|c: char| !is_ident_char(c)) {
-        let defined = || {
-            text.lines().any(|l| {
-                (l.starts_with("#define ") || l.starts_with("typedef "))
-                    && !word_positions(l, w).is_empty()
-            })
-        };
         if let Some(t) = crate::analysis::typelib::type_definition(w, format)
-            .filter(|_| !aliased.contains(&w) && !defined())
+            .filter(|_| !aliased.contains(&w) && !names_word(caller.defines.iter().copied(), w))
         {
             aliased.push(w);
             cir::print_items(&[Item::Alias(CTy::parse(t), Name::of(w))], &mut out);
         }
     }
-    if !types_known(&format!("{out}{text}"), sig, &proto) {
+    let known = |w: &str| {
+        names_word(
+            caller
+                .defines
+                .iter()
+                .copied()
+                .chain(caller.signature)
+                .chain(out.lines()),
+            w,
+        )
+    };
+    if !types_known(sig, &proto, known) {
         return None;
     }
     let n = proto.params.len();
-    let note = if call_arities(&body, name)
-        .iter()
-        .any(|&a| a != n && !(proto.variadic && a > n))
+    let mut notes = Vec::new();
+    if caller
+        .arities
+        .get(name)
+        .is_some_and(|a| a.iter().any(|&a| a != n && !(proto.variadic && a > n)))
     {
-        Some("a call passes another argument count than its signature takes")
-    } else if value_read && proto.ret == CTy::parse("void") {
-        Some("the text reads a result its signature does not return")
-    } else if passed_on && caller.is_some_and(|c| c.ret != proto.ret) {
-        Some("the text returns its result as another type")
-    } else {
-        None
-    };
+        notes.push("a call passes another argument count than its signature takes");
+    }
+    if caller.read.contains(name) && proto.ret == CTy::parse("void") {
+        notes.push("the text reads a result its signature does not return");
+    }
+    if caller.returned.contains(name) && caller.ret.as_ref().is_some_and(|r| *r != proto.ret) {
+        notes.push("the text returns its result as another type");
+    }
     cir::print_items(&[Item::Extern(proto)], &mut out);
-    Some((out, note))
+    Some((out, notes))
 }
 
 /// Returns the POSIX library's declarations of the functions a text calls,
@@ -1033,16 +1073,16 @@ pub(super) fn platform_declarations(
 /// Tells whether the caller's text can spell every type a callee names.
 ///
 /// Those are C's own types ([`plain_type`]), a tagged type (`struct X *`
-/// needs no definition), and a name the text defines or its own signature
-/// uses; the callee's own name and its parameters' names, a function
-/// pointer's (`(*a3)`) included, are no types.
+/// needs no definition), and a name `known` accepts; the callee's own name
+/// and its parameters' names, a function pointer's (`(*a3)`) included, are
+/// no types.
 ///
 /// # Arguments
 ///
-/// * `text` - The calling function's text.
 /// * `sig` - The callee's signature.
 /// * `proto` - The signature read, for the names that are no types.
-fn types_known(text: &str, sig: &str, proto: &Proto) -> bool {
+/// * `known` - Tells whether the caller's text defines a name.
+fn types_known(sig: &str, proto: &Proto, known: impl Fn(&str) -> bool) -> bool {
     let names: BTreeSet<&str> = std::iter::once(proto.name.as_str())
         .chain(
             proto
@@ -1055,25 +1095,25 @@ fn types_known(text: &str, sig: &str, proto: &Proto) -> bool {
                 .filter_map(|(at, _)| sig.get(at + 2..)?.split(|c: char| !is_ident_char(c)).next()),
         )
         .collect();
-    let defined: Vec<&str> = text
-        .lines()
-        .filter(|l| {
-            ["#define ", "typedef ", "// signature: "]
-                .iter()
-                .any(|p| l.starts_with(p))
-        })
-        .collect();
     let mut tagged = false;
     sig.split(|c: char| !is_ident_char(c))
         .filter(|w| !w.is_empty() && !names.contains(w))
         .all(|w| {
-            let ok = tagged
-                || matches!(w, "struct" | "union" | "enum")
-                || plain_type(w)
-                || defined.iter().any(|l| !word_positions(l, w).is_empty());
+            let ok =
+                tagged || matches!(w, "struct" | "union" | "enum") || plain_type(w) || known(w);
             tagged = matches!(w, "struct" | "union" | "enum");
             ok
         })
+}
+
+/// Tells whether any of some lines names a word as a whole identifier.
+///
+/// # Arguments
+///
+/// * `lines` - The lines.
+/// * `w` - The word; an empty one is named nowhere.
+fn names_word<'l>(mut lines: impl Iterator<Item = &'l str>, w: &str) -> bool {
+    lines.any(|l| !word_positions(l, w).is_empty())
 }
 
 /// Reads one parameter: its type and the name after it, when it has one.
@@ -1533,26 +1573,38 @@ fn called_as_declared(
 fn identifier_arities(text: &str, wanted: impl Fn(&str) -> bool) -> BTreeMap<&str, Vec<usize>> {
     let mut out: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
     for line in text.lines().filter(|l| !l.starts_with("//")) {
-        let code = code_of(line);
-        let mut start: Option<usize> = None;
-        for (i, c) in code
-            .char_indices()
-            .chain(std::iter::once((code.len(), ' ')))
-        {
-            if is_ident_char(c) {
-                start.get_or_insert(i);
-                continue;
-            }
-            let Some(s) = start.take() else { continue };
-            let w = &code[s..i];
-            if wanted(w)
-                && let Some(n) = arity_at(code, s, w.len())
-            {
+        each_call(code_of(line), |_, w, n| {
+            if wanted(w) {
                 out.entry(w).or_default().push(n);
             }
-        }
+        });
     }
     out
+}
+
+/// Hands each call one line of code makes to `f`: where its name starts,
+/// the name, and its argument count ([`arity_at`]).
+///
+/// # Arguments
+///
+/// * `code` - One line's code ([`code_of`]).
+/// * `f` - Takes each call.
+fn each_call<'c>(code: &'c str, mut f: impl FnMut(usize, &'c str, usize)) {
+    let mut start: Option<usize> = None;
+    for (i, c) in code
+        .char_indices()
+        .chain(std::iter::once((code.len(), ' ')))
+    {
+        if is_ident_char(c) {
+            start.get_or_insert(i);
+            continue;
+        }
+        let Some(s) = start.take() else { continue };
+        let w = &code[s..i];
+        if let Some(n) = arity_at(code, s, w.len()) {
+            f(s, w, n);
+        }
+    }
 }
 
 /// Returns the argument count of the call a name at `at` makes, when the
@@ -1610,9 +1662,9 @@ fn code_of(line: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::{
-        Index, Item, call_arities, code_of, declarable, declare_globals, implementation_named,
-        library_items, own_prototype, param, parse_proto, plain_type, platform_declarations,
-        undeclared_words, words,
+        Caller, Index, Item, call_arities, code_of, declarable, declare_globals,
+        implementation_named, library_items, own_prototype, param, parse_proto, plain_type,
+        platform_declarations, undeclared_words, words,
     };
 
     /// A parameter whose last character outside a name is wider than a byte
@@ -1961,7 +2013,7 @@ mod tests {
         assert_eq!(call_arities(text, "f"), [2, 0]);
     }
 
-    /// A callee is declared by its own signature, and each way the text
+    /// A callee is declared by its own signature, and every way the text
     /// contradicts it is told.
     ///
     /// A variable list takes any further arguments, a type the text cannot
@@ -1975,9 +2027,11 @@ mod tests {
     #[test]
     fn callees_are_declared_by_their_own_signatures() {
         let text = "x = sub_1(a1, a2);\nsub_1(x, 0);\nreturn dcgettext(NULL, \"a\", 5);\n";
-        let decl = |text: &str, sig: &str| own_prototype(text, "sub_1", sig, BinaryFormat::Elf);
-        let plain = |d: &str| Some((format!("{d}\n"), None));
-        let noted = |d: &str, n: &'static str| Some((format!("{d}\n"), Some(n)));
+        let decl = |text: &str, sig: &str| {
+            own_prototype(&Caller::of(text), "sub_1", sig, BinaryFormat::Elf)
+        };
+        let plain = |d: &str| Some((format!("{d}\n"), Vec::new()));
+        let noted = |d: &str, n: &'static str| Some((format!("{d}\n"), vec![n]));
         assert_eq!(
             decl(text, "uint32_t sub_1(uint32_t a1, char *a2)"),
             plain("extern uint32_t sub_1(uint32_t a1, char *a2);")
@@ -1994,8 +2048,10 @@ mod tests {
             plain("extern uint32_t sub_1(uint32_t a1, ...);")
         );
         assert_eq!(
-            decl(text, "uint32_t sub_1(uint32_t a1, char *a2, int a3, ...)").and_then(|d| d.1),
-            Some("a call passes another argument count than its signature takes")
+            decl(text, "uint32_t sub_1(uint32_t a1, char *a2, int a3, ...)").map(|d| d.1),
+            Some(vec![
+                "a call passes another argument count than its signature takes"
+            ])
         );
         assert_eq!(
             decl(text, "void sub_1(uint32_t a1, char *a2)"),
@@ -2010,8 +2066,9 @@ mod tests {
         );
         let declared = "extern void sub_2(void);\nextern void *sub_3(uint64_t a1);\nsub_2();\nx = sub_3(a1);\n";
         let elf = BinaryFormat::Elf;
-        assert!(own_prototype(declared, "sub_2", "void sub_2(void)", elf).is_some());
-        assert!(own_prototype(declared, "sub_3", "void *sub_3(uint64_t a1)", elf).is_some());
+        let declared = Caller::of(declared);
+        assert!(own_prototype(&declared, "sub_2", "void sub_2(void)", elf).is_some());
+        assert!(own_prototype(&declared, "sub_3", "void *sub_3(uint64_t a1)", elf).is_some());
         assert_eq!(decl(text, "code_t sub_1(uint32_t a1, char *a2)"), None);
         let typed = "#define code_t int\nx = sub_1(a1, a2);\n";
         assert!(decl(typed, "code_t sub_1(uint32_t a1, char *a2)").is_some());
@@ -2021,7 +2078,7 @@ mod tests {
             plain("#define FILE struct _IO_FILE\nextern uint32_t sub_1(FILE *a1, FILE *a2);")
         );
         let pe = own_prototype(
-            text,
+            &Caller::of(text),
             "sub_1",
             "uint32_t sub_1(FILE *a1, char *a2)",
             BinaryFormat::Pe,
@@ -2036,12 +2093,19 @@ mod tests {
         );
         let passed = "// signature: uint64_t f(uint64_t a1)\nreturn sub_1(a1, 0);\n";
         assert_eq!(
-            decl(passed, "uint32_t sub_1(uint64_t a1, char *a2)").and_then(|d| d.1),
-            Some("the text returns its result as another type")
+            decl(passed, "uint32_t sub_1(uint64_t a1, char *a2)").map(|d| d.1),
+            Some(vec!["the text returns its result as another type"])
         );
         assert_eq!(
             decl(passed, "uint64_t sub_1(uint64_t a1, char *a2)").map(|d| d.1),
-            Some(None)
+            Some(Vec::new())
+        );
+        assert_eq!(
+            decl("x = sub_1(a1);\n", "void sub_1(uint32_t a1, char *a2)").map(|d| d.1),
+            Some(vec![
+                "a call passes another argument count than its signature takes",
+                "the text reads a result its signature does not return",
+            ])
         );
         assert_eq!(
             platform_declarations(text, BinaryFormat::Elf),
