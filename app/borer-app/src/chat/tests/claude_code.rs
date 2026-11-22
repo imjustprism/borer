@@ -468,3 +468,43 @@ fn a_spent_budget_ends_the_turn_and_the_child(cx: &mut TestAppContext) {
     assert_eq!(fault, Some(Fault::Spent));
     assert!(killed.get() && !kept);
 }
+
+/// Two text blocks of one Claude Code reply are parted by a blank line; the pieces of one
+/// block join as they stream.
+#[gpui::test]
+fn the_blocks_of_a_reply_are_parted(cx: &mut TestAppContext) {
+    let block = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;
+    let lines = vec![
+        says("One "),
+        says("block."),
+        block.to_owned(),
+        says("Two."),
+        DONE.to_owned(),
+    ];
+    let (thread, _, _, cx) = with_child(|_| lines, Then::Hangs, cx);
+    thread.update(cx, |t, cx| t.send("Say two".to_owned(), cx));
+    cx.run_until_parked();
+    let last = thread.read_with(cx, |t, _| t.entries().last().cloned());
+    assert_eq!(last, Some(Entry::Model("One block.\n\nTwo.".to_owned())));
+}
+
+/// On a provider's API, text that resumes after thinking is a block of its own, parted by
+/// a blank line; the pieces of one block join.
+#[gpui::test]
+fn the_blocks_of_an_api_reply_are_parted(cx: &mut TestAppContext) {
+    let (_app, thread, fake, model, cx) = chatting(None, cx);
+    thread.update(cx, |t, cx| t.send("Say two".to_owned(), cx));
+    cx.run_until_parked();
+    fake.send_last_text(&model, "One ");
+    fake.send_last_text(&model, "block.");
+    let thinking = language_model::LanguageModelCompletionEvent::Thinking {
+        text: "hm".to_owned(),
+        signature: None,
+    };
+    fake.send_last_event(&model, thinking);
+    fake.send_last_text(&model, "Two.");
+    fake.end_last(&model);
+    cx.run_until_parked();
+    let last = thread.read_with(cx, |t, _| t.entries().last().cloned());
+    assert_eq!(last, Some(Entry::Model("One block.\n\nTwo.".to_owned())));
+}

@@ -87,6 +87,8 @@ pub struct Model {
 pub enum Event {
     /// A piece of the model's reply text, as it streams.
     Text(String),
+    /// A new block of the reply starts: text after it is a block of its own.
+    BlockStart,
     /// A JSON-RPC message for the MCP server [`SERVER`], to answer under `request`.
     Mcp {
         /// The control request's id, which the answer names.
@@ -157,6 +159,8 @@ enum Line {
 #[derive(Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum Stream {
+    /// A block starts.
+    ContentBlockStart,
     /// A piece of a block.
     ContentBlockDelta {
         /// The piece.
@@ -247,6 +251,9 @@ pub fn read(line: &str) -> Result<Event, String> {
                     delta: Delta::TextDelta { text },
                 },
         } => Event::Text(text),
+        Line::StreamEvent {
+            event: Stream::ContentBlockStart,
+        } => Event::BlockStart,
         Line::StreamEvent { .. } => Event::Other,
         Line::ControlRequest {
             request_id,
@@ -506,6 +513,8 @@ mod tests {
         assert_eq!(read(thinking), Ok(Event::Other));
         let start = r#"{"type":"stream_event","event":{"type":"message_start","message":{}}}"#;
         assert_eq!(read(start), Ok(Event::Other));
+        let block = r#"{"type":"stream_event","event":{"type":"content_block_start","index":1,"content_block":{"type":"text","text":""}}}"#;
+        assert_eq!(read(block), Ok(Event::BlockStart));
         let call = r#"{"type":"control_request","request_id":"r1","request":{"subtype":"mcp_message","server_name":"borer","message":{"method":"tools/call","params":{"name":"query","arguments":{"uri":"borer://triage"}},"jsonrpc":"2.0","id":3}}}"#;
         let Ok(Event::Mcp { request, message }) = read(call) else {
             panic!("not an MCP message");

@@ -439,7 +439,11 @@ pub(crate) async fn models(endpoint: Endpoint, cx: &AsyncApp) -> anyhow::Result<
             }
             Event::Ask { request } => session.write(&refuse(&request, REFUSED), cx).await?,
             Event::Done(Err(why)) => anyhow::bail!("Claude Code: {}", one_line(&why)),
-            Event::Text(_) | Event::Answered { .. } | Event::Done(Ok(())) | Event::Other => {}
+            Event::Text(_)
+            | Event::BlockStart
+            | Event::Answered { .. }
+            | Event::Done(Ok(()))
+            | Event::Other => {}
         }
     };
     anyhow::ensure!(!models.is_empty(), "Claude Code listed no model");
@@ -516,10 +520,16 @@ pub(crate) async fn run_turn(
     let mut spend = step(this, generation, cx, |thread, _| {
         Spend::new(room(thread.budget()))
     })?;
-    let mut left = TURN_MAX_BYTES;
+    let (mut left, mut block) = (TURN_MAX_BYTES, false);
     loop {
         match session.next(&mut left, cx).await? {
-            Event::Text(text) => step(this, generation, cx, |t, cx| t.stream_text(&text, cx))?,
+            Event::Text(text) => {
+                let parted = std::mem::take(&mut block);
+                step(this, generation, cx, |t, cx| {
+                    t.stream_text(&text, parted, cx);
+                })?;
+            }
+            Event::BlockStart => block = true,
             Event::Mcp { request, message } => {
                 let reply = match mcp(&message) {
                     Mcp::Reply(reply) => reply,

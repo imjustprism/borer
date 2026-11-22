@@ -90,6 +90,9 @@ pub enum Entry {
     Error(String),
 }
 
+/// What parts two blocks of one reply as the person reads it: a blank line.
+const BLOCK_GAP: &str = "\n\n";
+
 /// Most lines of a tool's answer a call keeps for the person to read.
 const HEAD_LINES: usize = 12;
 
@@ -518,9 +521,13 @@ impl Thread {
     }
 
     /// Shows `chunk` of the model's reply as it streams: it joins the reply the newest entry
-    /// shows, or starts one after a tool call or a notice.
-    pub(super) fn stream_text(&mut self, chunk: &str, cx: &mut Context<'_, Self>) {
+    /// shows, after a blank line when it starts a new block (`block`), or starts one after a
+    /// tool call or a notice.
+    pub(super) fn stream_text(&mut self, chunk: &str, block: bool, cx: &mut Context<'_, Self>) {
         if let Some(Entry::Model(shown)) = self.entries.last_mut() {
+            if block && !shown.is_empty() {
+                shown.push_str(BLOCK_GAP);
+            }
             shown.push_str(chunk);
         } else {
             self.entries.push(Entry::Model(chunk.to_owned()));
@@ -1131,16 +1138,24 @@ async fn run_turn(
             thread.entries.push(Entry::Model(String::new()));
             cx.notify();
         })?;
-        let (mut text, mut uses) = (String::new(), Vec::new());
+        let (mut text, mut uses, mut block) = (String::new(), Vec::new(), false);
         while let Some(event) = within(cx, &provider, events.next()).await? {
             match event? {
                 LanguageModelCompletionEvent::Text(chunk) => {
                     text.push_str(&chunk);
-                    step(this, generation, cx, |t, cx| t.stream_text(&chunk, cx))?;
+                    let parted = std::mem::take(&mut block);
+                    step(this, generation, cx, |t, cx| {
+                        t.stream_text(&chunk, parted, cx);
+                    })?;
                 }
-                LanguageModelCompletionEvent::ToolUse(call) if call.is_input_complete => {
-                    uses.push(call);
+                LanguageModelCompletionEvent::ToolUse(call) => {
+                    block = true;
+                    if call.is_input_complete {
+                        uses.push(call);
+                    }
                 }
+                LanguageModelCompletionEvent::Thinking { .. }
+                | LanguageModelCompletionEvent::RedactedThinking { .. } => block = true,
                 event @ LanguageModelCompletionEvent::ToolUseJsonParseError { .. } => {
                     uses.extend(unparsed(event));
                 }
