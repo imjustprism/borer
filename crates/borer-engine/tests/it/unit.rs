@@ -340,8 +340,9 @@ fn an_exported_body_declares_its_callee_by_its_own_signature() {
 /// counter_at() : &counter                            at +0x30
 /// store(p, v)  : *p = v, returning nothing           at +0x40
 /// bump(p, v)   : store(p, v) + 1, reading eax after  at +0x50
+/// counter_read(): counter, read as 32 bits           at +0x60
 /// ```
-const NAMED: [(usize, &[u8]); 9] = [
+const NAMED: [(usize, &[u8]); 10] = [
     (0x00, &[0xb9, 0x07, 0x00, 0x00, 0x00]), // ASM: mov ecx, 7 (tail)
     (0x05, &[0xe9, 0x16, 0x00, 0x00, 0x00]), // ASM: jmp twice
     (0x20, &[0x8d, 0x04, 0x09, 0xc3]),       // ASM: lea eax, [rcx + rcx]; ret (twice)
@@ -351,6 +352,7 @@ const NAMED: [(usize, &[u8]); 9] = [
     (0x50, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28 (bump)
     (0x54, &[0xe8, 0xe7, 0xff, 0xff, 0xff]), // ASM: call store
     (0x59, &[0x48, 0x83, 0xc4, 0x28, 0xff, 0xc0, 0xc3]), // ASM: add rsp, 0x28; inc eax; ret
+    (0x60, &[0x8b, 0x05, 0x9a, 0x0f, 0x00, 0x00, 0xc3]), // ASM: mov eax, [rip + 0xf9a]; ret (counter_read)
 ];
 
 /// [`NAMED`] as a PE-like image, every routine and `counter` named.
@@ -372,6 +374,7 @@ fn named_image() -> Program {
         named("counter_at", TEXT + 0x30, SymbolKind::Export),
         named("store", TEXT + 0x40, SymbolKind::Export),
         named("bump", TEXT + 0x50, SymbolKind::Export),
+        named("counter_read", TEXT + 0x60, SymbolKind::Export),
         named("counter", RDATA, SymbolKind::Data),
     ];
     p
@@ -471,21 +474,16 @@ fn an_export_of_one_entry_declares_its_tail_callee() {
     assert_eq!(ways, [format!("{head};")], "its own signature: {file}");
 }
 
-/// A data symbol a function names by its address is declared in the
-/// file, once at file scope.
+/// A data symbol one function names by its address is not declared by
+/// the export, since the file would hoist that declaration above a
+/// function that reads the name itself.
 #[test]
-fn an_exported_global_read_is_declared() {
-    let file = named_export(&[TEXT + 0x30]);
+fn a_data_symbol_named_by_address_gets_no_declaration() {
+    let file = named_export(&[TEXT + 0x30, TEXT + 0x60]);
     assert!(file.contains("&counter"), "{file}");
-    let decls = declarations_of(&file, "counter");
     assert!(
-        decls.iter().any(|d| d.starts_with("uint8_t counter[];")),
-        "{file}"
-    );
-    assert_eq!(
-        decls.iter().filter(|d| !d.starts_with("extern ")).count(),
-        1,
-        "{file}"
+        !file.contains("uint8_t counter[]"),
+        "no bytes-at declaration: {file}"
     );
 }
 
@@ -528,7 +526,7 @@ fn a_variadic_or_contradicted_callee_is_declared() {
 #[test]
 fn the_whole_export_states_each_declaration_once() {
     let file = named_export(&[TEXT, TEXT + 0x20, TEXT + 0x30, TEXT + 0x40, TEXT + 0x50]);
-    for name in ["tail", "twice", "counter_at", "store", "bump", "counter"] {
+    for name in ["tail", "twice", "counter_at", "store", "bump"] {
         let file_scope: Vec<&str> = file
             .lines()
             .filter(|l| !l.starts_with(' ') && !l.starts_with("//"))

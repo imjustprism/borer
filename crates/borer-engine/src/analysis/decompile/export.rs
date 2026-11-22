@@ -775,7 +775,6 @@ fn export_with(
             .map(|f| f.blocks.len())
             .filter(|&n| n > BUDGET_BLOCKS)
     };
-    let index = super::unit::index(program, analysis, overlay);
     let render = |entry: u64| {
         over(entry)
             .is_none()
@@ -784,7 +783,7 @@ fn export_with(
             .map(|text| {
                 let undeclared = super::unit::undeclared_words(&text);
                 own_callees(
-                    &super::unit::declare_globals(&text, &undeclared, &index),
+                    &super::unit::declare_globals(&text, &undeclared),
                     &undeclared,
                     program,
                     analysis,
