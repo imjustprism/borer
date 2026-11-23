@@ -301,7 +301,7 @@ pub(super) fn generated_in(
     mode: Mode,
 ) -> Result<Vec<(String, Outcome)>, String> {
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let word = p.arch.word_bits();
     let sig = printed(&text, word)?;
     let pass = passing(p, a, o, entry);
     let kinds = sig.drawn_kinds()?;
@@ -609,7 +609,7 @@ pub(super) fn draw(
     seed: u64,
 ) -> Result<Drawn, String> {
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let word = p.arch.word_bits();
     let sig = printed(&text, word)?;
     let pass = passing(p, a, o, entry);
     let kinds = sig.drawn_kinds()?;
@@ -1037,7 +1037,7 @@ pub fn vectors_tsv(p: &Program, a: &Analysis, o: &Overlay, spec: &str) -> Result
     }
     within_total(count, budget)?;
     let text = decompile_named(p, a, o, entry).ok_or("the function does not decompile")?;
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let word = p.arch.word_bits();
     let sig = printed(&text, word)?;
     let constants: Vec<u64> =
         compared_constants(&function_instructions(p, a, entry), Vec::new(), INPUTS_MAX)

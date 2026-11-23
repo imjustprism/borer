@@ -836,7 +836,7 @@ impl<'p> Script<'p> {
         text: &str,
         mode: Mode,
     ) -> Result<Self, String> {
-        let word = u8::try_from(program.arch.bitness().unwrap_or(64)).unwrap_or(64);
+        let word = program.arch.word_bits();
         let (all, base) = header::lines(text);
         let sig = printed(text, word)?;
         let head = header::header(all.get(..base).unwrap_or(&[]), word)?;

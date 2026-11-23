@@ -1259,7 +1259,7 @@ fn shared_for<'s>(
             "the function does not decompile",
         )
     };
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let word = p.arch.word_bits();
     let shared = Shared {
         sig: text
             .as_deref()

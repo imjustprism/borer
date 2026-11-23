@@ -398,7 +398,7 @@ fn listed_parameters(
     o: &Overlay,
     entry: u64,
 ) -> Option<(usize, String)> {
-    let word = u8::try_from(p.arch.bitness().unwrap_or(64)).unwrap_or(64);
+    let word = p.arch.word_bits();
     let sig = decompile_named(p, a, o, entry).and_then(|t| printed(&t, word).ok())?;
     (!sig.text.contains("...")).then(|| (sig.parameter_kinds().len(), sig.text))
 }

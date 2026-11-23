@@ -74,6 +74,12 @@ impl Arch {
         }
     }
 
+    /// Returns the machine word in bits the decompiled text sizes a pointer
+    /// by: 32 on x86, else 64.
+    pub fn word_bits(self) -> u8 {
+        if self == Arch::X86 { 32 } else { 64 }
+    }
+
     /// Returns the instruction set this architecture's code is written in.
     ///
     /// # Returns
