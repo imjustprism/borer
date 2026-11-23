@@ -29,6 +29,7 @@ pub mod goto;
 pub mod graph_item;
 pub mod hex_item;
 pub mod history;
+pub mod hover_peek;
 pub mod linear_item;
 pub mod measure;
 pub mod menus;

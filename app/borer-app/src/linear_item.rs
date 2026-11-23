@@ -534,10 +534,13 @@ impl LinearItem {
             }
         };
         self.pages = pages;
-        let semantics: Rc<dyn SemanticsProvider> = Rc::new(ViewSemantics { code: code.clone() });
+        let (loaded, binary) = (self.loaded.clone(), self.binary.clone());
         self.code.update(cx, |item, cx| {
-            item.show(Ok((code, text, None)), reservation, window, cx);
-            item.editor().update(cx, |editor, cx| {
+            item.show(Ok((code.clone(), text, None)), reservation, window, cx);
+            let editor = item.editor().clone();
+            let semantics: Rc<dyn SemanticsProvider> =
+                Rc::new(ViewSemantics::new(code, loaded, &binary, &editor, cx));
+            editor.update(cx, |editor, cx| {
                 editor.set_semantics_provider(Some(semantics));
                 let at = Point::new(u32::try_from(top).unwrap_or(u32::MAX), 0);
                 let (row, column) = cursor;

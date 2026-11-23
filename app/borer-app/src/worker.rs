@@ -14,6 +14,7 @@ use borer_engine::analysis::decompile::replay::{
     ANSWER_SEED, BlockCheck, Grade, TextCheck, recheck_block,
 };
 use borer_engine::analysis::decompile::text_check;
+pub use borer_engine::analysis::decompile::view::peek::{Certainty, Head, Peek, Read, peeks};
 use borer_engine::analysis::decompile::view::view;
 use borer_engine::analysis::edit::{self, Change, Edit, Force, Kind, Offer, Plan};
 use borer_engine::analysis::find::{Found, Query, everywhere};
@@ -969,6 +970,52 @@ pub fn grade_counts_blocking(loaded: &LoadedBinary, entry: u64) -> Option<GradeC
         .map(GradeCounts::of)
 }
 
+/// Returns what the status bar counts of the function at `entry`: the check rechecks left
+/// it with, else the engine's ([`grade_counts_blocking`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `entry` - Entry virtual address of the function.
+/// * `rechecked` - The function's check as rechecks left it ([`crate::binary::Binary::rechecked`]),
+///   `None` when no recheck changed it.
+///
+/// # Returns
+///
+/// The counts, or `None` when the function has no check.
+#[must_use]
+pub fn shown_counts_blocking(
+    loaded: &LoadedBinary,
+    entry: u64,
+    rechecked: Option<&Option<TextCheck>>,
+) -> Option<GradeCounts> {
+    match rechecked {
+        Some(check) => check.as_ref().map(GradeCounts::of),
+        None => grade_counts_blocking(loaded, entry),
+    }
+}
+
+/// Returns what a hover shows of what a token linking to `link` links to in `loaded`
+/// ([`borer_engine::analysis::decompile::view::peek::peek`]).
+///
+/// Must be called inside [`spawn_engine`].
+///
+/// # Arguments
+///
+/// * `loaded` - Previously loaded binary state.
+/// * `link` - What the hovered token links to.
+///
+/// # Returns
+///
+/// The peek, `None` only for a referent a hover never peeks at ([`peeks`]).
+#[must_use]
+pub fn peek_blocking(loaded: &LoadedBinary, link: &Ref) -> Option<Peek> {
+    let (p, a, o) = (&*loaded.program, &*loaded.analysis, &*loaded.overlay);
+    decompile::view::peek::peek(p, a, o, link)
+}
+
 /// Builds the decompile view of the function at `entry` in `loaded`.
 ///
 /// Must be called inside [`spawn_engine`] (or [`run_engine`] in `--headless` mode).
@@ -1764,106 +1811,110 @@ pub(crate) mod tests {
         assert!(running(cx).is_empty());
     }
 
+    /// Every module of the crate but this one, by path under `src`, with its text.
+    const SOURCES: [(&str, &str); 79] = [
+        ("actions.rs", include_str!("actions.rs")),
+        ("annotate.rs", include_str!("annotate.rs")),
+        ("annotate/tests.rs", include_str!("annotate/tests.rs")),
+        ("app_assets.rs", include_str!("app_assets.rs")),
+        ("app_dirs.rs", include_str!("app_dirs.rs")),
+        ("app_settings.rs", include_str!("app_settings.rs")),
+        ("app_view.rs", include_str!("app_view.rs")),
+        ("binary.rs", include_str!("binary.rs")),
+        ("binary/log.rs", include_str!("binary/log.rs")),
+        ("call_tree.rs", include_str!("call_tree.rs")),
+        ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
+        ("card.rs", include_str!("card.rs")),
+        ("chat.rs", include_str!("chat.rs")),
+        ("chat/card.rs", include_str!("chat/card.rs")),
+        ("chat/claude_code.rs", include_str!("chat/claude_code.rs")),
+        ("chat/picker.rs", include_str!("chat/picker.rs")),
+        ("chat/providers.rs", include_str!("chat/providers.rs")),
+        ("chat/tests.rs", include_str!("chat/tests.rs")),
+        ("chat/tests/cards.rs", include_str!("chat/tests/cards.rs")),
+        (
+            "chat/tests/claude_code.rs",
+            include_str!("chat/tests/claude_code.rs"),
+        ),
+        ("chat/tests/panel.rs", include_str!("chat/tests/panel.rs")),
+        ("chat/thread.rs", include_str!("chat/thread.rs")),
+        ("chat/tools.rs", include_str!("chat/tools.rs")),
+        ("chat/view.rs", include_str!("chat/view.rs")),
+        ("check_marks.rs", include_str!("check_marks.rs")),
+        ("code_semantics.rs", include_str!("code_semantics.rs")),
+        ("code_view.rs", include_str!("code_view.rs")),
+        ("commands.rs", include_str!("commands.rs")),
+        ("commands/tests.rs", include_str!("commands/tests.rs")),
+        ("conformance.rs", include_str!("conformance.rs")),
+        ("decompile_item.rs", include_str!("decompile_item.rs")),
+        (
+            "decompile_item/checks.rs",
+            include_str!("decompile_item/checks.rs"),
+        ),
+        (
+            "decompile_item/inline.rs",
+            include_str!("decompile_item/inline.rs"),
+        ),
+        ("features.rs", include_str!("features.rs")),
+        ("function_columns.rs", include_str!("function_columns.rs")),
+        ("functions_panel.rs", include_str!("functions_panel.rs")),
+        ("goto.rs", include_str!("goto.rs")),
+        ("graph_item.rs", include_str!("graph_item.rs")),
+        ("hex_item.rs", include_str!("hex_item.rs")),
+        ("history.rs", include_str!("history.rs")),
+        ("hover_peek.rs", include_str!("hover_peek.rs")),
+        ("lib.rs", include_str!("lib.rs")),
+        ("linear_item.rs", include_str!("linear_item.rs")),
+        ("main.rs", include_str!("main.rs")),
+        ("measure.rs", include_str!("measure.rs")),
+        ("measure/actions.rs", include_str!("measure/actions.rs")),
+        (
+            "measure/annotate_demo.rs",
+            include_str!("measure/annotate_demo.rs"),
+        ),
+        ("measure/chat_demo.rs", include_str!("measure/chat_demo.rs")),
+        (
+            "measure/claude_code_demo.rs",
+            include_str!("measure/claude_code_demo.rs"),
+        ),
+        ("measure/drop.rs", include_str!("measure/drop.rs")),
+        ("measure/input.rs", include_str!("measure/input.rs")),
+        ("measure/scroll.rs", include_str!("measure/scroll.rs")),
+        ("measure/stage.rs", include_str!("measure/stage.rs")),
+        (
+            "measure/start_demo.rs",
+            include_str!("measure/start_demo.rs"),
+        ),
+        ("measure/tree.rs", include_str!("measure/tree.rs")),
+        ("measure/watch.rs", include_str!("measure/watch.rs")),
+        ("menus.rs", include_str!("menus.rs")),
+        ("overview.rs", include_str!("overview.rs")),
+        ("panels.rs", include_str!("panels.rs")),
+        ("places.rs", include_str!("places.rs")),
+        ("rail.rs", include_str!("rail.rs")),
+        ("recent.rs", include_str!("recent.rs")),
+        ("rows_panel.rs", include_str!("rows_panel.rs")),
+        ("shell.rs", include_str!("shell.rs")),
+        ("start_item.rs", include_str!("start_item.rs")),
+        ("status.rs", include_str!("status.rs")),
+        ("stored.rs", include_str!("stored.rs")),
+        ("table.rs", include_str!("table.rs")),
+        ("theme_contract.rs", include_str!("theme_contract.rs")),
+        ("theme_import.rs", include_str!("theme_import.rs")),
+        ("theme_picker.rs", include_str!("theme_picker.rs")),
+        ("title_bar.rs", include_str!("title_bar.rs")),
+        ("tables.rs", include_str!("tables.rs")),
+        ("types.rs", include_str!("types.rs")),
+        ("update.rs", include_str!("update.rs")),
+        ("xrefs.rs", include_str!("xrefs.rs")),
+        ("user_themes.rs", include_str!("user_themes.rs")),
+        ("zed_import.rs", include_str!("zed_import.rs")),
+        ("types/edit.rs", include_str!("types/edit.rs")),
+    ];
+
     /// Returns every module of the crate but this one, by path under `src`, with its text.
-    fn sources() -> [(&'static str, &'static str); 78] {
-        [
-            ("actions.rs", include_str!("actions.rs")),
-            ("annotate.rs", include_str!("annotate.rs")),
-            ("annotate/tests.rs", include_str!("annotate/tests.rs")),
-            ("app_assets.rs", include_str!("app_assets.rs")),
-            ("app_dirs.rs", include_str!("app_dirs.rs")),
-            ("app_settings.rs", include_str!("app_settings.rs")),
-            ("app_view.rs", include_str!("app_view.rs")),
-            ("binary.rs", include_str!("binary.rs")),
-            ("binary/log.rs", include_str!("binary/log.rs")),
-            ("call_tree.rs", include_str!("call_tree.rs")),
-            ("call_tree_panel.rs", include_str!("call_tree_panel.rs")),
-            ("card.rs", include_str!("card.rs")),
-            ("chat.rs", include_str!("chat.rs")),
-            ("chat/card.rs", include_str!("chat/card.rs")),
-            ("chat/claude_code.rs", include_str!("chat/claude_code.rs")),
-            ("chat/picker.rs", include_str!("chat/picker.rs")),
-            ("chat/providers.rs", include_str!("chat/providers.rs")),
-            ("chat/tests.rs", include_str!("chat/tests.rs")),
-            ("chat/tests/cards.rs", include_str!("chat/tests/cards.rs")),
-            (
-                "chat/tests/claude_code.rs",
-                include_str!("chat/tests/claude_code.rs"),
-            ),
-            ("chat/tests/panel.rs", include_str!("chat/tests/panel.rs")),
-            ("chat/thread.rs", include_str!("chat/thread.rs")),
-            ("chat/tools.rs", include_str!("chat/tools.rs")),
-            ("chat/view.rs", include_str!("chat/view.rs")),
-            ("check_marks.rs", include_str!("check_marks.rs")),
-            ("code_semantics.rs", include_str!("code_semantics.rs")),
-            ("code_view.rs", include_str!("code_view.rs")),
-            ("commands.rs", include_str!("commands.rs")),
-            ("commands/tests.rs", include_str!("commands/tests.rs")),
-            ("conformance.rs", include_str!("conformance.rs")),
-            ("decompile_item.rs", include_str!("decompile_item.rs")),
-            (
-                "decompile_item/checks.rs",
-                include_str!("decompile_item/checks.rs"),
-            ),
-            (
-                "decompile_item/inline.rs",
-                include_str!("decompile_item/inline.rs"),
-            ),
-            ("features.rs", include_str!("features.rs")),
-            ("function_columns.rs", include_str!("function_columns.rs")),
-            ("functions_panel.rs", include_str!("functions_panel.rs")),
-            ("goto.rs", include_str!("goto.rs")),
-            ("graph_item.rs", include_str!("graph_item.rs")),
-            ("hex_item.rs", include_str!("hex_item.rs")),
-            ("history.rs", include_str!("history.rs")),
-            ("lib.rs", include_str!("lib.rs")),
-            ("linear_item.rs", include_str!("linear_item.rs")),
-            ("main.rs", include_str!("main.rs")),
-            ("measure.rs", include_str!("measure.rs")),
-            ("measure/actions.rs", include_str!("measure/actions.rs")),
-            (
-                "measure/annotate_demo.rs",
-                include_str!("measure/annotate_demo.rs"),
-            ),
-            ("measure/chat_demo.rs", include_str!("measure/chat_demo.rs")),
-            (
-                "measure/claude_code_demo.rs",
-                include_str!("measure/claude_code_demo.rs"),
-            ),
-            ("measure/drop.rs", include_str!("measure/drop.rs")),
-            ("measure/input.rs", include_str!("measure/input.rs")),
-            ("measure/scroll.rs", include_str!("measure/scroll.rs")),
-            ("measure/stage.rs", include_str!("measure/stage.rs")),
-            (
-                "measure/start_demo.rs",
-                include_str!("measure/start_demo.rs"),
-            ),
-            ("measure/tree.rs", include_str!("measure/tree.rs")),
-            ("measure/watch.rs", include_str!("measure/watch.rs")),
-            ("menus.rs", include_str!("menus.rs")),
-            ("overview.rs", include_str!("overview.rs")),
-            ("panels.rs", include_str!("panels.rs")),
-            ("places.rs", include_str!("places.rs")),
-            ("rail.rs", include_str!("rail.rs")),
-            ("recent.rs", include_str!("recent.rs")),
-            ("rows_panel.rs", include_str!("rows_panel.rs")),
-            ("shell.rs", include_str!("shell.rs")),
-            ("start_item.rs", include_str!("start_item.rs")),
-            ("status.rs", include_str!("status.rs")),
-            ("stored.rs", include_str!("stored.rs")),
-            ("table.rs", include_str!("table.rs")),
-            ("theme_contract.rs", include_str!("theme_contract.rs")),
-            ("theme_import.rs", include_str!("theme_import.rs")),
-            ("theme_picker.rs", include_str!("theme_picker.rs")),
-            ("title_bar.rs", include_str!("title_bar.rs")),
-            ("tables.rs", include_str!("tables.rs")),
-            ("types.rs", include_str!("types.rs")),
-            ("update.rs", include_str!("update.rs")),
-            ("xrefs.rs", include_str!("xrefs.rs")),
-            ("user_themes.rs", include_str!("user_themes.rs")),
-            ("zed_import.rs", include_str!("zed_import.rs")),
-            ("types/edit.rs", include_str!("types/edit.rs")),
-        ]
+    const fn sources() -> [(&'static str, &'static str); 79] {
+        SOURCES
     }
 
     /// Returns the code of a module the scan reads: its text before its tests module.

@@ -1014,6 +1014,7 @@ dependencies = [
  "language",
  "language_model",
  "lsp",
+ "markdown",
  "menu",
  "node_runtime",
  "open_ai",

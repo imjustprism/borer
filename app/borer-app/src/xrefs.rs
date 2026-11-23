@@ -219,7 +219,7 @@ pub fn show_xrefs(
     clippy::missing_panics_doc,
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Arc;
 
     use borer_engine::analysis::render::{
@@ -395,7 +395,7 @@ mod tests {
 
     /// Returns a PE whose code calls `Sleep` once through its import slot and once through
     /// a thunk jumping through that slot.
-    fn imported() -> Arc<LoadedBinary> {
+    pub(crate) fn imported() -> Arc<LoadedBinary> {
         let mut bytes = vec![0xccu8; 0x200];
         // ASM: call 0x1020 ; call qword ptr [rip+0xff5] ; ret
         let code: &[u8] = &[

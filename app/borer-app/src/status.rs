@@ -32,7 +32,7 @@ use crate::app_assets::{AppIcon, Glyph};
 use crate::binary::{Binary, StatusLine, reading_label, status_label};
 use crate::check_marks::GRADE_COUNT;
 use crate::decompile_item::DecompileItem;
-use crate::worker::{GradeCounts, Job, Jobs, LoadedBinary, grade_counts_blocking};
+use crate::worker::{GradeCounts, Job, Jobs, LoadedBinary, shown_counts_blocking};
 
 /// How long a load runs before the work item shows it.
 const WORK_SHOWN_AFTER: Duration = Duration::from_millis(100);
@@ -137,6 +137,18 @@ pub fn grade_text(counts: &GradeCounts, grade: Grade) -> String {
     format!("{} {}", counts.count(grade), grade_words(grade).1)
 }
 
+/// Returns what the bar says of every grade in `counts`, in its order, on one line.
+///
+/// # Arguments
+///
+/// * `counts` - What the check found.
+#[must_use]
+pub fn grades_text(counts: &GradeCounts) -> String {
+    SHOWN_GRADES
+        .map(|grade| grade_text(counts, grade))
+        .join(", ")
+}
+
 /// The block grades the engine's check gave the function in the active tab.
 pub struct Grades {
     /// The function the last check answered for, and its counts, `None` inside when the
@@ -232,10 +244,7 @@ impl Grades {
         self.running = Some(target.clone());
         cx.notify();
         let job = target.clone();
-        let work = move || match &job.rechecked {
-            Some(check) => check.as_ref().as_ref().map(GradeCounts::of),
-            None => grade_counts_blocking(&job.loaded, job.entry),
-        };
+        let work = move || shown_counts_blocking(&job.loaded, job.entry, job.rechecked.as_deref());
         let label = format!("Grading {:#x}", target.entry);
         self.job.run(label, cx, work, |grades, counts, cx| {
             grades.running = None;

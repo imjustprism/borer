@@ -48,6 +48,8 @@ language = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae
 # The chat's model layer: provider trait, registry, request and stream types, fake model.
 language_model = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 lsp = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
+# Escapes the file's names and the engine's words a hover's Markdown shows, and names the hover's text.
+markdown = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 menu = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }
 # The chat's OpenAI-compatible adapter (OpenAI, OpenRouter, Ollama, LM Studio): chat completions.
 open_ai = { git = "https://github.com/zed-industries/zed", rev = "e8bc16acee5ae1937600d571d441c4b5d7b0d288" }

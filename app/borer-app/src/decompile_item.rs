@@ -466,8 +466,8 @@ impl DecompileItem {
                 if focused {
                     window.focus(&self.editor.focus_handle(cx), cx);
                 }
-                let semantics =
-                    for_one_view(&code).map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
+                let semantics = for_one_view(&code, &self.loaded, &self.binary, &self.editor, cx)
+                    .map(|s| -> Rc<dyn SemanticsProvider> { Rc::new(s) });
                 self.editor
                     .update(cx, |editor, _| editor.set_semantics_provider(semantics));
                 self.evidence = None;
@@ -1443,6 +1443,7 @@ pub(crate) mod tests {
     use editor::{SelectionEffects, SemanticsProvider as _, ToPoint as _};
     use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext};
     use language::{Point, ToPoint as _};
+    use markdown::Markdown;
     use search::BufferSearchBar;
     use search::buffer_search::Deploy;
     use theme::ActiveTheme as _;
@@ -1856,7 +1857,11 @@ pub(crate) mod tests {
             let buffer = item.editor().read(cx).buffer().read(cx).as_singleton();
             (item.code().unwrap().clone(), buffer.unwrap())
         });
-        let provider = for_one_view(&code).unwrap();
+        let editor = tab.read_with(cx, |item, _| item.editor().clone());
+        let binary = binary_in(&workspace, cx);
+        let provider = cx
+            .update(|_, cx| for_one_view(&code, &loaded, &binary, &editor, cx))
+            .unwrap();
         let at = Point::new(
             u32::try_from(row).unwrap(),
             u32::try_from(span.start).unwrap(),
@@ -1867,7 +1872,7 @@ pub(crate) mod tests {
         let (view, line) = code.get(row).unwrap();
         let name = &view.line(line).unwrap()[span.clone()];
         let said = describe(name, Kind::Function, Some(&callee));
-        assert_eq!(hover.contents[0].text, said);
+        assert_eq!(hover.contents[0].text, Markdown::escape(&said));
         let uses = cx.update(|_, cx| provider.document_highlights(&buffer, anchor, cx));
         let uses = uses.unwrap().await.unwrap();
         let points = buffer.read_with(cx, |buffer, _| {

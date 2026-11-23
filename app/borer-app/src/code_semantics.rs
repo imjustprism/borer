@@ -1,30 +1,34 @@
 //! What Zed's editor asks a language server, answered from one [`View`].
 //!
-//! The hover says what the token under the pointer is and links to, the document highlights
-//! are the uses in its view of the referent under the cursor, read in the background, and a
-//! definition is the line of the same view the referent goes to, so Zed's go to definition
-//! and its ctrl-click move there. Everything else has no answer.
+//! The hover says what the token under the pointer is and links to in its first frame, then
+//! peeks at what it links to ([`Peeker`]). The document highlights are the uses in its view
+//! of the referent under the cursor, read in the background, and a definition is the line of
+//! the same view the referent goes to, so Zed's go to definition and its ctrl-click move
+//! there. Everything else has no answer.
 
 use std::ops::Range;
 use std::sync::Arc;
 
 use anyhow::Result;
-use borer_engine::view::View;
+use borer_engine::view::{Ref, View};
 use collections::{FxHashMap, FxHashSet};
-use editor::{GotoDefinitionKind, RenameTarget, SemanticsProvider};
+use editor::{Editor, GotoDefinitionKind, RenameTarget, SemanticsProvider};
 use futures::future::Shared;
 use gpui::{App, Entity, Task};
 use language::{
     Anchor, Buffer, BufferId, BufferRow, BufferSnapshot, LanguageServerId, Point, ToPoint as _,
 };
+use markdown::Markdown;
 use project::lsp_store::{BufferSemanticTokens, CacheInlayHints};
 use project::{
     DocumentHighlight, Hover, HoverBlock, HoverBlockKind, InlayHint, InvalidationStrategy,
     Location, LocationLink, ProjectTransaction,
 };
 
+use crate::binary::Binary;
 use crate::code_view::{ClickOutcome, CodeLines, Token, describe, resolve_ref_click};
-use crate::worker::spawn_engine;
+use crate::hover_peek::Peeker;
+use crate::worker::{LoadedBinary, spawn_engine};
 
 /// Answers Zed's editor about the views a code tab shows, each view's lines on the rows it
 /// is shown on.
@@ -32,28 +36,65 @@ use crate::worker::spawn_engine;
 pub struct ViewSemantics {
     /// The tab's lines: row `i` of the buffer is shown line `i`.
     pub code: Arc<CodeLines>,
+    /// The hover's peeks into the binary the lines come from.
+    peek: Peeker,
+}
+
+/// The token under a point of a tab's buffer.
+#[derive(Debug)]
+struct Under {
+    /// The point's row.
+    row: u32,
+    /// The token's bytes in the row.
+    span: Range<usize>,
+    /// The token's text, from the file.
+    text: String,
+    /// What the view says of the token.
+    said: String,
+    /// What the token links to.
+    link: Option<Ref>,
 }
 
 impl ViewSemantics {
-    /// Returns the token at `position` of `buffer`: its row, its bytes in the row, and the
-    /// view and line it comes from.
+    /// Returns the provider of `code`'s lines shown in `editor`, peeking into `loaded`.
+    ///
+    /// # Arguments
+    ///
+    /// * `code` - The tab's lines.
+    /// * `loaded` - The binary state they come from.
+    /// * `binary` - The window's binary, whose rechecks a peek's counts read.
+    /// * `editor` - The editor showing them.
+    /// * `cx` - Application context the editor and the binary are watched in.
+    pub fn new(
+        code: Arc<CodeLines>,
+        loaded: Arc<LoadedBinary>,
+        binary: &Entity<Binary>,
+        editor: &Entity<Editor>,
+        cx: &mut App,
+    ) -> Self {
+        let peek = Peeker::new(loaded, binary, editor, cx);
+        Self { code, peek }
+    }
+
+    /// Returns the token at `position` of `buffer`.
     ///
     /// # Arguments
     ///
     /// * `buffer` - The tab's buffer.
     /// * `position` - Where the pointer or the cursor is.
     /// * `cx` - Application context reading the buffer.
-    fn token(
-        &self,
-        buffer: &Entity<Buffer>,
-        position: Anchor,
-        cx: &App,
-    ) -> Option<(Point, Range<usize>, String)> {
+    fn token(&self, buffer: &Entity<Buffer>, position: Anchor, cx: &App) -> Option<Under> {
         let snapshot = buffer.read(cx).snapshot();
         let at = position.to_point(&snapshot);
         let (view, line, (span, kind, link)) = token_under(&self.code, at)?;
         let text = view.line(line)?.get(span.clone())?;
-        Some((at, span, describe(text, kind, link)))
+        Some(Under {
+            row: at.row,
+            said: describe(text, kind, link),
+            text: text.to_owned(),
+            span,
+            link: link.cloned(),
+        })
     }
 }
 
@@ -90,13 +131,25 @@ impl SemanticsProvider for ViewSemantics {
         position: Anchor,
         cx: &mut App,
     ) -> Option<Task<Option<Vec<Hover>>>> {
-        let (at, span, text) = self.token(buffer, position, cx)?;
+        let Some(under) = self.token(buffer, position, cx) else {
+            self.peek.drop_peek();
+            return None;
+        };
+        let said = Markdown::escape(&under.said).into_owned();
+        let more = self.peek.block(&under.text, &said, under.link, cx);
+        let said = HoverBlock {
+            text: said,
+            kind: HoverBlockKind::Markdown,
+        };
+        let more = HoverBlock {
+            text: more,
+            kind: HoverBlockKind::Markdown,
+        };
         let hover = Hover {
-            contents: vec![HoverBlock {
-                text,
-                kind: HoverBlockKind::PlainText,
-            }],
-            range: Some(anchors(&buffer.read(cx).snapshot(), at.row, &span)),
+            contents: std::iter::once(said)
+                .chain(Some(more).filter(|more| !more.text.is_empty()))
+                .collect(),
+            range: Some(anchors(&buffer.read(cx).snapshot(), under.row, &under.span)),
             language: None,
         };
         Some(Task::ready(Some(vec![hover])))
@@ -236,33 +289,52 @@ impl SemanticsProvider for ViewSemantics {
 /// # Arguments
 ///
 /// * `code` - The tab's lines.
+/// * `loaded` - The binary state they come from.
+/// * `binary` - The window's binary.
+/// * `editor` - The editor showing them.
+/// * `cx` - Application context the editor and the binary are watched in.
 #[must_use]
-pub fn for_one_view(code: &Arc<CodeLines>) -> Option<ViewSemantics> {
-    (code.views() == 1).then(|| ViewSemantics { code: code.clone() })
+pub fn for_one_view(
+    code: &Arc<CodeLines>,
+    loaded: &Arc<LoadedBinary>,
+    binary: &Entity<Binary>,
+    editor: &Entity<Editor>,
+    cx: &mut App,
+) -> Option<ViewSemantics> {
+    let new = || ViewSemantics::new(code.clone(), loaded.clone(), binary, editor, cx);
+    (code.views() == 1).then(new)
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::missing_panics_doc,
+    reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
+)]
 mod tests {
     use std::sync::Arc;
 
     use borer_engine::analysis::decompile::view::view;
+    use gpui::TestAppContext;
 
     use super::for_one_view;
+    use crate::app_view::tests::{CALLER, sample};
     use crate::code_view::CodeLines;
     use crate::code_view::tests::sample_program;
+    use crate::hover_peek::tests::Tab;
 
     /// A provider answers about one view only, never a tab of many.
-    ///
-    /// # Panics
-    ///
-    /// Panics if a tab of two views gets a provider or a tab of one does not.
-    #[test]
-    fn only_a_one_view_tab_gets_answers() {
+    #[gpui::test]
+    fn only_a_one_view_tab_gets_answers(cx: &mut TestAppContext) {
         let (program, analysis, overlay) = sample_program();
         let one = view(&program, &analysis, &overlay, 0x1000).expect("decompiles");
+        let loaded = sample();
+        let (tab, cx) = Tab::open(&loaded, CALLER, cx);
         let single = Arc::new(CodeLines::new(vec![one.clone()]));
-        assert!(for_one_view(&single).is_some());
         let double = Arc::new(CodeLines::new(vec![one.clone(), one]));
-        assert!(for_one_view(&double).is_none());
+        let (binary, editor) = (tab.binary.clone(), tab.editor(cx));
+        cx.update(|_, cx| {
+            assert!(for_one_view(&single, &loaded, &binary, &editor, cx).is_some());
+            assert!(for_one_view(&double, &loaded, &binary, &editor, cx).is_none());
+        });
     }
 }

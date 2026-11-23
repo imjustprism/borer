@@ -35,6 +35,7 @@ image.workspace = true
 language.workspace = true
 language_model.workspace = true
 lsp.workspace = true
+markdown.workspace = true
 menu.workspace = true
 node_runtime.workspace = true
 open_ai.workspace = true
