@@ -11,7 +11,7 @@ mod steps;
 pub(super) use super::signature::{signature_params, signature_places};
 pub(super) use infer::{Casts, inferred_type_on, scalar_width, signature_result, type_parameters};
 pub(super) use regions::filled_regions;
-use steps::{BYTE_POINTEES, byte_variables};
+use steps::{BYTE_POINTEES, byte_variables, whole};
 pub(super) use steps::{Dialect, iso_arithmetic, steps_bytes};
 
 /// Most singletons whose fields [`decompile_named`] names in one function.
@@ -482,8 +482,7 @@ fn bytes_of(line: &str, var: &str, ty: &str, word: u64) -> String {
             .find(|(names, _, _)| names.contains(&pointee))
             .map(|(_, cast, size)| (*size, Some(*cast)))
     };
-    let mut s = line.to_owned();
-    let mut from = 0;
+    let (mut s, mut from) = (line.to_owned(), 0);
     while let Some(at) = word_positions(&s, var).into_iter().find(|&p| p >= from) {
         from = at + var.len();
         let (head, tail) = (&s[..at], &s[at + var.len()..]);
@@ -499,6 +498,7 @@ fn bytes_of(line: &str, var: &str, ty: &str, word: u64) -> String {
                 .find_map(|op| Some((op.trim(), tail.strip_prefix(op)?.strip_suffix(';')?)))
         {
             let counted = element.and_then(|(size, _)| elements(step, size));
+            let step = whole(step);
             let new = counted.map_or_else(
                 || format!("{var} = ({ty})((uintptr_t){var} {} {step});", &op[..1]),
                 |n| format!("{var} {op} {n};"),

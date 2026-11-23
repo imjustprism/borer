@@ -1701,3 +1701,24 @@ fn an_eip_relative_read_agrees_with_the_emulator() {
         assert!(clean, "seed {seed}: {}", verify_tsv(&v));
     }
 }
+
+/// A typed pointer's compound step keeps its byte count whole.
+///
+/// `a1 -= a2 + a3` subtracts the sum, and `a1 += c ? 1 : 2` adds the
+/// choice, where pasting the step bare would subtract `a2` and add `a3`,
+/// or test `a1 + c`.
+///
+/// # Panics
+///
+/// When a step loses its parentheses.
+#[test]
+fn a_typed_pointer_step_keeps_its_byte_count_whole() {
+    let text = "// signature: uint64_t f(uint32_t *a1, uint64_t a2, uint64_t a3, uint64_t c)\n\na1 -= a2 + a3;\na1 += c ? 1 : 2;\nreturn *(uint32_t*)a1;\n";
+    let out = polish(text, 64, &borer_engine::pack::Packs::default());
+    for want in [
+        "a1 = (uint32_t *)((uintptr_t)a1 - (a2 + a3));",
+        "a1 = (uint32_t *)((uintptr_t)a1 + (c ? 1 : 2));",
+    ] {
+        assert!(out.lines().any(|l| l.trim() == want), "{want}\n{out}");
+    }
+}

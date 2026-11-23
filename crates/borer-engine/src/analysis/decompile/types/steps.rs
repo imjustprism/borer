@@ -751,7 +751,7 @@ fn assignment_end(toks: &[lexer::Tok], s: &str, j: usize) -> usize {
 /// # Arguments
 ///
 /// * `code` - The code.
-fn whole(code: &str) -> String {
+pub(super) fn whole(code: &str) -> String {
     let code = code.trim();
     let toks = lexer::lex(code);
     let one = match toks.as_slice() {
