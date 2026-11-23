@@ -1182,7 +1182,14 @@ def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
     proc, get_stderr = _spawn_app(exe, ["--measure", "--phase", "actions"])
     watch_thread = watcher.watch_while(proc, "actions")
     assert proc.stdout is not None
-    out: dict[str, Any] = {"actions": [], "frames": [], "misses": [], "skipped": [], "end": {}}
+    out: dict[str, Any] = {
+        "actions": [],
+        "frames": [],
+        "misses": [],
+        "unmeasured": [],
+        "skipped": [],
+        "end": {},
+    }
     rc = 0
     last: list[str] = []
     stalled = _stall_watchdog(proc, ACTIONS_IDLE_S, last)
@@ -1195,6 +1202,7 @@ def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
                 ("MEASURE_ACTION ", "actions"),
                 ("MEASURE_FRAMES ", "frames"),
                 ("MEASURE_MISS ", "misses"),
+                ("MEASURE_UNMEASURED ", "unmeasured"),
                 ("MEASURE_ACTIONS_SKIPPED ", "skipped"),
             ):
                 if line.startswith(marker):
@@ -1236,6 +1244,12 @@ def measure_actions(exe: Path, watcher: NetWatcher) -> dict[str, Any]:
         )
     for row in out["skipped"]:
         print(f"    [skip] {row.get('bench')}: {row.get('reason')}", flush=True)
+    for row in out["unmeasured"]:
+        print(
+            f"    [not measured] {row.get('bench')} {row.get('what')}:"
+            f" {row.get('timed')} timed of {row.get('runs')}",
+            flush=True,
+        )
     return out
 
 

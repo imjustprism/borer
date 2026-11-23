@@ -123,22 +123,37 @@ data directory of its own.
 
 `python scripts/run/app_measure.py` runs `--measure --phase actions`: on notepad.exe, then
 on the large DLL the list scroll loads, each action 120 times on the first functions by
-address that call another (xrefs lists the references to each), dispatched through
-the path its key takes. Ack is dispatch to the first presented frame whose stamp (active
-tab and its revision, its top line, the functions panel's row and filter, the go-to
+address that call another (xrefs lists the references to each; the hover peeks hover a
+call token of each), dispatched through the path its key takes. Ack is dispatch to
+the first presented frame whose stamp (active tab and its revision, its top line, the text
+of its hover popovers, the functions panel's row and filter, the go-to
 picker, the xrefs panel's referent and rows, status line) differs, a count of running
 requests left out as nothing on screen shows it; settle is dispatch to the presented frame
-after which no job runs, every open view shows the binary's state, no docked panel shows
+after which no job runs, no hover text is parsing, every open view shows the binary's state, no docked panel shows
 an older one (a closed panel marked to ask again when it opens is not older) and the stamp
-holds one more frame. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
+holds one more frame. The hover peeks run first. A cold peek hovers the first token
+calling a function no earlier run on the binary opened or peeked at, so the engine builds
+its view in the peek. An import peek hovers the first token calling an import, a
+declaration lookup with no decompile. A warm peek hovers the first token calling another
+function after an untimed hover on it, closed with Escape. A target making no call a peek
+times is counted `unqualified` and times nothing; it is not a skipped run. A cold peek
+after which the engine holds no more decompile views than before its cursor step built
+no view (something the script did not open built it, a caller's decompile or a check)
+and is counted `memo`, untimed. Pan and zoom sweep 2 s each on notepad's 20 largest graphs and the large
 DLL's largest, timed by frame draw. A large DLL that is missing or too slow to analyze
-is printed as skipped; an action whose setup failed in more than 10% of its runs misses. With 120 runs, an ack's
-p99 is not its slowest sample, so one stall of the machine does not decide it. A phase
+is printed as skipped; an action whose setup failed in more than 10% of its runs misses. With 120 timed runs, an
+ack's p99 is not its slowest sample, so one stall of the machine does not decide it. A hover
+peek times only its qualified runs: its row is judged on 50 timed runs or more (a settle
+p95 then sets the slowest two aside, while below 101 its ack p99 is its slowest run), and
+below 50 it prints `MEASURE_UNMEASURED` and is neither a pass nor a miss. A phase
 still running after 45 minutes stops and prints a miss naming the runs it did not reach.
 The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 
 | Action | Ack p99 | Settle p95, notepad | Settle p95, large DLL |
 | --- | --- | --- | --- |
+| hover peek on a function call (cold) | 16 ms | 50 ms | reported |
+| hover peek on an import call | 16 ms (notepad) | 50 ms | reported |
+| hover peek on a function call (warm) | 16 ms | 16 ms | reported |
 | go to a name (confirm) | 16 ms | 50 ms | 100 ms |
 | Find Everywhere keystroke | 16 ms | 16 ms | 50 ms |
 | xrefs of the function | 16 ms | 16 ms | 33 ms |

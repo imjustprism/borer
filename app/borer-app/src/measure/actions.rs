@@ -6,21 +6,28 @@
 //!
 //! Every run starts from a cleared window, sets its action up through the same paths and
 //! waits for it to settle, untimed; only its last step is timed. The targets are the
-//! engine's: the first functions by address that call others, never picked by time or
-//! chance. A large DLL that is missing or too slow to analyze
-//! is reported as skipped.
+//! engine's: the first functions by address that call others, and for the hover peeks the
+//! first token of each calling what the peek times, never picked by time or chance. The
+//! peeks run first; a cold peek times only a callee no earlier run opened or peeked at, so
+//! the engine builds it in the peek. A target making no call a peek times is counted
+//! unqualified, not skipped. A large DLL that is missing or too slow to analyze is reported
+//! as skipped.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use borer_engine::analysis::render::{FunctionOrder, FunctionRow};
 use borer_engine::cancel::Cancel;
 use borer_engine::num::as_f64;
+use borer_engine::view::Ref;
+use editor::SelectionEffects;
+use editor::actions::Hover;
 use gpui::{
     Action, Context, Keystroke, Modifiers, PlatformInput, ScrollDelta, ScrollEvent, Window,
     WindowId, point, px,
 };
+use language::Point;
 use picker::Picker;
 
 use super::tree::quantiles;
@@ -30,7 +37,8 @@ use super::{
     sorted_quantiles_ms,
 };
 use crate::actions::{FocusFilter, Overview, ShowGraph, ToggleListing, Xrefs, ZoomIn, ZoomOut};
-use crate::decompile_item::Form;
+use crate::code_view::CodeLines;
+use crate::decompile_item::{DecompileItem, Form};
 use crate::goto::{FindEverywhere, GoTo, GoToDelegate};
 use crate::graph_item::GraphItem;
 use crate::places::{PERMANENT, Place, open};
@@ -51,6 +59,17 @@ const SETUP_LIMIT: Duration = Duration::from_secs(60);
 /// never settles still reports what it timed and the runs it did not reach.
 const PHASE_LIMIT: Duration = Duration::from_mins(45);
 
+/// Fewest timed runs a hover peek's bar is judged on.
+///
+/// Fifty, so a settle p95 sets the slowest two runs aside. A peek times only its qualified
+/// runs, so it may time far fewer than [`RUNS`]; below this count its row is reported as not
+/// measured, neither a pass nor a miss. Below 101 timed runs an ack p99 is the slowest run.
+const PEEK_TIMED_MIN: usize = 50;
+
+/// The memo kind the engine keeps each function's decompile view under, whose count tells
+/// whether a cold peek built its callee's view.
+const VIEW_KIND: &str = "decompile_view";
+
 /// Most of an action's runs, in percent, that may be skipped before the action misses.
 const SKIPPED_PERCENT: usize = 10;
 
@@ -69,6 +88,12 @@ const PAN_STEP: f32 = 40.0;
 /// One action the phase times.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(super) enum Act {
+    /// Hover (keyboard) on a token calling a function no earlier run opened or peeked at.
+    PeekCold,
+    /// Hover on a token calling an import: a declaration lookup, no decompile.
+    PeekImport,
+    /// Hover on a token calling a function after an untimed hover on it, closed with Escape.
+    PeekWarm,
     /// Go to a function by name: the go-to picker's confirm.
     GoTo,
     /// One keystroke typed into Find Everywhere.
@@ -89,7 +114,10 @@ pub(super) enum Act {
 
 impl Act {
     /// Every action, in the order the script runs them.
-    pub(super) const ALL: [Self; 8] = [
+    pub(super) const ALL: [Self; 11] = [
+        Self::PeekCold,
+        Self::PeekImport,
+        Self::PeekWarm,
         Self::GoTo,
         Self::Find,
         Self::Xrefs,
@@ -100,9 +128,18 @@ impl Act {
         Self::Back,
     ];
 
+    /// Returns whether the action is a hover peek, whose bars need [`PEEK_TIMED_MIN`] timed
+    /// runs to be judged.
+    pub(super) const fn is_peek(self) -> bool {
+        matches!(self, Self::PeekCold | Self::PeekImport | Self::PeekWarm)
+    }
+
     /// Returns the action's name in the report.
     pub(super) const fn word(self) -> &'static str {
         match self {
+            Self::PeekCold => "peek_cold",
+            Self::PeekImport => "peek_import",
+            Self::PeekWarm => "peek_warm",
             Self::GoTo => "goto",
             Self::Find => "find",
             Self::Xrefs => "xrefs",
@@ -194,6 +231,30 @@ pub(super) fn pick_targets(rows: &[FunctionRow], n: usize) -> Vec<Target> {
         .collect()
 }
 
+/// Returns the shown line and byte of the first token of `code` making `call`, and what it
+/// links to.
+///
+/// # Arguments
+///
+/// * `code` - The lines a code tab shows.
+/// * `entry` - The function the tab shows.
+/// * `call` - The call the token makes.
+/// * `built` - The functions earlier runs opened or peeked at.
+fn first_call(
+    code: &CodeLines,
+    entry: u64,
+    call: Call,
+    built: &BTreeSet<u64>,
+) -> Option<(usize, usize, Ref)> {
+    (0..code.len()).find_map(|row| {
+        let (view, line) = code.get(row)?;
+        view.tokens(line).find_map(|(span, _, link)| {
+            let link = link.filter(|link| call.makes(link, entry, built))?;
+            Some((row, span.start, link.clone()))
+        })
+    })
+}
+
 /// Returns `loaded` with the functions its actions and sweeps run on.
 ///
 /// # Arguments
@@ -275,8 +336,51 @@ enum Move {
     Query(String),
     /// Types one key into the focused element, once the harness's update ends.
     Key(String),
+    /// Puts the active code tab's cursor on its first token making that call ([`first_call`]).
+    Cursor(Call),
     /// Runs a sweep for [`SWEEP`].
     Sweep(Sweep),
+}
+
+/// Which call a hover peek's token makes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Call {
+    /// A call of a function no earlier run of the binary opened or peeked at, whose
+    /// decompile view the engine has not built.
+    Fresh,
+    /// A call of another function.
+    Function,
+    /// A call of an import.
+    Import,
+}
+
+impl Call {
+    /// Returns whether a token of the function at `entry` linking to `link` makes the call.
+    ///
+    /// # Arguments
+    ///
+    /// * `link` - What the token links to.
+    /// * `entry` - The function the token is in.
+    /// * `built` - The functions earlier runs opened or peeked at.
+    fn makes(self, link: &Ref, entry: u64, built: &BTreeSet<u64>) -> bool {
+        match (self, link) {
+            (Self::Fresh, Ref::Function(to)) => *to != entry && !built.contains(to),
+            (Self::Function, Ref::Function(to)) => *to != entry,
+            (Self::Import, Ref::Import(_)) => true,
+            (Self::Fresh | Self::Function | Self::Import, _) => false,
+        }
+    }
+}
+
+/// Where a cursor step put the cursor.
+#[derive(Debug)]
+enum Placed {
+    /// On a token linking to the referent.
+    On(Ref),
+    /// Nowhere: the tab has no token making the call.
+    NoToken,
+    /// Nowhere: no code tab is active, or it shows no lines yet.
+    NoTab,
 }
 
 /// What a run times: an action, or a sweep's frames.
@@ -321,7 +425,17 @@ fn moves(act: Act, from: &Target, t: &Target) -> VecDeque<Move> {
     let code = |entry| Move::Open(Place::decompile(entry));
     let mut chars = t.name.chars();
     let last = chars.next_back();
+    let hover = || Move::Dispatch(Box::new(Hover));
     let steps = match act {
+        Act::PeekCold => vec![code(t.entry), Move::Cursor(Call::Fresh), hover()],
+        Act::PeekImport => vec![code(t.entry), Move::Cursor(Call::Import), hover()],
+        Act::PeekWarm => vec![
+            code(t.entry),
+            Move::Cursor(Call::Function),
+            hover(),
+            Move::Dispatch(Box::new(editor::actions::Cancel)),
+            hover(),
+        ],
         Act::GoTo => vec![
             code(from.entry),
             Move::Dispatch(Box::new(GoTo)),
@@ -410,6 +524,13 @@ pub(super) struct Times {
     late: usize,
     /// Runs whose setup could not be done or did not settle.
     skipped: usize,
+    /// Runs left untimed because their target makes no call the action times: no import
+    /// call for an import peek, no call of a function earlier runs did not build for a cold
+    /// one.
+    unqualified: usize,
+    /// Cold peeks left untimed because the engine held the callee's view already, built by
+    /// something the script did not open: the peek built no view.
+    memo: usize,
 }
 
 /// The step being watched.
@@ -452,6 +573,10 @@ pub(super) struct ActionsRun {
     deadline: Instant,
     /// The miss line naming the runs the deadline dropped, once it did.
     stopped: Option<String>,
+    /// The functions this binary's runs opened or peeked at, whose views the engine built.
+    built: BTreeSet<u64>,
+    /// The count of views the engine held as the cold peek going placed its cursor.
+    views_before: Option<usize>,
 }
 
 impl ActionsRun {
@@ -562,6 +687,21 @@ impl ActionsRun {
         }
     }
 
+    /// Counts the run going a cold peek whose callee's view the engine held already.
+    fn memo(&mut self) {
+        if let Some(times) = self.times() {
+            times.memo = times.memo.saturating_add(1);
+        }
+    }
+
+    /// Drops the rest of the run going and counts it unqualified.
+    fn unqualified(&mut self) {
+        self.moves.clear();
+        if let Some(times) = self.times() {
+            times.unqualified = times.unqualified.saturating_add(1);
+        }
+    }
+
     /// Returns the protocol lines of the times on the binary the runs were on.
     fn report(&mut self) -> Vec<String> {
         let bench = self.bench;
@@ -571,14 +711,16 @@ impl ActionsRun {
                 continue;
             }
             lines.push(format!(
-                "MEASURE_ACTION bench={} action={} {} {} still={} late={} skipped={}",
+                "MEASURE_ACTION bench={} action={} {} {} still={} late={} skipped={} unqualified={} memo={}",
                 bench.word(),
                 act.word(),
                 quantiles("ack_", &mut times.ack),
                 quantiles("settle_", &mut times.settle),
                 times.still,
                 times.late,
-                times.skipped
+                times.skipped,
+                times.unqualified,
+                times.memo
             ));
         }
         for (&(on, sweep), frames) in &mut self.frames {
@@ -665,6 +807,9 @@ const fn bar(what: &'static str, held: Held, notepad: Option<u64>, large: Option
 /// The phase's bars: ack 16 ms at p99 for every action, settle at p95 per action and
 /// binary, frames 8.3 ms at p99 for both sweeps. A later action adds its rows here.
 pub(super) const BARS: &[Bar] = &[
+    bar("peek_cold", Held::Ack, Some(16_000), Some(16_000)),
+    bar("peek_import", Held::Ack, Some(16_000), None),
+    bar("peek_warm", Held::Ack, Some(16_000), Some(16_000)),
     bar("goto", Held::Ack, Some(16_000), Some(16_000)),
     bar("find", Held::Ack, Some(16_000), Some(16_000)),
     bar("xrefs", Held::Ack, Some(16_000), Some(16_000)),
@@ -673,6 +818,9 @@ pub(super) const BARS: &[Bar] = &[
     bar("filter", Held::Ack, Some(16_000), Some(16_000)),
     bar("overview", Held::Ack, Some(16_000), Some(16_000)),
     bar("back", Held::Ack, Some(16_000), Some(16_000)),
+    bar("peek_cold", Held::Settle, Some(50_000), None),
+    bar("peek_import", Held::Settle, Some(50_000), None),
+    bar("peek_warm", Held::Settle, Some(16_000), None),
     bar("goto", Held::Settle, Some(50_000), Some(100_000)),
     bar("find", Held::Settle, Some(16_000), Some(50_000)),
     bar("xrefs", Held::Settle, Some(16_000), Some(33_000)),
@@ -683,6 +831,27 @@ pub(super) const BARS: &[Bar] = &[
     bar("pan", Held::Frame, Some(8_300), Some(8_300)),
     bar("zoom", Held::Frame, Some(8_300), Some(8_300)),
 ];
+
+/// Returns every hover peek row timed on too few runs to be judged ([`PEEK_TIMED_MIN`]),
+/// one line each: neither a pass nor a miss.
+///
+/// # Arguments
+///
+/// * `times` - Each action's times, by binary.
+pub(super) fn unmeasured(times: &BTreeMap<(Bench, Act), Times>) -> Vec<String> {
+    let rows = times.iter().filter(|((_, act), _)| act.is_peek());
+    rows.filter(|(_, t)| t.settle.len() < PEEK_TIMED_MIN)
+        .map(|((bench, act), t)| {
+            let runs = t.settle.len() + t.skipped + t.unqualified + t.memo;
+            format!(
+                "MEASURE_UNMEASURED bench={} what={} timed={} runs={runs} min={PEEK_TIMED_MIN}",
+                bench.word(),
+                act.word(),
+                t.settle.len()
+            )
+        })
+        .collect()
+}
 
 /// Returns every bar the times miss, one line each.
 ///
@@ -712,6 +881,9 @@ pub(super) fn misses(
             let Some(limit) = limit else {
                 continue;
             };
+            let peek = Act::ALL
+                .into_iter()
+                .any(|act| act.is_peek() && act.word() == bar.what);
             let samples = match bar.held {
                 Held::Ack | Held::Settle => Act::ALL
                     .into_iter()
@@ -736,6 +908,9 @@ pub(super) fn misses(
                 Held::Settle => (95, p95),
             };
             let limit_ms = as_f64(limit) / 1000.0;
+            if peek && samples.len() < PEEK_TIMED_MIN {
+                continue;
+            }
             if n == 0 || at > limit_ms {
                 out.push(format!(
                     "MEASURE_MISS bench={} what={} held={} p{pct}_ms={at:.3} bar_ms={limit_ms:.3} n={n}",
@@ -794,6 +969,8 @@ impl Harness {
             frames: BTreeMap::new(),
             deadline: now_instant() + PHASE_LIMIT,
             stopped: None,
+            built: BTreeSet::new(),
+            views_before: None,
         };
         self.next_bench(run, prep, window, cx);
     }
@@ -815,6 +992,7 @@ impl Harness {
     ) {
         run.bench = prep.bench;
         run.script = script(&prep);
+        run.built.clear();
         self.binary
             .update(cx, |binary, cx| binary.show_loaded(prep.loaded, cx));
         cx.on_next_frame(window, move |this, window, cx| {
@@ -852,7 +1030,10 @@ impl Harness {
                 let settled = feed(&mut watch, draws, now, read.clone());
                 let limit = if timed { LATE } else { SETUP_LIMIT };
                 if settled || now.saturating_duration_since(at) > limit {
-                    if timed {
+                    let held = run.views_before.take();
+                    if timed && held.is_some_and(|before| self.views(cx) == Some(before)) {
+                        run.memo();
+                    } else if timed {
                         run.record(&watch, at, now);
                     } else if !settled {
                         run.skip();
@@ -917,7 +1098,32 @@ impl Harness {
             }
             let timed = run.moves.is_empty();
             let at = now_instant();
-            if self.perform(step, window, cx).is_some() {
+            let done = match step {
+                Move::Cursor(call) => match self.cursor(call, &run.built, window, cx) {
+                    Placed::On(link) => {
+                        if let Ref::Function(to) = link {
+                            run.built.insert(to);
+                        }
+                        if call == Call::Fresh {
+                            run.views_before = self.views(cx);
+                        }
+                        true
+                    }
+                    Placed::NoToken => {
+                        run.unqualified();
+                        continue;
+                    }
+                    Placed::NoTab => false,
+                },
+                step => {
+                    if let Move::Open(Place::Code { entry, .. } | Place::Graph { entry, .. }) = step
+                    {
+                        run.built.insert(entry);
+                    }
+                    self.perform(step, window, cx).is_some()
+                }
+            };
+            if done {
                 run.going = Some(Going::Watching(Box::new(Watch::new(before)), at, timed));
                 return true;
             }
@@ -965,9 +1171,61 @@ impl Harness {
                     window.dispatch_keystroke(keystroke, cx);
                 });
             }
-            Move::Sweep(_) => return None,
+            Move::Cursor(_) | Move::Sweep(_) => return None,
         }
         Some(())
+    }
+
+    /// Returns how many decompile views the engine holds for the window's binary, `None`
+    /// with no binary.
+    ///
+    /// # Arguments
+    ///
+    /// * `cx` - Harness context.
+    fn views(&self, cx: &Context<'_, Self>) -> Option<usize> {
+        let loaded = self.binary.read(cx).loaded()?;
+        Some(loaded.analysis.derived.held(VIEW_KIND))
+    }
+
+    /// Puts the active code tab's cursor on its first token making `call`.
+    ///
+    /// # Arguments
+    ///
+    /// * `call` - The call the token makes.
+    /// * `built` - The functions earlier runs opened or peeked at.
+    /// * `window` - Window the tab is in.
+    /// * `cx` - Harness context.
+    fn cursor(
+        &self,
+        call: Call,
+        built: &BTreeSet<u64>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Placed {
+        let Some(tab) = self.workspace.read(cx).active_item_as::<DecompileItem>(cx) else {
+            return Placed::NoTab;
+        };
+        let (code, entry) = {
+            let tab = tab.read(cx);
+            let (Some(code), Some(entry)) = (tab.code(), tab.entry()) else {
+                return Placed::NoTab;
+            };
+            (code.clone(), entry)
+        };
+        let Some((row, col, link)) = first_call(&code, entry, call, built) else {
+            return Placed::NoToken;
+        };
+        let (Ok(row), Ok(col)) = (u32::try_from(row), u32::try_from(col)) else {
+            return Placed::NoToken;
+        };
+        let at = Point::new(row, col);
+        let editor = tab.read(cx).editor().clone();
+        editor.update(cx, |editor, cx| {
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                s.select_ranges([at..at]);
+            });
+        });
+        Placed::On(link)
     }
 
     /// Closes the modal and every tab, and empties the functions filter.
@@ -1082,12 +1340,15 @@ impl Harness {
         self.draws = None;
         let mut missed = misses(&run.times, &run.frames);
         missed.extend(run.stopped.clone());
+        let unjudged = unmeasured(&run.times);
         let end = format!(
-            "MEASURE_ACTIONS misses={} ui_engine_calls={}",
+            "MEASURE_ACTIONS misses={} unmeasured={} ui_engine_calls={}",
             missed.len(),
+            unjudged.len(),
             ui_engine_calls()
         );
-        match missed.iter().chain([&end]).try_for_each(|line| say(line)) {
+        let mut lines = missed.iter().chain(&unjudged).chain([&end]);
+        match lines.try_for_each(|line| say(line)) {
             Ok(()) => cx.quit(),
             Err(err) => self.fail(err, cx),
         }
@@ -1100,22 +1361,27 @@ impl Harness {
     reason = "assertions are the point of a test; gpui::test hides each body in an undocumented fn"
 )]
 mod tests {
-    use std::collections::{BTreeMap, VecDeque};
+    use std::collections::{BTreeMap, BTreeSet, VecDeque};
     use std::time::{Duration, Instant};
 
     use borer_engine::analysis::render::{FunctionRow, RowSource};
     use borer_engine::cancel::Cancel;
+    use borer_engine::view::Ref;
     use gpui::{Entity, TestAppContext, VisualTestContext, WindowId};
 
     use super::{
-        Act, ActionsRun, Bench, Going, Move, Prep, RUNS, Sweep, Target, Times, What, feed, misses,
-        pick_targets, prep_of, script,
+        Act, ActionsRun, Bench, Call, Going, Move, PEEK_TIMED_MIN, Prep, RUNS, Sweep, Target,
+        Times, VIEW_KIND, What, feed, first_call, misses, pick_targets, prep_of, script,
+        unmeasured,
     };
-    use crate::app_view::tests::{CALLER, init, sample};
+    use crate::app_view::tests::{CALLEE, CALLER, init, sample};
+    use crate::code_view::CodeLines;
     use crate::functions_panel::FunctionsPanel;
     use crate::measure::watch::{Seen, Stamp, Watch, seen};
     use crate::measure::{CliMode, Harness, Tracing, now_instant};
     use crate::places::Place;
+    use crate::worker::{LoadedBinary, decompile_or_why, peek_blocking, run_engine};
+    use crate::xrefs::tests::imported;
 
     /// Returns a hand-built row at `entry` calling `callees` functions, `size` bytes long.
     fn row(entry: u64, callees: usize, size: u64) -> FunctionRow {
@@ -1129,6 +1395,30 @@ mod tests {
             src: RowSource::User,
             name: format!("f{entry:x}"),
         }
+    }
+
+    /// Each peek hovers the first token making the call it times.
+    ///
+    /// A cold peek hovers a call of a function no earlier run built, and none once every
+    /// callee is built; a warm peek a call of another function, built or not; an import peek
+    /// a call of an import. None hovers the function's own name.
+    #[test]
+    fn each_peek_hovers_the_call_it_times() {
+        let first = |loaded: &LoadedBinary, entry, call, built: &[u64]| {
+            let view = run_engine(|| decompile_or_why(loaded, entry)).unwrap();
+            let code = CodeLines::new(vec![view]);
+            let built = built.iter().copied().collect();
+            first_call(&code, entry, call, &built).map(|(_, _, link)| link)
+        };
+        let loaded = sample();
+        let callee = Some(Ref::Function(CALLEE));
+        assert_eq!(first(&loaded, CALLER, Call::Fresh, &[]), callee);
+        assert_eq!(first(&loaded, CALLER, Call::Fresh, &[CALLEE]), None);
+        assert_eq!(first(&loaded, CALLER, Call::Function, &[CALLEE]), callee);
+        assert_eq!(first(&loaded, CALLER, Call::Import, &[]), None);
+        let imports = imported();
+        let import = first(&imports, 0x1000, Call::Import, &[]);
+        assert_eq!(import, Some(Ref::Import(0x2000)));
     }
 
     /// Two runs pick the same targets: the first rows by address that call another, and the
@@ -1272,6 +1562,8 @@ mod tests {
             frames: BTreeMap::new(),
             deadline,
             stopped: None,
+            built: BTreeSet::new(),
+            views_before: None,
         }
     }
 
@@ -1398,6 +1690,53 @@ mod tests {
     /// Returns times of `n` samples of `ns` nanoseconds each.
     fn of(n: usize, ns: u64) -> Vec<u64> {
         vec![ns; n]
+    }
+
+    /// A hover peek's row timed on fewer than [`PEEK_TIMED_MIN`] runs is reported as not
+    /// measured and is neither a pass nor a miss, however slow; on enough runs it is judged.
+    #[test]
+    fn a_peek_on_too_few_timed_runs_is_not_measured() {
+        let peek = |n, ns| -> BTreeMap<(Bench, Act), Times> {
+            let times = Times {
+                ack: of(n, ns),
+                settle: of(n, ns),
+                unqualified: RUNS - n,
+                ..Times::default()
+            };
+            [((Bench::Large, Act::PeekCold), times)]
+                .into_iter()
+                .collect()
+        };
+        let none = BTreeMap::new();
+        let peeks = |times: &BTreeMap<(Bench, Act), Times>| -> Vec<String> {
+            let missed = misses(times, &none).into_iter();
+            missed.filter(|m| m.contains("what=peek_cold")).collect()
+        };
+        let few = peek(1, 10_000_000_000);
+        assert_eq!(peeks(&few), Vec::<String>::new());
+        let want = format!(
+            "MEASURE_UNMEASURED bench=large what=peek_cold timed=1 runs={RUNS} min={PEEK_TIMED_MIN}"
+        );
+        assert_eq!(unmeasured(&few), [want]);
+        let fast = peek(PEEK_TIMED_MIN, 1_000);
+        assert_eq!(peeks(&fast), Vec::<String>::new());
+        assert_eq!(unmeasured(&fast), Vec::<String>::new());
+        let slow = peek(PEEK_TIMED_MIN, 10_000_000_000);
+        assert_eq!(peeks(&slow).len(), 1, "{:?}", peeks(&slow));
+    }
+
+    /// A peek that builds its callee's view adds one to the engine's held views, and a peek
+    /// at a callee whose view is held adds none, which is how a cold run tells it was warm.
+    #[test]
+    fn a_peek_at_a_held_view_builds_no_view() {
+        let loaded = sample();
+        let held = || loaded.analysis.derived.held(VIEW_KIND);
+        let before = held();
+        let peek = || run_engine(|| peek_blocking(&loaded, &Ref::Function(CALLEE)));
+        assert!(peek().is_some());
+        assert_eq!(held(), before + 1);
+        assert!(peek().is_some());
+        assert_eq!(held(), before + 1);
     }
 
     /// An action skipped in more than a tenth of its runs misses however fast the runs that
