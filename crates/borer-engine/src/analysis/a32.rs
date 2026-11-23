@@ -606,7 +606,9 @@ struct Walked {
 ///
 /// A call never runs on into the literals the function itself loads: those
 /// bytes are data, so the call does not return ([`into_pool`]). The walk
-/// is made again, ending each such path there.
+/// is made again, ending each such path there. A stop no call of the last
+/// walk runs into (one a call decoded from data an earlier walk ran
+/// through found) is dropped, and the walk made once more without it.
 fn walk(
     program: &Program,
     entry: u64,
@@ -623,6 +625,17 @@ fn walk(
             break;
         }
         stops.extend(into);
+        w = walk_until(program, entry, starts, noreturn, guess, &stops);
+        spent = spent.saturating_add(w.seen.len());
+    }
+    let reached: BTreeSet<u64> = w
+        .seen
+        .values()
+        .filter(|i| i.flow() == Flow::Call && !guarded(i))
+        .map(|i| past_padding(&w, i, gap_padding))
+        .collect();
+    if !stops.is_subset(&reached) {
+        stops.retain(|s| reached.contains(s));
         w = walk_until(program, entry, starts, noreturn, guess, &stops);
         spent = spent.saturating_add(w.seen.len());
     }
@@ -1494,8 +1507,12 @@ struct Walks<'a> {
     /// Each jump target the walks followed, with the lowest entry of a
     /// function that jumps to it.
     labels: BTreeMap<u64, u64>,
-    /// The functions that never return.
+    /// The functions that never return: [`Walks::named`] and those the
+    /// walks show never return ([`Walks::settle`]).
     noreturn: BTreeSet<u64>,
+    /// The functions a name says never return: a symbol, or the import a
+    /// linkage stub jumps through.
+    named: BTreeSet<u64>,
     /// Each walked function's walk, by entry.
     walked: BTreeMap<u64, Walked>,
     /// The bytes the walks account for, by first address: the end, and
@@ -1533,6 +1550,7 @@ impl Walks<'_> {
             if let Some(slot) = stub_slot(program, e)
                 && self.imports.get(&slot).is_some_and(|n| noreturn_name(n))
             {
+                self.named.insert(e);
                 self.noreturn.insert(e);
             }
             let w = walk(program, e, &self.starts, &self.noreturn, None);
@@ -1589,7 +1607,10 @@ impl Walks<'_> {
     /// its caller's literals ([`Walked::ends`]) and its own walk has no
     /// way back ([`never_returns`]): one such call only ends its own path,
     /// since a function like `error` returns or not by its argument. A
-    /// name that exits only on some arguments is never taken. A call
+    /// name that exits only on some arguments is never taken. The set is
+    /// made anew from the walks there are now each round, so a mark whose
+    /// evidence went with a dropped walk goes too, and a walk cut at a call
+    /// of such a function is walked again. A call
     /// another path also jumps past is left alone: the code after it is
     /// the function's own either way.
     ///
@@ -1602,9 +1623,8 @@ impl Walks<'_> {
                 .walked
                 .values()
                 .flat_map(|w| w.ends.iter().copied())
-                .filter(|c| !self.noreturn.contains(c))
                 .collect();
-            let learned: Vec<u64> = ends
+            let learned: BTreeSet<u64> = ends
                 .into_iter()
                 .filter(|c| {
                     self.walked
@@ -1616,17 +1636,26 @@ impl Walks<'_> {
                             .any(|s| s.addr == *c && exits_on_status_name(bare_name(&s.name)))
                 })
                 .collect();
-            self.noreturn.extend(learned);
+            let now: BTreeSet<u64> = self.named.union(&learned).copied().collect();
+            let gone: BTreeSet<u64> = self.noreturn.difference(&now).copied().collect();
+            self.noreturn = now;
             let stale: Vec<u64> = self
                 .walked
                 .iter()
                 .filter(|(_, w)| {
                     w.seen.values().any(|i| {
+                        let next = i.next();
                         i.flow() == Flow::Call
                             && !guarded(i)
-                            && i.target().is_some_and(|t| self.noreturn.contains(&t))
-                            && w.seen.contains_key(&i.next())
-                            && !w.followed.contains(&i.next())
+                            && i.target().is_some_and(|t| {
+                                (self.noreturn.contains(&t)
+                                    && w.seen.contains_key(&next)
+                                    && !w.followed.contains(&next))
+                                    || (gone.contains(&t)
+                                        && !w.ends.contains(&t)
+                                        && !w.seen.contains_key(&next)
+                                        && !self.starts.contains(&next))
+                            })
                     })
                 })
                 .map(|(e, _)| *e)
@@ -1742,16 +1771,18 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         .filter(|s| s.kind == SymbolKind::Import && s.addr != 0)
         .map(|s| (s.addr, s.name.as_str()))
         .collect();
+    let named: BTreeSet<u64> = program
+        .symbols
+        .iter()
+        .filter(|s| s.kind != SymbolKind::Import && s.addr != 0 && noreturn_name(&s.name))
+        .map(|s| s.addr)
+        .collect();
     let mut walks = Walks {
         starts: seeds.iter().copied().collect(),
         guessed: BTreeSet::new(),
         labels: BTreeMap::new(),
-        noreturn: program
-            .symbols
-            .iter()
-            .filter(|s| s.kind != SymbolKind::Import && s.addr != 0 && noreturn_name(&s.name))
-            .map(|s| s.addr)
-            .collect(),
+        noreturn: named.clone(),
+        named,
         walked: BTreeMap::new(),
         covered: BTreeMap::new(),
         data: BTreeMap::new(),
