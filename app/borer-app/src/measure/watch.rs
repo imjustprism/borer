@@ -2,15 +2,16 @@
 //!
 //! As each frame draws, and as each frame starts, the phase reads what the window shows
 //! ([`seen`]): a cheap [`Stamp`] of what a person sees change, nothing they do not (no count
-//! of running requests), and whether the app is quiet, no [`Jobs`] request running, every
-//! open view on the binary's state and no docked panel on an older one. A [`Watch`] started at an action's dispatch takes those
+//! of running requests), the active code tab's hover text among it, and whether the app is
+//! quiet, no [`Jobs`] request running, no hover text parsing, every open view on the
+//! binary's state and no docked panel on an older one. A [`Watch`] started at an action's dispatch takes those
 //! reads and names the read of the first change (ack) and the read after which the app is
 //! quiet and the stamp holds for one more read (settle).
 
 use std::sync::Arc;
 use std::time::Instant;
 
-use gpui::{App, Entity, EntityId};
+use gpui::{App, Entity, EntityId, SharedString};
 use picker::{Picker, PickerDelegate as _};
 use workspace::Workspace;
 
@@ -18,6 +19,7 @@ use crate::binary::Binary;
 use crate::decompile_item::DecompileItem;
 use crate::functions_panel::FunctionsPanel;
 use crate::goto::GoToDelegate;
+use crate::hover_peek::hover_texts;
 use crate::panels::PANELS;
 use crate::places::view_of;
 use crate::rows_panel::Rows as _;
@@ -31,6 +33,8 @@ pub(super) struct Stamp {
     pub(super) active: Option<(EntityId, Option<u64>)>,
     /// The top line of the active code tab.
     pub(super) top: Option<usize>,
+    /// The text of each hover popover the active code tab shows.
+    pub(super) hover: Vec<SharedString>,
     /// The functions panel's highlighted row and its filter's text.
     pub(super) panel: Option<(Option<usize>, String)>,
     /// The go-to picker's query and its line count, while it is open.
@@ -47,8 +51,8 @@ pub(super) struct Stamp {
 pub(super) struct Seen {
     /// What the frame shows.
     pub(super) stamp: Stamp,
-    /// Whether no request runs, every open view shows the binary's state and no docked
-    /// panel shows an older one.
+    /// Whether no request runs, no hover text is parsing, every open view shows the
+    /// binary's state and no docked panel shows an older one.
     pub(super) quiet: bool,
 }
 
@@ -65,9 +69,14 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
         let view = view_of(item.as_ref(), cx);
         (item.item_id(), view.and_then(|view| view.revision()))
     });
-    let top = workspace
-        .active_item_as::<DecompileItem>(cx)
-        .map(|tab| tab.read(cx).top_line());
+    let tab = workspace.active_item_as::<DecompileItem>(cx);
+    let top = tab.as_ref().map(|tab| tab.read(cx).top_line());
+    let texts: Vec<_> = tab.map_or_else(Vec::new, |tab| {
+        let texts = hover_texts(tab.read(cx).editor().read(cx));
+        texts.map(|text| text.read(cx)).collect()
+    });
+    let parsing = texts.iter().any(|text| text.is_parsing());
+    let hover = texts.iter().map(|text| text.source().clone()).collect();
     let panel = workspace.panel::<FunctionsPanel>(cx).map(|panel| {
         let panel = panel.read(cx);
         (panel.selected(), panel.filter_text(cx))
@@ -96,12 +105,13 @@ pub(super) fn seen(workspace: &Entity<Workspace>, binary: &Entity<Binary>, cx: &
         stamp: Stamp {
             active,
             top,
+            hover,
             panel,
             picker,
             xrefs,
             status: binary.read(cx).status().to_owned(),
         },
-        quiet: jobs == 0 && current,
+        quiet: jobs == 0 && !parsing && current,
     }
 }
 
@@ -180,6 +190,10 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use borer_engine::analysis::Overlay;
+    use borer_engine::view::Ref;
+    use editor::SelectionEffects;
+    use editor::actions::Hover as HoverAction;
+    use editor::hover_popover::hover;
     use gpui::{TestAppContext, VisualTestContext};
 
     use super::{Seen, Stamp, Watch, seen};
@@ -187,8 +201,9 @@ mod tests {
     use crate::app_view::AppWindow;
     use crate::app_view::tests::{CALLEE, CALLER, init, load_sample, open, open_place, sample};
     use crate::binary::BinaryEvent;
-    use crate::decompile_item::TabMode;
+    use crate::decompile_item::{DecompileItem, TabMode};
     use crate::functions_panel::FunctionsPanel;
+    use crate::hover_peek::tests::token_of;
     use crate::measure::now_instant;
     use crate::places::Place;
     use crate::worker::{LoadedBinary, Referent, spawn_engine};
@@ -326,6 +341,39 @@ mod tests {
             ..after.stamp.clone()
         };
         assert_eq!(others, before, "more than the status line changed");
+        watch.frame(at(t0, 2), after);
+        assert_eq!(watch.ack(), Some(at(t0, 2)));
+    }
+
+    /// A hover acks on the frame its text first shows, never on its read: a running read
+    /// with the hover text unchanged acks nothing.
+    #[gpui::test]
+    fn a_hover_acks_on_its_text_not_its_read(cx: &mut TestAppContext) {
+        let (app, cx, _) = with_caller(cx);
+        let t0 = now_instant();
+        let before = look(&app, cx).stamp;
+        assert!(before.hover.is_empty());
+        let mut watch = Watch::new(before);
+        let read = cx.update(|_, cx| spawn_engine("Peeking sub_1030", cx, || ()));
+        watch.frame(at(t0, 1), look(&app, cx));
+        assert_eq!(watch.ack(), None, "a read with the hover text unchanged");
+        drop(read);
+        let tab = app.workspace.read_with(cx, |workspace, cx| {
+            workspace.active_item_as::<DecompileItem>(cx).unwrap()
+        });
+        let (editor, code) = tab.read_with(cx, |tab, _| {
+            (tab.editor().clone(), tab.code().unwrap().clone())
+        });
+        let (call, _) = token_of(&code, &Ref::Function(CALLEE));
+        editor.update_in(cx, |editor, window, cx| {
+            editor.change_selections(SelectionEffects::no_scroll(), window, cx, |s| {
+                s.select_ranges([call..call]);
+            });
+            hover(editor, &HoverAction, window, cx);
+        });
+        draw(cx);
+        let after = look(&app, cx);
+        assert_eq!(after.stamp.hover.len(), 1);
         watch.frame(at(t0, 2), after);
         assert_eq!(watch.ack(), Some(at(t0, 2)));
     }
