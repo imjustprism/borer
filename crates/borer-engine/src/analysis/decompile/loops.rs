@@ -2,12 +2,17 @@
 //! `do`/`while` a compiler's loop inversion leaves, and `for` from a
 //! counted `while`.
 //!
+//! A `do` whose first test the values set before it decide is a `while`
+//! too ([`entry`]).
+//!
 //! A loop that only computes its own test reads as `while (test);`
 //! ([`spin`]).
 
 use super::ctext::{Ast, Bin, expression, named_type, tokens as c_tokens};
 use super::*;
 
+mod entry;
+pub(super) use entry::decided_loops;
 mod spin;
 
 /// Lines the scan for a later write of a moved variable reads before it
@@ -46,7 +51,6 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
     while k < lines.len() {
         if guarded_loop(lines, k)
             || positive_guarded_for(lines, k)
-            || counted_do_const(lines, k)
             || counted_while(lines, k)
             || returning_while(lines, k)
             || exit_arm(lines, k)
@@ -283,119 +287,6 @@ fn positive_guarded_for(lines: &mut Vec<String>, k: usize) -> bool {
     true
 }
 
-/// Rewrites `v = 0; do { B; step; } while (v != bound);` at line `k` as a `for`
-/// loop.
-///
-/// Matches when `bound` is a non-zero positive constant and `step` increments
-/// `v` by a positive constant at the end of the body.
-///
-/// # Arguments
-///
-/// * `lines` - The body lines.
-/// * `k` - The line of the counter initialization.
-///
-/// # Returns
-///
-/// Whether the `do`/`while` loop became a `for`.
-fn counted_do_const(lines: &mut Vec<String>, k: usize) -> bool {
-    let (Some(init), Some(head)) = (lines.get(k), lines.get(k + 1)) else {
-        return false;
-    };
-    let pad = indent_of(init);
-    if pad != 0 || indent_of(head) != pad || head.trim() != "do {" {
-        return false;
-    }
-    let Some((v, start)) =
-        plain_assignment(init).filter(|(lhs, _)| is_register_name(lhs) || vars::is_var_name(lhs))
-    else {
-        return false;
-    };
-    let Some(start_val) = parse_const(start) else {
-        return false;
-    };
-    let v = v.to_owned();
-    let start = start.to_owned();
-    let Some(latch) = closing(lines, k + 1, pad) else {
-        return false;
-    };
-    let Some(cond) = lines
-        .get(latch)
-        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))
-        .map(str::to_owned)
-    else {
-        return false;
-    };
-    let Some(bound_val) = cond
-        .strip_prefix(&format!("{v} != "))
-        .or_else(|| cond.strip_prefix(&format!("(uint32_t){v} != ")))
-        .and_then(parse_const)
-    else {
-        return false;
-    };
-    let bound_ok = bound_val > 0 && (bound_val & 0xffff_ffff) != 0;
-    let body = lines.get(k + 2..latch).unwrap_or(&[]);
-    if !bound_ok
-        || body.is_empty()
-        || body
-            .iter()
-            .any(|l| is_label(l) || l.contains(&format!("&{v}")))
-        || assigned_values(body, &v) != 1
-        || continues_at_top(body)
-        || breaks_at_top(body)
-    {
-        return false;
-    }
-    let Some((step_idx, inc, inc_val)) = find_do_const_step(body, pad, &v) else {
-        return false;
-    };
-    if inc_val == 0 || bound_val <= start_val || (bound_val - start_val) % inc_val != 0 {
-        return false;
-    }
-    let pad_s = " ".repeat(pad);
-    let mut rewritten = vec![format!(
-        "{pad_s}for ({v} = {start}; {cond}; {v} += {inc}) {{"
-    )];
-    for (idx, line) in body.iter().enumerate() {
-        if idx != step_idx {
-            rewritten.push(line.clone());
-        }
-    }
-    rewritten.push(format!("{pad_s}}}"));
-    lines.splice(k..=latch, rewritten);
-    true
-}
-
-/// Finds the trailing positive-constant step of `v` in a `do` loop body.
-fn find_do_const_step(body: &[String], pad: usize, v: &str) -> Option<(usize, String, u64)> {
-    (body.len().saturating_sub(2)..body.len())
-        .rev()
-        .find_map(|idx| {
-            let l = body.get(idx)?;
-            if indent_of(l) != pad + 2 {
-                return None;
-            }
-            if idx + 1 < body.len() {
-                let tail = body.last()?;
-                let tail_lhs = plain_assignment(tail)
-                    .or_else(|| tail.trim().strip_suffix(';')?.split_once(" += "))
-                    .map(|(lhs, _)| lhs);
-                let tail_ok = indent_of(tail) == pad + 2
-                    && !mentions_ident(tail, v)
-                    && !impure(tail)
-                    && tail_lhs.is_some_and(|lhs| is_register_name(lhs) || vars::is_var_name(lhs));
-                if !tail_ok {
-                    return None;
-                }
-            }
-            let s = l.trim().strip_suffix(';')?;
-            let inc = s
-                .strip_prefix(&format!("{v} += "))
-                .or_else(|| s.strip_prefix(&format!("{v} = {v} + ")))?;
-            let inc_val = parse_const(inc).filter(|&c| c > 0)?;
-            Some((idx, inc.to_owned(), inc_val))
-        })
-}
-
 /// Splits a loop counter's initialization, `a = b = v = value;`, into the
 /// earlier targets (`a = b`), the counter and its value.
 ///
@@ -427,7 +318,8 @@ fn counter_init(init: &str) -> Option<(Option<String>, String, String)> {
     clean.then_some((prefix, v, value))
 }
 
-/// Rewrites the `v = init; while (C) { B; step }` at line `k` as a `for`.
+/// Rewrites the `v = init; while (C) { B; step }` at line `k` as a `for`,
+/// the step found as [`entry::step`] finds it.
 ///
 /// # Arguments
 ///
@@ -464,7 +356,7 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
     if body.iter().any(|l| is_label(l)) {
         return false;
     }
-    let Some(step) = step_of(body, pad + 2, &v).map(str::to_owned) else {
+    let Some((at, step)) = entry::step(body, pad, &v) else {
         return false;
     };
     let pad_s = " ".repeat(pad);
@@ -473,7 +365,12 @@ fn counted_while(lines: &mut Vec<String>, k: usize) -> bool {
         rewritten.push(format!("{pad_s}{p} = {value};"));
     }
     rewritten.push(format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{"));
-    rewritten.extend(body.get(..body.len() - 1).unwrap_or(&[]).iter().cloned());
+    rewritten.extend(
+        body.iter()
+            .enumerate()
+            .filter(|&(i, _)| i != at)
+            .map(|(_, l)| l.clone()),
+    );
     rewritten.push(format!("{pad_s}}}"));
     lines.splice(k..=close, rewritten);
     true
@@ -922,7 +819,7 @@ mod tests {
     //! The loop rewrites on hand-written text, each beside the case that
     //! must keep its form.
 
-    use super::recover_loops;
+    use super::{decided_loops, recover_loops};
 
     /// Runs the rewrites over a body.
     ///
@@ -937,6 +834,20 @@ mod tests {
         let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
         recover_loops(&mut lines);
         lines.join("\n") + "\n"
+    }
+
+    /// Runs the decided-entry rewrite over a function's text, at a 64-bit
+    /// word.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text, one statement per line.
+    ///
+    /// # Returns
+    ///
+    /// The text after the rewrite.
+    fn decide(text: &str) -> String {
+        decided_loops(text.to_owned(), 64)
     }
 
     /// A guard that is the loop's own test makes the `do` a `while`.
@@ -1028,6 +939,12 @@ mod tests {
             run(text),
             "for (rcx = 0; rcx < a1; rcx += 1) {\n  rax += rcx;\n}\nreturn rax;\n"
         );
+        let tail =
+            "rcx = 0;\nwhile (rcx != 3) {\n  sub_1(rcx);\n  rcx += 1;\n  rdx += 8;\n}\nreturn 0;\n";
+        assert_eq!(
+            run(tail),
+            "for (rcx = 0; rcx != 3; rcx += 1) {\n  sub_1(rcx);\n  rdx += 8;\n}\nreturn 0;\n"
+        );
         let labelled =
             "rcx = 0;\nwhile (rcx < a1) {\n  rax += rcx;\n  L_1:\n  rcx += 1;\n}\nreturn rax;\n";
         assert_eq!(run(labelled), labelled);
@@ -1047,8 +964,99 @@ mod tests {
         );
         let do_const = "rax = 0;\ndo {\n  sub_1(rax);\n  rdx = rdx + 2;\n  rax = rax + 1;\n} while (rax != 0x100);\n";
         assert_eq!(
-            run(do_const),
+            decide(do_const),
             "for (rax = 0; rax != 0x100; rax += 1) {\n  sub_1(rax);\n  rdx = rdx + 2;\n}\n"
         );
+    }
+
+    /// A `do` whose first test the values set in front of it decide is a
+    /// `for` at any depth: a count, a walk between two constants, or one
+    /// base and two offsets.
+    #[test]
+    fn a_do_the_entry_values_decide_is_a_for() {
+        let nested = "if (a1 != 0) {\n  rbx = 4;\n  do {\n    sub_1();\n    rbx -= 1;\n  } while (rbx != 0);\n}\nreturn 0;\n";
+        assert_eq!(
+            decide(nested),
+            "if (a1 != 0) {\n  for (rbx = 4; rbx != 0; rbx -= 1) {\n    sub_1();\n  }\n}\nreturn 0;\n"
+        );
+        let walk = "r3 = 0x80010f4;\ndo {\n  sub_1(r3);\n  r3 += 8;\n} while (r3 != 0x8001124);\nreturn 0;\n";
+        assert_eq!(
+            decide(walk),
+            "for (r3 = 0x80010f4; r3 != 0x8001124; r3 += 8) {\n  sub_1(r3);\n}\nreturn 0;\n"
+        );
+        let base = "void f(uint64_t a2)\n{\n  uint64_t var1;\n  var1 = a2;\n  do {\n    sub_1(var1);\n    var1 += 4;\n  } while (var1 != a2 + 120);\n  return;\n}\n";
+        assert_eq!(
+            decide(base),
+            "void f(uint64_t a2)\n{\n  uint64_t var1;\n  for (var1 = a2; var1 != a2 + 120; var1 += 4) {\n    sub_1(var1);\n  }\n  return;\n}\n"
+        );
+        let registers = "r3 = r4;\ndo {\n  *(uint32_t*)r3 = 0;\n  r3 += 4;\n} while (r4 + 0x100 != r3 /* true on all 64 sampled inputs, not proven */);\n";
+        assert_eq!(
+            decide(registers),
+            "for (r3 = r4; r4 + 0x100 != r3 /* true on all 64 sampled inputs, not proven */; r3 += 4) {\n  *(uint32_t*)r3 = 0;\n}\n"
+        );
+        let tail = "rax = 0;\ndo {\n  sub_1(rax);\n  rax += 1;\n  rdx += 8;\n} while (rax != 3);\nreturn 0;\n";
+        assert_eq!(
+            decide(tail),
+            "for (rax = 0; rax != 3; rax += 1) {\n  sub_1(rax);\n  rdx += 8;\n}\nreturn 0;\n"
+        );
+    }
+
+    /// Two frame slots are two addresses: a walk from one to the other is a
+    /// `while`, and with two steps no `for`.
+    #[test]
+    fn a_walk_between_two_frame_slots_is_a_while() {
+        let text = "rsi = &local_810;\nrdi = a3 + 0x604;\ndo {\n  *(uint8_t*)rsi = *(uint8_t*)rdi;\n  rsi += 1;\n  rdi += 1;\n} while (rsi != &local_751);\nreturn 0;\n";
+        assert_eq!(
+            decide(text),
+            "rsi = &local_810;\nrdi = a3 + 0x604;\nwhile (rsi != &local_751) {\n  *(uint8_t*)rsi = *(uint8_t*)rdi;\n  rsi += 1;\n  rdi += 1;\n}\nreturn 0;\n"
+        );
+    }
+
+    /// A first test the entry values do not decide, or decide false, keeps
+    /// the `do`.
+    #[test]
+    fn an_undecided_first_test_keeps_the_do() {
+        let kept = [
+            "rbx = a1;\ndo {\n  sub_1();\n  rbx -= 1;\n} while (rbx != 0);\nreturn 0;\n",
+            "rbx = 0;\ndo {\n  sub_1();\n  rbx += 1;\n} while (rbx != rsi);\nreturn 0;\n",
+            "rbx = 5;\ndo {\n  sub_1();\n  rbx += 1;\n} while (rbx != 5);\nreturn 0;\n",
+            "rbx = rdi;\nrdi = rsi;\ndo {\n  sub_1(rbx);\n  rbx += 4;\n} while (rbx != rdi + 120);\nreturn 0;\n",
+            "rbx = 0x100;\ndo {\n  sub_1();\n  rbx += 1;\n} while ((uint8_t)rbx != 0);\nreturn 0;\n",
+            "rbx = 4;\ndo {\n  L_1:\n  sub_1();\n  rbx -= 1;\n} while (rbx != 0);\nreturn 0;\n",
+            "rbx = rdi;\ndo {\n  sub_1(rbx);\n  rbx += 4;\n} while (rbx != rdi + 0);\nreturn 0;\n",
+            "rbx = 4;\nrbx = rdi;\ndo {\n  sub_1();\n  rbx -= 1;\n} while (rbx != 0);\nreturn 0;\n",
+            "rbx = 4;\nsub_2();\ndo {\n  sub_1();\n  rbx -= 1;\n} while (rbx != 0);\nreturn 0;\n",
+            "void f(uint8_t *a2)\n{\n  uint64_t var1;\n  var1 = a2;\n  do {\n    var1 += 4;\n  } while (var1 != (uint32_t)a2 + 0x100000000);\n  return;\n}\n",
+            "g32_10 = 4;\ndo {\n  sub_1();\n} while (g32_10 != 0);\nreturn 0;\n",
+        ];
+        for text in kept {
+            assert_eq!(decide(text), text);
+        }
+    }
+
+    /// A step stays where it is when the line after it may read the
+    /// variable through memory: a slot whose address a pointer holds.
+    #[test]
+    fn a_step_read_through_memory_stays_before_the_read() {
+        let text = "rbx = &local_10;\nlocal_10 = 0;\nwhile (local_10 != 3) {\n  sub_1(rbx);\n  local_10 += 1;\n  rax = *(uint32_t*)rbx;\n}\nreturn rax;\n";
+        assert_eq!(run(text), text);
+    }
+
+    /// A frame slot another declared slot shares bytes with, or a sum on a
+    /// pointer the text may still count in bytes, decides nothing; a slot
+    /// alone does.
+    #[test]
+    fn an_overlapped_slot_or_a_scaled_pointer_decides_nothing() {
+        let alone = "uint64_t local_10;\nlocal_10 = 4;\ndo {\n  sub_1();\n  local_10 -= 1;\n} while (local_10 != 0);\nreturn 0;\n";
+        assert_eq!(
+            decide(alone),
+            "uint64_t local_10;\nfor (local_10 = 4; local_10 != 0; local_10 -= 1) {\n  sub_1();\n}\nreturn 0;\n"
+        );
+        let overlapped = "uint64_t local_10;\nuint32_t local_c;\nlocal_10 = 0x100000000;\nlocal_c = 0;\ndo {\n  sub_1();\n  local_10 -= 1;\n} while (local_10 != 0);\nreturn 0;\n";
+        assert_eq!(decide(overlapped), overlapped);
+        let scaled = "void f(int32_t *a2)\n{\n  uint64_t var1;\n  var1 = a2 + 4;\n  do {\n    sub_1(var1);\n    var1 += 4;\n  } while (var1 != (uintptr_t)a2 + 4);\n  return;\n}\n";
+        assert_eq!(decide(scaled), scaled);
+        let slot_step = "uint32_t local_10;\nuint32_t local_c;\nrsi = &local_10 + 1;\ndo {\n  sub_1(rsi);\n  rsi += 4;\n} while (rsi != &local_c);\nreturn 0;\n";
+        assert_eq!(decide(slot_step), slot_step);
     }
 }

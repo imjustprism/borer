@@ -14,6 +14,7 @@ mod callee;
 pub(super) use callee::{CALLEE_INSTRUCTIONS_MAX, agreed_params};
 mod callfmt;
 mod selects;
+pub(super) use selects::decl_type;
 mod signs;
 mod truths;
 mod words;
@@ -21,7 +22,9 @@ mod words;
 /// The text passes every decompile ends with.
 ///
 /// The header lines the text's own calls give, one variable per register
-/// web ([`vars::split_webs`]), layouts, then parameter types, then the
+/// web ([`vars::split_webs`]) and the loops whose first test the values
+/// set before them decide ([`loops::decided_loops`]), layouts, then
+/// parameter types, then the
 /// byte arithmetic those types would otherwise scale, and last the names
 /// and types the evidence gives the variables and the constants they
 /// take ([`evidence::name_vars`]).
@@ -140,11 +143,15 @@ pub(super) fn polish_skipping(
 ) -> Traced {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
+    let word_bits = u8::try_from(bitness).unwrap_or(64);
     let text = skip.apply(Pass::SplitReturns, text, split_returns);
     let text = skip.apply(Pass::NameOwnFields, text, name_own_fields);
     let text = skip.apply(Pass::SourceFile, text, source_file);
     let text = skip.apply(Pass::WireFormat, text, |t| wire_format(t, &streams));
     let text = skip.apply(Pass::SplitWebs, text, vars::split_webs);
+    let text = skip.apply(Pass::DecidedLoops, text, |t| {
+        loops::decided_loops(t.to_owned(), word_bits)
+    });
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);
@@ -163,7 +170,7 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::NameVars, text, |t| {
         evidence::name_vars(
             t,
-            u8::try_from(bitness).unwrap_or(64),
+            word_bits,
             callers.map(|(program, ..)| program.format).filter(|f| {
                 matches!(
                     f,

@@ -1874,3 +1874,81 @@ fn a_fact_is_read_only_in_the_round_whose_branch_gives_it() {
     assert!(!text.contains("return 5;"), "{text}");
     replays_clean(&p, &Analysis::compute(&p), &[0x1_4000_1000]);
 }
+
+/// A rotated loop whose count the machine sets right before it prints as a
+/// loop that tests first.
+///
+/// `mov ebx,4; L: call f; dec ebx; jne L; ret` enters its body with `rbx`
+/// 4, so the first `jne` is decided and the guard the compiler left out
+/// would have passed: the text is a `for` or a `while`, not a `do`. Read
+/// from `edi` instead, the count may be 0 on entry and the `do` stays. The
+/// lift agrees with the machine either way.
+#[test]
+fn a_loop_entered_with_a_constant_count_tests_first() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let mut counted = vec![
+        0xbb, 0x04, 0x00, 0x00, 0x00, // ASM: mov ebx,4
+        0xe8, 0x36, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0xff, 0xcb, // ASM: dec ebx
+        0x75, 0xf7, // ASM: jne 0x140001005
+        0xc3, // ASM: ret
+    ];
+    let mut read = vec![
+        0x89, 0xfb, // ASM: mov ebx,edi
+        0xe8, 0x39, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0xff, 0xcb, // ASM: dec ebx
+        0x75, 0xf7, // ASM: jne 0x140001002
+        0xc3, // ASM: ret
+    ];
+    for code in [&mut counted, &mut read] {
+        code.resize(0x40, 0xcc);
+        code.push(0xc3);
+    }
+    let tested = |code: &[u8]| {
+        let p = program64(code);
+        let a = Analysis::compute(&p);
+        let v = verify(&p, &a, &[0x1_4000_1000], 1);
+        assert!(v.mismatches.is_empty(), "{}", verify_tsv(&v));
+        decompiled(&p, 0x1_4000_1000)
+    };
+    let text = tested(&counted);
+    assert!(!text.contains("do {"), "{text}");
+    assert!(text.contains("for (") || text.contains("while ("), "{text}");
+    let text = tested(&read);
+    assert!(
+        text.contains("do {") && text.contains("} while ("),
+        "{text}"
+    );
+}
+
+/// A loop whose first test the entry values decide is still a loop that
+/// runs at least once to the variables: the value its body returns needs
+/// no copy for a path past it.
+///
+/// `mov ebx,4; L: call f; test eax,eax; jne O; dec ebx; jne L; O: ret`
+/// returns what the last call returned. With the `do` written as a loop
+/// that tests first before the registers were split, the split saw a way
+/// past the loop and kept `rax` with a copy of the call's result.
+#[test]
+fn a_decided_loop_needs_no_copy_for_a_path_past_it() {
+    let mut code = vec![
+        0xbb, 0x04, 0x00, 0x00, 0x00, // ASM: mov ebx,4
+        0xe8, 0x36, 0x00, 0x00, 0x00, // ASM: call 0x140001040
+        0x85, 0xc0, // ASM: test eax,eax
+        0x75, 0x04, // ASM: jne 0x140001012
+        0xff, 0xcb, // ASM: dec ebx
+        0x75, 0xf3, // ASM: jne 0x140001005
+        0xc3, // ASM: ret
+    ];
+    code.resize(0x40, 0xcc);
+    code.extend_from_slice(&[
+        0x8b, 0x01, // ASM: mov eax,[rcx]
+        0xc3, // ASM: ret
+    ]);
+    let text = decompiled(&program64(&code), 0x1_4000_1000);
+    assert!(!text.contains("do {"), "{text}");
+    assert!(
+        !text.contains("rax = ") && !text.contains("eax = "),
+        "{text}"
+    );
+}

@@ -897,7 +897,7 @@ differs	"
     );
     for (spec, why) in [
         ("0x1000,count=0", "count is 1 to"),
-        ("0x1000,steps=1000000", "up to 9 times while it bisects"),
+        ("0x1000,steps=1000000", "up to 10 times while it bisects"),
         ("0x1000,seed=2", "cannot read seed=2"),
         ("nosuch", "nosuch"),
     ] {

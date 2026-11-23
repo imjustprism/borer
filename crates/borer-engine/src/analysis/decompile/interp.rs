@@ -598,7 +598,7 @@ const WIDE_BASE_32: u64 = 0x5ffe_0000;
 /// # Arguments
 ///
 /// * `e` - The expression.
-fn pure(e: &Ast) -> bool {
+pub(super) fn pure(e: &Ast) -> bool {
     match e {
         Ast::Assign(..) | Ast::Step(..) | Ast::Call(..) => false,
         Ast::Int(..) | Ast::Float(..) | Ast::Str(_) | Ast::Name(_) => true,

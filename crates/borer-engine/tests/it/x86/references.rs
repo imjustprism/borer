@@ -620,6 +620,9 @@ fn an_or_with_minus_one_sets_the_register_without_reading_it() {
 /// A countdown `sub ebx, 1; jne` reads the counter it just wrote, not a
 /// copy of what it held.
 ///
+/// The header's test reads the variable its step writes, and the count 2
+/// decides the first test, so the loop is a `for`.
+///
 /// `mov ebx,2; L: call 0x401020; sub ebx,1; jne L; ret`, the callee `mov
 /// eax,1; ret`.
 #[test]
@@ -631,7 +634,7 @@ fn a_countdown_reads_the_counter_it_just_wrote() {
     code.resize(0x20, 0xcc);
     code.extend_from_slice(&[0xb8, 0x01, 0x00, 0x00, 0x00, 0xc3]);
     let text = dc(&code);
-    assert!(text.contains("while (var1 != 0)"), "{text}");
+    assert!(text.contains("for (i = 2; i != 0; i -= 1) {"), "{text}");
     assert!(!text.contains("tmp_"), "{text}");
 }
 

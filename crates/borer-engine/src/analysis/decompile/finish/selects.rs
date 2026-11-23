@@ -1170,7 +1170,7 @@ fn only_assign(
 /// # Returns
 ///
 /// The type text, or `None` when no single declaration names it.
-fn decl_type(lines: &[String], name: &str) -> Option<String> {
+pub(in crate::analysis::decompile) fn decl_type(lines: &[String], name: &str) -> Option<String> {
     let mut found = None;
     for line in lines {
         let trimmed = line.trim();

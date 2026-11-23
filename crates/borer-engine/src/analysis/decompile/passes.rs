@@ -79,6 +79,9 @@ pub enum Pass {
     WireFormat,
     /// Splits a register into one variable per web.
     SplitWebs,
+    /// Writes a `do` whose first test the values set before it decide as a
+    /// `while` or a `for`.
+    DecidedLoops,
     /// Applies the layouts of the pointers the text indexes.
     ApplyLayouts,
     /// Types a float register by the lanes it is read as.
@@ -151,7 +154,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 64] = [
+    pub const ALL: [Self; 65] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -184,6 +187,7 @@ impl Pass {
         Self::SourceFile,
         Self::WireFormat,
         Self::SplitWebs,
+        Self::DecidedLoops,
         Self::ApplyLayouts,
         Self::FloatLanes,
         Self::LaneLocals,
@@ -254,6 +258,7 @@ impl Pass {
             Self::SourceFile => "source_file",
             Self::WireFormat => "wire_format",
             Self::SplitWebs => "split_webs",
+            Self::DecidedLoops => "decided_loops",
             Self::ApplyLayouts => "apply_layouts",
             Self::FloatLanes => "float_lanes",
             Self::LaneLocals => "lane_locals",

@@ -884,7 +884,7 @@ TASKS = [
             ("load_binary", {"path": "{loop}", "arch": "x64", "base": "0x10000"}),
             ("decompile", {"address": "0x10000"}),
         ],
-        "var2 < 10",
+        "i < 10",
     ),
     (
         "diverge_runs",
