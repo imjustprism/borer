@@ -24,7 +24,7 @@ crates/borer-engine/src/analysis/decompile/expr/fold_tests/builders.rs::builders
 crates/borer-engine/src/analysis/decompile/expr/fold_tests/mod.rs::local#1	288
 crates/borer-engine/src/analysis/decompile/expr_render.rs::render_in#1	275
 crates/borer-engine/src/analysis/decompile/expr_render.rs::render_plain#1	205
-crates/borer-engine/src/analysis/decompile/fields.rs::apply_layouts#1	110
+crates/borer-engine/src/analysis/decompile/fields.rs::apply_layouts#1	107
 crates/borer-engine/src/analysis/decompile/format.rs::arguments#1	115
 crates/borer-engine/src/analysis/decompile/guarded.rs::plan#1	130
 crates/borer-engine/src/analysis/decompile/helper.rs::define#1	151

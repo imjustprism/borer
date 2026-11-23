@@ -35,7 +35,7 @@ pub(super) fn name_own_fields(text: &str) -> String {
                 continue;
             }
             if let Some(zero) = fields.get(&0) {
-                *line = rename_zero_field(line, var, zero);
+                *line = rename_zero_field(line, var, zero, None);
             }
             *line = rename_fields(line, var, fields);
         }
@@ -447,7 +447,7 @@ pub(super) fn apply_layouts(text: &str) -> String {
         {
             continue;
         }
-        let mut fields: BTreeMap<i64, &str> = BTreeMap::new();
+        let mut fields: BTreeMap<i64, &'static str> = BTreeMap::new();
         for (off, letters) in offsets {
             let letter = match letters.iter().copied().collect::<Vec<_>>().as_slice() {
                 [one] => *one,
@@ -481,19 +481,16 @@ pub(super) fn apply_layouts(text: &str) -> String {
             }
         }
         headers.push(header);
-        let above: BTreeMap<u64, String> = fields
-            .keys()
-            .filter_map(|o| u64::try_from(*o).ok())
-            .map(|o| (o, format!("field_{o:#x}")))
+        let above: TypedFields = fields
+            .iter()
+            .filter_map(|(o, l)| Some((u64::try_from(*o).ok()?, (format!("field_{o:#x}"), *l))))
             .collect();
-        let below: BTreeMap<u64, String> = fields
-            .keys()
-            .filter(|o| **o < 0)
-            .map(|o| {
-                (
-                    o.unsigned_abs(),
-                    format!("field_neg{:#x}", o.unsigned_abs()),
-                )
+        let below: TypedFields = fields
+            .iter()
+            .filter(|(o, _)| **o < 0)
+            .map(|(o, l)| {
+                let off = o.unsigned_abs();
+                (off, (format!("field_neg{off:#x}"), *l))
             })
             .collect();
         renames.push(((*base).to_owned(), above, below));
@@ -506,17 +503,17 @@ pub(super) fn apply_layouts(text: &str) -> String {
             if !line.contains(base.as_str()) {
                 continue;
             }
-            for (off, name) in names {
+            for (off, (name, letter)) in names {
                 let swapped = format!("({} + {base})", offset_text(*off));
                 if line.contains(&swapped) {
                     *line = line.replace(&swapped, &format!("({base} + {})", offset_text(*off)));
                 }
                 if *off == 0 {
-                    *line = rename_zero_field(line, base, name);
+                    *line = rename_zero_field(line, base, name, Some(letter));
                 }
             }
-            *line = rename_fields(line, base, names);
-            *line = rename_fields_at(line, base, below, " - ");
+            *line = rename_typed_fields(line, base, names, " + ");
+            *line = rename_typed_fields(line, base, below, " - ");
         }
     }
     let at = header_len(&lines);
@@ -558,7 +555,14 @@ fn note_assigned_line<'a>(t: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
 /// * `line` - The line.
 /// * `base` - The pointer.
 /// * `name` - The field name at offset zero.
-pub(super) fn rename_zero_field(line: &str, base: &str, name: &str) -> String {
+/// * `letter` - The field's width letter, which a load's cast must spell
+///   for the load to be the field; `None` renames a load of any width.
+pub(super) fn rename_zero_field(
+    line: &str,
+    base: &str,
+    name: &str,
+    letter: Option<&str>,
+) -> String {
     let mut s = line.to_owned();
     let mut from = 0;
     while let Some(i) = s.get(from..).and_then(|t| t.find(base)) {
@@ -573,6 +577,10 @@ pub(super) fn rename_zero_field(line: &str, base: &str, name: &str) -> String {
         let Some(cast) = s.get(..at).and_then(deref_cast_start) else {
             continue;
         };
+        let stated = s.get(cast + 2..at.saturating_sub(2)).and_then(layout_type);
+        if letter.is_some_and(|l| stated != Some(l)) {
+            continue;
+        }
         let replacement = format!("{base}->{name}");
         s.replace_range(cast..at + base.len(), &replacement);
         from = cast + replacement.len();
@@ -623,51 +631,9 @@ pub(super) fn rename_fields_at(
     if names.is_empty() {
         return line.to_owned();
     }
-    let lea = line
-        .strip_suffix(';')
-        .and_then(|t| t.split_once(" = "))
-        .and_then(|(lhs, rhs)| {
-            let operand = rhs.strip_prefix(var)?.strip_prefix(op)?;
-            let off = parse_const(operand)?;
-            Some(format!("{lhs} = &{var}->{};", names.get(&off)?))
-        });
-    if let Some(named) = lea {
-        return named;
-    }
-    let needle = format!("({var}{op}");
-    let mut s = line.to_owned();
-    let mut from = 0;
-    while let Some(i) = s.get(from..).and_then(|t| t.find(&needle)) {
-        let at = from + i;
-        let inner = at + needle.len();
-        let Some(rest) = s.get(inner..) else {
-            break;
-        };
-        let Some(end) = rest.find([')', ',']) else {
-            break;
-        };
-        let closer = rest.as_bytes().get(end).copied();
-        let Some(off) = rest.get(..end).and_then(parse_const) else {
-            from = inner;
-            continue;
-        };
-        let Some(name) = names.get(&off) else {
-            from = inner;
-            continue;
-        };
-        if closer == Some(b')')
-            && let Some(cast) = s.get(..at).and_then(deref_cast_start)
-        {
-            let replacement = format!("{var}->{name}");
-            s.replace_range(cast..inner + end + 1, &replacement);
-            from = cast + replacement.len();
-        } else {
-            let replacement = format!("&{var}->{name}");
-            s.replace_range(at + 1..inner + end, &replacement);
-            from = at + 1 + replacement.len();
-        }
-    }
-    s
+    rename_checked(line, var, op, |off| {
+        names.get(&off).map(|n| (n.as_str(), None))
+    })
 }
 
 /// Returns where the `*(T*)` cast starts when `head` ends with one.
@@ -812,7 +778,7 @@ pub(super) fn rename_typed(text: &str, typed: &[(String, TypedFields)]) -> Strin
             continue;
         }
         for (var, fields) in typed {
-            *line = rename_typed_fields(line, var, fields);
+            *line = rename_typed_fields(line, var, fields, " + ");
         }
     }
     let mut out = lines.join("\n");
@@ -833,20 +799,43 @@ pub(super) fn rename_typed(text: &str, typed: &[(String, TypedFields)]) -> Strin
 ///
 /// * `line` - The line.
 /// * `var` - The typed pointer.
-/// * `fields` - The field names by offset, with each field's width letter.
-pub(super) fn rename_typed_fields(line: &str, var: &str, fields: &TypedFields) -> String {
+/// * `fields` - The field names by distance from `var`, with each field's
+///   width letter.
+/// * `op` - ` + ` for the fields above `var`, ` - ` for those below it.
+pub(super) fn rename_typed_fields(line: &str, var: &str, fields: &TypedFields, op: &str) -> String {
+    rename_checked(line, var, op, |off| {
+        fields.get(&off).map(|(n, l)| (n.as_str(), Some(*l)))
+    })
+}
+
+/// Rewrites the field accesses of `var` on one side of it in one line by
+/// name, each load only where its cast reads the field's width.
+///
+/// # Arguments
+///
+/// * `line` - The line.
+/// * `var` - The object variable.
+/// * `op` - ` + ` for the fields above `var`, ` - ` for those below it.
+/// * `field` - The name at a distance from `var`, with the width letter a
+///   load must spell to be the field; `None` takes a load of any width.
+fn rename_checked<'n>(
+    line: &str,
+    var: &str,
+    op: &str,
+    field: impl Fn(u64) -> Option<(&'n str, Option<&'static str>)>,
+) -> String {
     let lea = line
         .strip_suffix(';')
         .and_then(|t| t.split_once(" = "))
         .and_then(|(lhs, rhs)| {
-            let operand = rhs.strip_prefix(var)?.strip_prefix(" + ")?;
+            let operand = rhs.strip_prefix(var)?.strip_prefix(op)?;
             let off = parse_const(operand)?;
-            Some(format!("{lhs} = &{var}->{};", fields.get(&off)?.0))
+            Some(format!("{lhs} = &{var}->{};", field(off)?.0))
         });
     if let Some(named) = lea {
         return named;
     }
-    let needle = format!("({var} + ");
+    let needle = format!("({var}{op}");
     let mut s = line.to_owned();
     let mut from = 0;
     while let Some(i) = s.get(from..).and_then(|t| t.find(&needle)) {
@@ -859,22 +848,15 @@ pub(super) fn rename_typed_fields(line: &str, var: &str, fields: &TypedFields) -
             break;
         };
         let closer = rest.as_bytes().get(end).copied();
-        let Some(off) = rest.get(..end).and_then(parse_const) else {
-            from = inner;
-            continue;
-        };
-        let Some((name, letter)) = fields.get(&off) else {
+        let Some((name, letter)) = rest.get(..end).and_then(parse_const).and_then(&field) else {
             from = inner;
             continue;
         };
         if closer == Some(b')')
             && let Some(cast) = s.get(..at).and_then(deref_cast_start)
         {
-            let head = s.get(..at).unwrap_or("");
-            let stated = head
-                .get(cast + 2..)
-                .and_then(|t| t.get(..t.len().saturating_sub(2)));
-            if stated.and_then(layout_type) != Some(*letter) {
+            let stated = s.get(cast + 2..at.saturating_sub(2)).and_then(layout_type);
+            if letter.is_some_and(|l| stated != Some(l)) {
                 from = inner;
                 continue;
             }
@@ -1199,7 +1181,43 @@ fn call_args_at(line: &str, open: usize, limit: usize) -> Option<Vec<&str>> {
 )]
 mod tests {
     use super::{api_typed, apply_layouts, rename_typed};
-    use crate::program::BinaryFormat;
+    use crate::analysis::decompile::interp::{End, Script};
+    use crate::analysis::{Analysis, Overlay};
+    use crate::program::{BinaryFormat, Program};
+
+    /// A load whose type is not its field's keeps its own cast.
+    ///
+    /// A signed and an unsigned read of one offset list it at the signed
+    /// width, and a `char` read beside a `u32` lists it at the `u32`;
+    /// reading the unsigned or the `char` load as that field would sign
+    /// extend or widen it. The text check runs each text and the one the
+    /// layout pass makes of it to the same answer.
+    #[test]
+    fn a_load_of_another_type_than_its_field_keeps_its_cast() {
+        let p = Program::raw_x64(&[0xc3]);
+        let a = Analysis::compute(&p);
+        let o = Overlay::default();
+        let mut mem = vec![0u8; 0x18];
+        mem[8..12].copy_from_slice(&0x8000_00ff_u32.to_le_bytes());
+        for first in ["*(uint32_t*)(a1 + 8)", "*(char*)(a1 + 8)"] {
+            let text = format!(
+                "// signature: uint64_t f(uint64_t a1)
+uint64_t x;
+
+x = {first};
+x += *(int32_t*)(a1 + 8) + *(uint64_t*)(a1 + 0x10) + *(uint64_t*)a1;
+return x;
+"
+            );
+            let laid = apply_layouts(&text);
+            assert!(laid.contains("// layout a1:"), "{laid}");
+            let pokes = [(0x5000, mem.clone())];
+            let read = |t: &str| Script::read(&p, &a, &o, 0x1000, t).expect("reads");
+            let run = |t: &str| read(t).run(&[0x5000], &pokes, 100).map(|r| r.end);
+            assert!(matches!(run(&text), Some(End::Returned(Some(_)))), "{text}");
+            assert_eq!(run(&laid), run(&text), "{laid}");
+        }
+    }
 
     /// Unicode, quoted and commented calls name no API.
     ///
