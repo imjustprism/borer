@@ -777,14 +777,16 @@ fn defined_body(
     name: &str,
 ) -> Option<Declared> {
     let d = decompiled_cached(program, analysis, overlay, overlay.fingerprint(), entry);
+    let d = d.as_ref().as_ref()?;
     let text = tables::inline_tables(
         &polish_at(
-            Traced::new(d.as_ref().as_ref()?.text.clone(), None),
+            Traced::new(d.text.clone(), None),
             overlay.passes,
             program,
             analysis,
             overlay,
             entry,
+            &d.wide,
         ),
         program,
     );

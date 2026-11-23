@@ -148,7 +148,7 @@ use lift::{BlockFacts, BlockOut, Branch, Env, Rebase, SlotUse, exec_block};
 
 use super::{
     Analysis, BasicBlock, BlockTerm, EnumSource, Funclet, Function, Overlay, classes,
-    decompiled_cached, name_of, plain_text_cached,
+    decompiled_cached, name_of, plain_text_cached, protos::VarKey,
 };
 use crate::fxmap::FxHashMap;
 use crate::program::Program;
@@ -529,10 +529,9 @@ pub fn decompile_swept_all(
 ) -> Vec<Option<Swept>> {
     render_all(program, analysis, overlay, entries, |p, a, o, e| {
         let d = decompile_with(p, a, o, e, true, &[], Kept::ORIGINS.and(Kept::SPELLED))?;
-        let text = finished_traced(d.traced(), p, a, o, e);
-        let named = named_from(p, a, o, e, (d.text.as_str(), d.origins.as_ref()), || {
-            Some(text.clone())
-        });
+        let text = finished_traced(d.traced(), p, a, o, e, &d.wide);
+        let laid = || Some(text.clone());
+        let named = named_from(p, a, o, e, (&d.text, d.origins.as_ref()), laid, &d.wide);
         let (fields, named) = named.unzip();
         let named = named.flatten();
         Some(Swept {
@@ -714,7 +713,7 @@ fn decompile_afresh(
     entry: u64,
 ) -> Option<String> {
     decompile_plain_full(program, analysis, overlay, entry)
-        .map(|d| finished(&d.text, program, analysis, overlay, entry))
+        .map(|d| finished(&d.text, program, analysis, overlay, entry, &d.wide))
 }
 
 /// The source file and line each PDB-named function starts at, read once
@@ -1056,9 +1055,9 @@ fn decompile_named_afresh(
     overlay: &Overlay,
     entry: u64,
 ) -> Option<String> {
-    let text = decompile_plain_full(program, analysis, overlay, entry)?.text;
-    name_fields(program, analysis, overlay, entry, &text)
-        .map(|out| finished(&out, program, analysis, overlay, entry))
+    let d = decompile_plain_full(program, analysis, overlay, entry)?;
+    name_fields(program, analysis, overlay, entry, &d.text)
+        .map(|out| finished(&out, program, analysis, overlay, entry, &d.wide))
 }
 
 /// Renders the fields of class-typed objects in a plain decompilation by
@@ -1229,6 +1228,9 @@ pub(crate) struct Decompiled {
     /// The stack offsets the lift addressed through a realigned stack
     /// pointer, whose true place it does not know ([`Ctx::realigned`]).
     pub(crate) realigned: BTreeSet<i64>,
+    /// The signature's parameters, by place, the code shows to be a whole
+    /// machine word ([`wide_params`]), which no narrow use makes narrower.
+    pub(crate) wide: BTreeSet<usize>,
 }
 
 impl Decompiled {
@@ -1839,9 +1841,8 @@ fn decompile_in<L: Lifter>(
         .into_iter()
         .flatten()
         .filter_map(|(k, v)| match (k, &v.ty) {
-            (crate::analysis::protos::VarKey::Param(i), Some(_)) => Some(usize::from(*i)),
-            (crate::analysis::protos::VarKey::Param(_), None)
-            | (crate::analysis::protos::VarKey::Slot(_), _) => None,
+            (VarKey::Param(i), Some(_)) => Some(usize::from(*i)),
+            (VarKey::Param(_), None) | (VarKey::Slot(_), _) => None,
         })
         .collect();
     let class = classes::class_of(crate::analysis::bare_name(&name)).unwrap_or("");
@@ -1863,9 +1864,8 @@ fn decompile_in<L: Lifter>(
     let result_at = ctx.result_param.map(usize::from);
     let lead = usize::from(ctx.this_param)
         + usize::from(result_at.is_some_and(|r| r <= usize::from(ctx.this_param)));
-    let count = shape.count;
     let floats = shape.floats();
-    let mut params: Vec<String> = (0..count)
+    let mut params: Vec<String> = (0..shape.count)
         .map(|i| {
             let unread = || {
                 ctx.debug_params
@@ -1925,6 +1925,7 @@ fn decompile_in<L: Lifter>(
             }
         })
         .collect();
+    let wide = wide_params(&typed, &params, ctx.bitness);
     if let Some(r) = result_at.filter(|r| *r < params.len()) {
         let at = abi::indirect_result_position(ctx.this_param);
         let result = params.remove(r);
@@ -1933,11 +1934,11 @@ fn decompile_in<L: Lifter>(
     if ctx.variadic {
         params.push("...".to_owned());
     }
-    let suffix = if f.signature.as_ref().is_some_and(|s| s.is_const) {
-        " const"
-    } else {
-        ""
-    };
+    let suffix = f
+        .signature
+        .as_ref()
+        .filter(|s| s.is_const)
+        .map_or("", |_| " const");
 
     let mut out = String::new();
     let _ = writeln!(
@@ -2061,7 +2062,7 @@ fn decompile_in<L: Lifter>(
         let _ = writeln!(out, "// wire id: {}", classes::fourcc(*code));
     }
     if f.callers.len() >= PARAM_VALUE_SITES
-        && let Some(values) = passed_values(analysis, entry, count)
+        && let Some(values) = passed_values(analysis, entry, shape.count)
     {
         let _ = writeln!(out, "// callers pass: {values}");
     }
@@ -2353,6 +2354,7 @@ fn decompile_in<L: Lifter>(
         settle,
         sites: ctx.sites.iter().copied().collect(),
         realigned: ctx.realigned.borrow().clone(),
+        wide,
     })
 }
 
@@ -3075,7 +3077,7 @@ g(tmp_5);";
             (set(&[]), at(&[]), "void *"),
         ] {
             assert_eq!(
-                super::pointee_type(&widths, &offsets),
+                super::pointee_type(&widths, &offsets, None),
                 want,
                 "{widths:?} at {offsets:?}"
             );

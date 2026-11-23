@@ -151,5 +151,5 @@ fn decompile_checked_afresh(
         });
     }
     name_fields(program, analysis, overlay, entry, &d.text)
-        .map(|out| finished(&out, program, analysis, overlay, entry))
+        .map(|out| finished(&out, program, analysis, overlay, entry, &d.wide))
 }

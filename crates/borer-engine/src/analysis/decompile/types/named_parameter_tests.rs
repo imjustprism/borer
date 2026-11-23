@@ -10,7 +10,7 @@ fn a_named_signed_parameter_drops_its_casts() {
         "return ((int64_t)(int32_t)total >> 5) + (int32_t)total / 3 + (mask & 0xffffffff);",
     ]
     .join("\n");
-    let out = type_parameters(&text, "uint64_t");
+    let out = type_parameters(&text, "uint64_t", &std::collections::BTreeSet::new());
     assert!(
         out.contains("return (total >> 5) + total / 3 + (mask & 0xffffffff);"),
         "{out}"

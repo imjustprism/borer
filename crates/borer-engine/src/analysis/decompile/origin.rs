@@ -653,10 +653,11 @@ pub(super) fn traced(
             analysis,
             overlay,
             entry,
+            &d.wide,
         ))
     };
     let text = (d.text.as_str(), d.origins.as_ref());
-    let traced = named_from(program, analysis, overlay, entry, text, laid)?.1?;
+    let traced = named_from(program, analysis, overlay, entry, text, laid, &d.wide)?.1?;
     Some((traced, d.realigned.clone()))
 }
 

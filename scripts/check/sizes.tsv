@@ -62,7 +62,7 @@ crates/borer-engine/src/analysis/decompile/mod.rs	2444
 crates/borer-engine/src/analysis/decompile/mod.rs::decompile_in#1	943
 crates/borer-engine/src/analysis/decompile/mod.rs::name_fields#1	109
 crates/borer-engine/src/analysis/decompile/params.rs::detect_params#1	118
-crates/borer-engine/src/analysis/decompile/params.rs::param_types#1	145
+crates/borer-engine/src/analysis/decompile/params.rs::param_types#1	142
 crates/borer-engine/src/analysis/decompile/params.rs::shape_of#1	135
 crates/borer-engine/src/analysis/decompile/replay.rs	2818
 crates/borer-engine/src/analysis/decompile/replay.rs::eval_at#1	108

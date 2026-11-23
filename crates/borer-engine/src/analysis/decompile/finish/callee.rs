@@ -291,7 +291,7 @@ fn pointer_params(
                     s.without(*p)
                 });
             let text = Traced::new(d.text.clone(), None);
-            let own = polish_at(text, skip, program, analysis, overlay, entry);
+            let own = polish_at(text, skip, program, analysis, overlay, entry, &d.wide);
             signature_params(&own)
                 .into_iter()
                 .map(|(_, ty)| named_pointer(&ty))

@@ -9,6 +9,10 @@ use crate::analysis::typelib::{self, Pass};
 use crate::program::BinaryFormat;
 
 mod locals;
+mod pointers;
+
+use super::super::signature::drop_high_halves;
+use pointers::{accesses, copies, for_init_copies, pointed_at};
 
 pub(in crate::analysis::decompile) use locals::refine_locals;
 
@@ -35,17 +39,27 @@ pub(in crate::analysis::decompile) use locals::refine_locals;
 /// through is a byte pointer. On a 32-bit target the word after a `double` is the
 /// double's high half, not a parameter ([`drop_high_halves`]).
 ///
+/// A parameter the code showed to be a whole 64-bit word ([`wide_params`])
+/// gets no narrower type from a narrow use: it keeps the word and its
+/// casts, and only a pointer type can replace it.
+///
 /// # Arguments
 ///
 /// * `text` - A decompiled function, header lines first.
 /// * `word` - The type a parameter has when nothing declared one, the
 ///   machine word (`uint32_t` on a 32-bit target): the one type that means
 ///   "unknown" rather than "declared this wide".
+/// * `wide` - The places, from zero, of the signature's parameters the code
+///   showed to be a whole word.
 ///
 /// # Returns
 ///
 /// The text with the parameters typed.
-pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) -> String {
+pub(in crate::analysis::decompile) fn type_parameters(
+    text: &str,
+    word: &str,
+    wide: &BTreeSet<usize>,
+) -> String {
     let mut lines: Vec<String> = text.lines().map(str::to_owned).collect();
     let Some(sig) = lines.iter().position(|l| l.starts_with("// signature: ")) else {
         return text.to_owned();
@@ -53,9 +67,11 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
     if word == "uint32_t" {
         drop_high_halves(&mut lines, sig);
     }
-    let params: Vec<(String, String)> = lines[sig]
+    let params: Vec<(String, String, bool)> = lines[sig]
         .split(['(', ',', ')'])
-        .filter_map(|p| {
+        .skip(1)
+        .enumerate()
+        .filter_map(|(k, p)| {
             let (ty, name) = p.trim().rsplit_once(' ')?;
             let (ty, name) = match name.strip_prefix('*') {
                 Some(n) => (format!("{} *", ty.trim()), n),
@@ -63,10 +79,10 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             };
             let named_signed =
                 is_ident(name) && narrow_type(&ty).is_some_and(|(_, mask)| mask.is_none());
-            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned()))
+            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned(), wide.contains(&k)))
         })
         .collect();
-    for (declared, param) in params {
+    for (declared, param, shown_wide) in params {
         let bytes = matches!(declared.as_str(), "void *" | "uint8_t *");
         let untyped_word = declared == word || declared == "uint32_t";
         if (bytes || untyped_word)
@@ -85,21 +101,26 @@ pub(in crate::analysis::decompile) fn type_parameters(text: &str, word: &str) ->
             retype(&mut lines[sig], &declared, &param, ptr);
             continue;
         }
-        let narrow_copy = narrow_param_override(&lines, &declared, &param);
-        let signed_word = (declared == "uint32_t" && word == "uint64_t")
+        let inferred = (!shown_wide)
             .then(|| inferred_type(&lines, &param))
-            .flatten()
-            .filter(|&t| t == "int32_t");
+            .flatten();
+        let narrow_copy = inferred.filter(|t| {
+            declared == "uint32_t"
+                && matches!(*t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t")
+                && !copies(&lines, &param).is_empty()
+        });
+        let signed_word =
+            inferred.filter(|&t| declared == "uint32_t" && word == "uint64_t" && t == "int32_t");
         let ty = if let Some(narrow) = narrow_copy.or(signed_word) {
             narrow
         } else if declared != word {
             declared.as_str()
-        } else if let Some(found) = inferred_type(&lines, &param).filter(|&t| t != word) {
+        } else if let Some(found) = inferred.filter(|&t| t != word) {
             found
         } else if let Some(pointer) = pointed_at(&lines, &param) {
             retype(&mut lines[sig], word, &param, pointer);
             continue;
-        } else if let Some(found) = inferred_type(&lines, &param) {
+        } else if let Some(found) = inferred {
             found
         } else {
             continue;
@@ -183,57 +204,6 @@ fn retype_pointer_param(
     None
 }
 
-/// Checks whether a `uint32_t` parameter that is copied has uses proving it a
-/// narrower integer (`uint8_t`, `uint16_t`, `int8_t`, `int16_t`).
-fn narrow_param_override(lines: &[String], declared: &str, param: &str) -> Option<&'static str> {
-    if declared != "uint32_t" {
-        return None;
-    }
-    let t = inferred_type(lines, param)?;
-    (matches!(t, "uint8_t" | "uint16_t" | "int8_t" | "int16_t") && !copies(lines, param).is_empty())
-        .then_some(t)
-}
-
-/// Drops from a 32-bit signature the word after each `double` parameter
-/// when the body never names it.
-///
-/// A `double` on a 32-bit stack is two words, and the second is its high
-/// half, which every caller pushes as part of it: listed on its own, the
-/// header claims an argument no caller passes. A body that reads the half
-/// by itself (to test the sign or the exponent) keeps it.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `sig` - Index of the `// signature:` line.
-fn drop_high_halves(lines: &mut [String], sig: usize) {
-    let number = |name: &str| name.strip_prefix('a')?.parse::<u32>().ok();
-    let params: Vec<(String, String)> = lines[sig]
-        .split(['(', ',', ')'])
-        .filter_map(|p| {
-            let (ty, name) = p.trim().rsplit_once(' ')?;
-            is_param_name(name).then(|| (ty.trim().to_owned(), name.to_owned()))
-        })
-        .collect();
-    for pair in params.windows(2) {
-        let [(ty, name), (next_ty, next)] = pair else {
-            continue;
-        };
-        let follows = number(name)
-            .zip(number(next))
-            .is_some_and(|(n, m)| n.checked_add(1) == Some(m));
-        let named = lines
-            .iter()
-            .any(|l| !l.starts_with("//") && !word_positions(l, next).is_empty());
-        if ty != "double" || next_ty != "uint32_t" || !follows || named {
-            continue;
-        }
-        for end in [",", ")"] {
-            lines[sig] = lines[sig].replace(&format!(", uint32_t {next}{end}"), end);
-        }
-    }
-}
-
 /// Rewrites a parameter's type in the signature line from the one it is
 /// declared with to `ty`.
 ///
@@ -253,318 +223,6 @@ fn retype(sig: &mut String, word: &str, param: &str, ty: &str) {
             *sig = sig.replace(&old, &format!("{ty}{sep}{param}{suffix}"));
         }
     }
-}
-
-/// Largest offset from a parameter that reads as a field of what it points
-/// at; a load at a larger one indexes an absolute address by the parameter.
-const FIELD_OFFSET_MAX: u64 = 0x1_0000;
-
-/// The value types a load through an address is cast to, with their widths
-/// in bytes.
-const LOAD_TYPES: [(&str, usize); 11] = [
-    ("uint8_t", 1),
-    ("uint16_t", 2),
-    ("uint32_t", 4),
-    ("uint64_t", 8),
-    ("uint128_t", 16),
-    ("int8_t", 1),
-    ("int16_t", 2),
-    ("int32_t", 4),
-    ("int64_t", 8),
-    ("float", 4),
-    ("double", 8),
-];
-
-/// The pointer type the body shows a parameter to be, when it loads or
-/// stores through it and never assigns it.
-///
-/// A load or store through the parameter, `*(T*)a2` or `*(T*)(a2 + 0x10)`,
-/// an element read `((T*)a2)[i]`, or a field the layout pass named on it,
-/// `a2->field_0x10`, uses its value as an address, which only a pointer
-/// is. The pointee follows the register scan's rule ([`pointee_type`]):
-/// one width at offset zero is a pointer to that width, anything else
-/// `void *`. Reading it off the text sees what the register scan cannot: an
-/// argument that arrives on the stack, as every 32-bit `cdecl` and
-/// `stdcall` one does. An offset past [`FIELD_OFFSET_MAX`] makes the
-/// parameter the index of an absolute address, not a pointer, and a
-/// parameter the body assigns, or casts to a narrow integer, is left as
-/// it is; a cast in front of `a2->field_0x10` casts the field, not `a2`.
-/// A load at the parameter plus a narrow integer, `*(T*)(a2 + local_10)`
-/// ([`indexed_by_int`]), indexes from it.
-/// The loads through a variable the parameter is copied into and that
-/// only steps from there ([`copies`]) count too, at offsets that say only
-/// that the pointer moved: bytes read through it make a byte pointer.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-///
-/// # Returns
-///
-/// The pointer type, or `None` when nothing in the body shows one.
-pub(in crate::analysis::decompile) fn pointed_at(
-    lines: &[String],
-    param: &str,
-) -> Option<&'static str> {
-    if assigned_values(lines, param) > 0 {
-        return None;
-    }
-    let mut widths: BTreeSet<usize> = BTreeSet::new();
-    let mut offsets: BTreeSet<i64> = BTreeSet::new();
-    let mut types: BTreeSet<&'static str> = BTreeSet::new();
-    accesses(lines, param, &mut widths, &mut offsets, &mut types)?;
-    for copy in copies(lines, param) {
-        let mut moved: BTreeSet<i64> = BTreeSet::new();
-        accesses(lines, &copy, &mut widths, &mut moved, &mut types)?;
-        if !moved.is_empty() {
-            offsets.extend([0, 1]);
-        }
-    }
-    if offsets.is_empty() {
-        return None;
-    }
-    let has_copy = !copies(lines, param).is_empty();
-    let ty = if has_copy
-        && widths == BTreeSet::from([4])
-        && types.contains("float")
-        && types.iter().all(|&t| matches!(t, "float" | "uint32_t"))
-    {
-        "float *"
-    } else if has_copy
-        && widths == BTreeSet::from([8])
-        && types.contains("double")
-        && types.iter().all(|&t| matches!(t, "double" | "uint64_t"))
-    {
-        "double *"
-    } else {
-        pointee_type(&widths, &offsets)
-    };
-    Some(ty)
-}
-
-/// Collects the widths and offsets of the loads and stores through one
-/// name, for [`pointed_at`].
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `name` - The name.
-/// * `widths` - Access widths in bytes, added to.
-/// * `offsets` - Offsets from the name, added to.
-/// * `types` - Load cast types, added to.
-///
-/// # Returns
-///
-/// `None` when a use casts the name to a narrow signed integer, which no
-/// pointer is.
-fn accesses(
-    lines: &[String],
-    name: &str,
-    widths: &mut BTreeSet<usize>,
-    offsets: &mut BTreeSet<i64>,
-    types: &mut BTreeSet<&'static str>,
-) -> Option<()> {
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        for at in word_positions(line, name) {
-            let head = line.get(..at).unwrap_or("");
-            let tail = line.get(at + name.len()..).unwrap_or("");
-            if tail.starts_with("->") {
-                offsets.extend([0, 1]);
-                continue;
-            }
-            if ["(int8_t)", "(int16_t)", "(int32_t)"]
-                .iter()
-                .any(|c| head.ends_with(c))
-            {
-                return None;
-            }
-            for (ty, width) in LOAD_TYPES {
-                let field = head.strip_suffix(&format!("*({ty}*)(")).and_then(|_| {
-                    let (sign, rest) = if let Some(r) = tail.strip_prefix(" + ") {
-                        (1, r)
-                    } else {
-                        (-1, tail.strip_prefix(" - ")?)
-                    };
-                    let k = parse_const(rest.get(..rest.find(')')?)?)?;
-                    (k < FIELD_OFFSET_MAX).then(|| sign * i64::try_from(k).unwrap_or(i64::MAX))
-                });
-                if head.ends_with(&format!("*({ty}*)")) {
-                    widths.insert(width);
-                    types.insert(ty);
-                    offsets.insert(0);
-                } else if let Some(k) = field {
-                    widths.insert(width);
-                    types.insert(ty);
-                    offsets.insert(k);
-                } else if (head.ends_with(&format!("(({ty}*)")) && tail.starts_with(")["))
-                    || (head.ends_with(&format!("*({ty}*)(")) && indexed_by_int(lines, tail))
-                    || (head.ends_with(&format!("(({ty}*)(")) && indexed_cast(tail))
-                    || commuted_index(lines, head, tail, ty)
-                {
-                    widths.insert(width);
-                    types.insert(ty);
-                    offsets.extend([0, 1]);
-                }
-            }
-        }
-    }
-    Some(())
-}
-
-/// Tells whether `tail` closes a pointer cast over a sum that is then
-/// indexed: ` + expr))[i]`.
-///
-/// # Arguments
-///
-/// * `tail` - The text after the base name inside `(({ty}*)(`.
-fn indexed_cast(tail: &str) -> bool {
-    let Some(rest) = tail.strip_prefix(" + ") else {
-        return false;
-    };
-    let mut depth = 1i32;
-    for (i, c) in rest.char_indices() {
-        match c {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return rest.get(i..).is_some_and(|r| r.starts_with("))["));
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Tells whether a load adds a zero-initialized loop index on the left of
-/// the base pointer: `*(T*)(index + base)`.
-///
-/// # Arguments
-///
-/// * `lines` - The function, declarations included.
-/// * `head` - The text before `base`.
-/// * `tail` - The text after `base`.
-/// * `ty` - The load's type name.
-fn commuted_index(lines: &[String], head: &str, tail: &str, ty: &str) -> bool {
-    if !tail.starts_with(')') {
-        return false;
-    }
-    let Some(before) = head.strip_suffix(" + ") else {
-        return false;
-    };
-    let prefix = format!("*({ty}*)(");
-    let Some(index) = before
-        .rfind(&prefix)
-        .and_then(|i| before.get(i + prefix.len()..))
-    else {
-        return false;
-    };
-    let index = index.strip_prefix("(int64_t)(int32_t)").unwrap_or(index);
-    is_ident(index)
-        && !is_param_name(index)
-        && declared_scalar(lines, index).is_some()
-        && lines.iter().any(|l| {
-            let t = l.trim();
-            (t.ends_with(" = 0;") && t.split(" = ").any(|lhs| lhs == index))
-                || t.starts_with(&format!("for ({index} = 0;"))
-        })
-}
-
-/// Tells whether the text after a name adds a narrow integer to it.
-///
-/// ` + local_10)` with `local_10` declared an `int32_t`, or ` +
-/// (int64_t)(int32_t)i)`, adds an index no pointer is, so the name is the
-/// base of the address.
-///
-/// # Arguments
-///
-/// * `lines` - The function, declarations included.
-/// * `tail` - The text after the name.
-fn indexed_by_int(lines: &[String], tail: &str) -> bool {
-    let Some(rest) = tail.strip_prefix(" + ") else {
-        return false;
-    };
-    let index = rest.split(')').next().unwrap_or("");
-    rest.starts_with("(int64_t)")
-        || (is_ident(index)
-            && rest.get(index.len()..).is_some_and(|r| r.starts_with(')'))
-            && declared_scalar(lines, index).is_some())
-}
-
-/// The variables a parameter is copied into whole and that only step
-/// from there: `local_10 = a1;` then `local_10 += 2;`, the home an
-/// unoptimized build keeps a parameter in.
-///
-/// A copy assigned anything else as well holds more than the parameter,
-/// so it is left out.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-fn copies(lines: &[String], param: &str) -> Vec<String> {
-    let whole = format!(" = {param};");
-    let mut out: Vec<String> = Vec::new();
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        let Some(lhs) = line.trim().strip_suffix(whole.as_str()) else {
-            continue;
-        };
-        for dest in lhs.split(" = ") {
-            if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
-                continue;
-            }
-            let writes = lines
-                .iter()
-                .filter(|l| {
-                    let t = l.trim();
-                    t.strip_prefix(dest).is_some_and(|r| r.starts_with(" = "))
-                        || t.contains(&format!(" = {dest} = "))
-                })
-                .count();
-            if writes == 1 {
-                out.push(dest.to_owned());
-            }
-        }
-    }
-    out
-}
-
-/// The loop variables a `for` header initializes whole from `param` and
-/// that are never assigned outside that `for` header.
-///
-/// # Arguments
-///
-/// * `lines` - The function, header lines included.
-/// * `param` - The parameter name.
-fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
-    let suffix = format!(" = {param};");
-    let mut out: Vec<String> = Vec::new();
-    for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        let Some(rest) = line.trim().strip_prefix("for (") else {
-            continue;
-        };
-        let Some((dest, _)) = rest.split_once(&suffix) else {
-            continue;
-        };
-        if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
-            continue;
-        }
-        let other_writes = lines
-            .iter()
-            .filter(|l| {
-                let t = l.trim();
-                !t.starts_with("for (")
-                    && (t.strip_prefix(dest).is_some_and(|r| r.starts_with(" = "))
-                        || t.contains(&format!(" = {dest} = ")))
-            })
-            .count();
-        if other_writes == 0 {
-            out.push(dest.to_owned());
-        }
-    }
-    out
 }
 
 /// The narrow type every use of a `uint64_t` variable agrees on, if any.
@@ -2055,15 +1713,11 @@ format++;
 printf(format, a1);",
         );
         assert_eq!(api_pointer(&text, "a1"), None);
-        let typed = super::type_parameters(
-            "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
-            "uint64_t",
-        );
+        let plain = "// signature: void f(char *a1, uint64_t a2)\nformat = gettext(a1);\nerror(0, 0, format, a2);\n";
+        let typed = super::type_parameters(plain, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(char *a1, uint64_t a2)"), "{typed}");
-        let typed = super::type_parameters(
-            "// signature: void f(char *a1, uint64_t a2)\n// formats a1: \"missing operand after '%s'\" \"too many file label options\"\nformat = gettext(a1);\nerror(0, 0, format, a2);\n",
-            "uint64_t",
-        );
+        let noted = "// signature: void f(char *a1, uint64_t a2)\n// formats a1: \"missing operand after '%s'\" \"too many file label options\"\nformat = gettext(a1);\nerror(0, 0, format, a2);\n";
+        let typed = super::type_parameters(noted, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(char *a1, char *a2)"), "{typed}");
         assert!(!typed.contains("// formats"), "{typed}");
     }
@@ -2095,12 +1749,12 @@ if ((int32_t)(int64_t)(int8_t)a1 < 0 && (int32_t)(a2 & 0xff) > 200) {
 }
 return 0;
 ";
-        let typed = super::type_parameters(text, "uint32_t");
+        let typed = super::type_parameters(text, "uint32_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("if (a1 < 0 && a2 > 200) {"), "{typed}");
         let text = "// signature: uint32_t f(uint8_t a1)
 return (uint32_t)a1;
 ";
-        let typed = super::type_parameters(text, "uint32_t");
+        let typed = super::type_parameters(text, "uint32_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("return (uint32_t)a1;"), "{typed}");
     }
 
@@ -2156,22 +1810,28 @@ return (uint32_t)a1;
         let text = lines("local_10 = a1;\nlocal_10 = 0;\nputs(local_10);");
         assert_eq!(api_pointer(&text, "a1"), None);
         let text = "// signature: uint32_t f(void *a1)\nvar2 = a1;\nwhile (*(uint8_t*)var2 != 0) {\n  var2 += 1;\n}\n";
-        let typed = super::type_parameters(text, "uint64_t");
+        let typed = super::type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(uint8_t *a1)"), "{typed}");
         let arm_byte = "// signature: void f(uint32_t a1, uint32_t a2)\nuint8_t local_5;\nlocal_5 = a1;\ng(local_5, a2);\n";
-        let typed = super::type_parameters(arm_byte, "uint64_t");
+        let typed =
+            super::type_parameters(arm_byte, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(uint8_t a1, uint32_t a2)"), "{typed}");
         let arm_ptr = "// signature: void f(uint32_t a1, uint32_t a2)\nuint32_t local_8;\nlocal_8 = a2;\ng(*(uint8_t*)local_8);\n";
-        let typed = super::type_parameters(arm_ptr, "uint64_t");
+        let typed = super::type_parameters(arm_ptr, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(uint32_t a1, uint8_t *a2)"), "{typed}");
         let argv = "// signature: uint32_t f(uint64_t a1, void *a2)\n// layout a2: 0x0 u64, 0x8 u64\nuint32_t g32_10; // @ 0x10\ng32_10 = a1 - 1;\nstrrchr(a2->field_0x0, 47);\nif ((int32_t)a1 > 1 && strcmp(a2->field_0x8, \"--help\") == 0) {\n  return 0;\n}\nreturn 1;\n";
-        let typed = super::type_parameters(argv, "uint64_t");
+        let typed = super::type_parameters(argv, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(int32_t a1, char **a2)"), "{typed}");
         let mixed_struct = "// signature: uint32_t f(void *a2)\n// layout a2: 0x0 u32, 0x8 u64\nif (strcmp(a2->field_0x8, \"--help\") == 0) {\n  return 0;\n}\nreturn 1;\n";
-        let typed = super::type_parameters(mixed_struct, "uint64_t");
+        let typed =
+            super::type_parameters(mixed_struct, "uint64_t", &std::collections::BTreeSet::new());
         assert!(typed.contains("f(void *a2)"), "{typed}");
         let call_only_field = "// signature: uint32_t f(void *a2)\n// layout a2: 0x0 u64, 0x8 u64\nfclose(a2->field_0x8);\nif (strcmp(a2->field_0x0, \"x\") == 0) {\n  return 0;\n}\nreturn 1;\n";
-        let typed = super::type_parameters(call_only_field, "uint64_t");
+        let typed = super::type_parameters(
+            call_only_field,
+            "uint64_t",
+            &std::collections::BTreeSet::new(),
+        );
         assert!(!typed.contains("char **a2"), "{typed}");
     }
 }

@@ -12,7 +12,7 @@ fn a_double_takes_the_word_after_it_on_a_32_bit_stack() {
         "// signature: uint32_t f(void *this, double a2, uint32_t a3, double a4, uint32_t a5)\n",
         "return a2 > a4 && (a5 & 0x80000000) == 0;\n",
     );
-    let typed = type_parameters(text, "uint32_t");
+    let typed = type_parameters(text, "uint32_t", &std::collections::BTreeSet::new());
     let sig = typed.lines().next().unwrap_or("");
     assert!(
         sig.ends_with("(void *this, double a2, double a4, uint32_t a5)"),
@@ -38,7 +38,7 @@ fn a_cast_before_a_field_read_types_the_field() {
         "}\n",
         "return 0;\n",
     );
-    let typed = type_parameters(text, "uint64_t");
+    let typed = type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
     let sig = typed.lines().next().unwrap_or("");
     assert!(sig.contains("(void *a1, int32_t a2)"), "{sig}");
 }
@@ -66,7 +66,7 @@ fn a_parameter_loaded_through_is_a_pointer() {
         "*(uint16_t*)a7 = 0;\n",
         "return a5 + a6->field_0x8;\n",
     );
-    let typed = type_parameters(text, "uint32_t");
+    let typed = type_parameters(text, "uint32_t", &std::collections::BTreeSet::new());
     let sig = typed.lines().next().unwrap_or("");
     assert!(sig.contains("(void *a1, void *a2, uint32_t a3,"), "{sig}");
     assert!(
@@ -94,7 +94,7 @@ if (a1 & 0xffff) {
   return;
 }
 ";
-    let typed = type_parameters(text, "uint64_t");
+    let typed = type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
     assert!(typed.contains("switch (a1) {"), "{typed}");
     assert!(typed.contains("if (a1) {"), "{typed}");
     assert_eq!(
@@ -116,7 +116,7 @@ if (a1 & 0xffff) {
 )]
 fn a_product_of_narrowed_parameters_stays_wide() {
     let text = "// signature: uint64_t f(uint64_t a1, uint64_t a2, uint64_t a3)\nreturn (a2 & 0xffffffff) * (int64_t)(int32_t)a1 + a3 * 3;\n";
-    let typed = type_parameters(text, "uint64_t");
+    let typed = type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
     assert!(
         typed.contains("f(int32_t a1, uint32_t a2, uint64_t a3)"),
         "{typed}"
@@ -136,7 +136,7 @@ fn a_product_of_narrowed_parameters_stays_wide() {
 )]
 fn a_narrowed_parameter_keeps_its_call_parentheses() {
     let text = "// signature: uint64_t f(uint64_t a1)\nrax = sub_1(a1);\nif ((uint32_t)a1 == 0) {\n  return (a1);\n}\n";
-    let typed = type_parameters(text, "uint64_t");
+    let typed = type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
     assert!(typed.contains("sub_1(a1)"), "{typed}");
     assert!(!typed.contains("sub_1a1"), "{typed}");
 }

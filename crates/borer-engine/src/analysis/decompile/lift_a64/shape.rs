@@ -27,7 +27,7 @@ use std::sync::Arc;
 use super::super::abi;
 use super::super::expr::{Expr, Key, Ty};
 use super::super::lift::{self, Env};
-use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
+use super::super::{Ctx, Shape, Witness, declared_arity, new_ctx, pointee_type};
 use super::{decode, live};
 use crate::analysis::{Analysis, Function, Overlay};
 use crate::isa::a64::{self, Flow, Insn, Mnemonic, Opnd, Reg, Width};
@@ -811,6 +811,9 @@ pub(in crate::analysis::decompile) fn param_types(
         widths: BTreeSet<usize>,
         /// Displacements from the pointer.
         offsets: BTreeSet<i64>,
+        /// An access indexed the pointer by a register or moved it as it
+        /// went (pre- or post-index).
+        walk: Option<Witness>,
     }
     let declared = ctx.arg_count - usize::from(ctx.result_param.is_some());
     let mut holds: BTreeMap<Reg, (usize, i64)> = (0..declared)
@@ -829,11 +832,13 @@ pub(in crate::analysis::decompile) fn param_types(
     for i in order.flatten() {
         if let Some(bytes) = access_bytes(i)
             && let Some(Opnd::Mem(m)) = i.operands.iter().find(|o| matches!(o, Opnd::Mem(_)))
-            && m.index.is_none()
             && let Some(&(p, at)) = holds.get(&m.base)
         {
             let s = seen.entry(p).or_default();
             s.widths.insert(bytes);
+            if m.index.is_some() || m.mode != a64::Mode::Offset {
+                s.walk = Some(Witness::Walk);
+            }
             let disp = if m.mode == a64::Mode::PostIndex {
                 0
             } else {
@@ -853,7 +858,7 @@ pub(in crate::analysis::decompile) fn param_types(
     }
     let mut typed: BTreeMap<usize, String> = seen
         .into_iter()
-        .map(|(p, s)| (p, pointee_type(&s.widths, &s.offsets).to_owned()))
+        .map(|(p, s)| (p, pointee_type(&s.widths, &s.offsets, s.walk).to_owned()))
         .collect();
     for p in 0..declared {
         if typed.contains_key(&p) {

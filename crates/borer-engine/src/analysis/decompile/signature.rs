@@ -10,6 +10,7 @@ use crate::isa::x86::Register;
 
 use super::abi;
 use super::ctext::{Base, CTy, Tok, closing, leading_type, split_top, tokens};
+use super::line::{is_param_name, word_positions};
 use crate::analysis::{Analysis, Overlay};
 use crate::emulate::Emulator;
 use crate::num::from_usize;
@@ -407,4 +408,44 @@ pub(crate) fn float_mask(floating: impl Iterator<Item = bool>) -> u8 {
         .enumerate()
         .filter(|(_, f)| *f)
         .fold(0, |m, (i, _)| m | (1 << i))
+}
+
+/// Drops from a 32-bit signature the word after each `double` parameter
+/// when the body never names it.
+///
+/// A `double` on a 32-bit stack is two words, and the second is its high
+/// half, which every caller pushes as part of it: listed on its own, the
+/// header claims an argument no caller passes. A body that reads the half
+/// by itself (to test the sign or the exponent) keeps it.
+///
+/// # Arguments
+///
+/// * `lines` - The function, header lines included.
+/// * `sig` - Index of the `// signature:` line.
+pub(super) fn drop_high_halves(lines: &mut [String], sig: usize) {
+    let number = |name: &str| name.strip_prefix('a')?.parse::<u32>().ok();
+    let params: Vec<(String, String)> = lines[sig]
+        .split(['(', ',', ')'])
+        .filter_map(|p| {
+            let (ty, name) = p.trim().rsplit_once(' ')?;
+            is_param_name(name).then(|| (ty.trim().to_owned(), name.to_owned()))
+        })
+        .collect();
+    for pair in params.windows(2) {
+        let [(ty, name), (next_ty, next)] = pair else {
+            continue;
+        };
+        let follows = number(name)
+            .zip(number(next))
+            .is_some_and(|(n, m)| n.checked_add(1) == Some(m));
+        let named = lines
+            .iter()
+            .any(|l| !l.starts_with("//") && !word_positions(l, next).is_empty());
+        if ty != "double" || next_ty != "uint32_t" || !follows || named {
+            continue;
+        }
+        for end in [",", ")"] {
+            lines[sig] = lines[sig].replace(&format!(", uint32_t {next}{end}"), end);
+        }
+    }
 }

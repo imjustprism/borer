@@ -38,6 +38,7 @@ mod solve;
 mod switches;
 mod tables;
 mod thumb;
+mod types;
 mod values;
 mod variadic;
 

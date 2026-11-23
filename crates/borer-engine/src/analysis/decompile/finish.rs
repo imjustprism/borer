@@ -44,7 +44,7 @@ mod words;
 #[must_use]
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let text = Traced::new(text.to_owned(), None);
-    polish_skipping(text, bitness, packs, Passes::NONE, None).into_text()
+    polish_skipping(text, bitness, packs, Passes::NONE, None, &BTreeSet::new()).into_text()
 }
 
 /// [`polish_skipping`] with the caller literals and the callees of `entry`
@@ -60,6 +60,8 @@ pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
 /// * `overlay` - The names in force, which the callees' texts are built
 ///   under.
 /// * `entry` - The function's entry.
+/// * `wide` - The signature places the code shows a whole word
+///   ([`Decompiled::wide`]).
 ///
 /// # Returns
 ///
@@ -71,6 +73,7 @@ pub(super) fn polish_at(
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
+    wide: &BTreeSet<usize>,
 ) -> Traced {
     polish_skipping(
         text,
@@ -78,6 +81,7 @@ pub(super) fn polish_at(
         &analysis.packs,
         skip,
         Some((program, analysis, overlay, entry)),
+        wide,
     )
 }
 
@@ -96,6 +100,8 @@ pub(super) fn polish_at(
 ///   literals the callers pass, and a parameter passed whole to another
 ///   function the type that function's text gives it ([`callee::noted`]).
 ///   `None` leaves that evidence out.
+/// * `wide` - The signature places the code shows a whole word, which no
+///   narrow use narrows ([`type_parameters`]).
 ///
 /// # Returns
 ///
@@ -106,6 +112,7 @@ pub(super) fn polish_skipping(
     packs: &crate::pack::Packs,
     skip: Passes,
     callers: Option<callee::Scope<'_>>,
+    wide: &BTreeSet<usize>,
 ) -> Traced {
     let streams = packs.list("types", "stream");
     let word = word_type(bitness);
@@ -120,7 +127,7 @@ pub(super) fn polish_skipping(
     let text = if skip.runs(Pass::TypeParameters) {
         let t = skip.apply(Pass::CalleeTypes, text, |t| callee::noted(t, word, callers));
         let callers = callers.map(|(program, analysis, _, entry)| (program, analysis, entry));
-        t.map(|t| type_parameters(&callfmt::noted(t, callers), word))
+        t.map(|t| type_parameters(&callfmt::noted(t, callers), word, wide))
     } else {
         text
     };
@@ -281,6 +288,8 @@ fn stated_types(callers: Option<callee::Scope<'_>>) -> words::Stated {
 /// * `analysis` - Discovery results, for the packs and the callees.
 /// * `overlay` - User names, and the passes left out.
 /// * `entry` - The function's entry address.
+/// * `wide` - The signature places the code shows a whole word
+///   ([`Decompiled::wide`]).
 ///
 /// # Returns
 ///
@@ -291,9 +300,10 @@ pub(super) fn finished(
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
+    wide: &BTreeSet<usize>,
 ) -> String {
     let text = Traced::new(text.to_owned(), None);
-    finished_traced(text, program, analysis, overlay, entry).into_text()
+    finished_traced(text, program, analysis, overlay, entry, wide).into_text()
 }
 
 /// [`finished`], carrying the origins of the text's lines over each pass.
@@ -306,6 +316,8 @@ pub(super) fn finished(
 /// * `analysis` - Discovery results, for the packs and the callees.
 /// * `overlay` - User names, and the passes left out.
 /// * `entry` - The function's entry address.
+/// * `wide` - The signature places the code shows a whole word
+///   ([`Decompiled::wide`]).
 ///
 /// # Returns
 ///
@@ -316,11 +328,12 @@ pub(super) fn finished_traced(
     analysis: &Analysis,
     overlay: &Overlay,
     entry: u64,
+    wide: &BTreeSet<usize>,
 ) -> Traced {
     use crate::timing::{Step, timed};
     let skip = overlay.passes;
     let text = timed(Step::Polish, || {
-        polish_at(text, skip, program, analysis, overlay, entry)
+        polish_at(text, skip, program, analysis, overlay, entry, wide)
     });
     let text = timed(Step::InlineTables, || {
         skip.apply(Pass::InlineTables, text, |t| {
@@ -369,7 +382,7 @@ pub(super) fn laid_out(
             decompiled_cached(program, analysis, overlay, names, entry)
                 .as_ref()
                 .as_ref()
-                .map(|d| finished(&d.text, program, analysis, overlay, entry))
+                .map(|d| finished(&d.text, program, analysis, overlay, entry, &d.wide))
         },
         |text| text.as_ref().map_or(0, String::capacity),
     )
@@ -405,10 +418,18 @@ pub(super) fn named(
                 let text = laid_out(program, analysis, overlay, entry).as_ref().clone();
                 text.map(|t| Traced::new(t, None))
             };
-            let text = (d.as_ref().as_ref()?.text.as_str(), None);
-            named_from(program, analysis, overlay, entry, text, laid)?
-                .1
-                .map(Traced::into_text)
+            let d = d.as_ref().as_ref()?;
+            named_from(
+                program,
+                analysis,
+                overlay,
+                entry,
+                (&d.text, None),
+                laid,
+                &d.wide,
+            )?
+            .1
+            .map(Traced::into_text)
         },
         |text| text.as_ref().map_or(0, String::capacity),
     )
@@ -434,6 +455,8 @@ pub(super) fn named(
 ///   decompilation holds).
 /// * `laid` - The finished `text` itself, which a text naming leaves as it
 ///   was is.
+/// * `wide` - The signature places the code shows a whole word
+///   ([`Decompiled::wide`]).
 ///
 /// # Returns
 ///
@@ -447,6 +470,7 @@ pub(super) fn named_from(
     entry: u64,
     text: (&str, Option<&Origins>),
     laid: impl FnOnce() -> Option<Traced>,
+    wide: &BTreeSet<usize>,
 ) -> Option<(String, Option<Traced>)> {
     let out = name_fields(program, analysis, overlay, entry, text.0)?;
     if out == text.0 {
@@ -458,6 +482,7 @@ pub(super) fn named_from(
         analysis,
         overlay,
         entry,
+        wide,
     );
     Some((out, Some(named)))
 }

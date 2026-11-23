@@ -549,7 +549,7 @@ pub(in crate::analysis::decompile) fn param_types(
         }
     }
     for (p, (w, o)) in widths {
-        typed.insert(p, pointee_type(&w, &o).to_owned());
+        typed.insert(p, pointee_type(&w, &o, None).to_owned());
     }
     typed
 }

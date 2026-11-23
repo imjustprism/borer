@@ -15,6 +15,27 @@ struct Seen {
     offsets: BTreeSet<i64>,
     /// The register was used as an address at all.
     addressed: bool,
+    /// An access added an index register to it ([`Witness::Walk`]).
+    walk: Option<Witness>,
+}
+
+impl Seen {
+    /// Records a load or store through the pointer.
+    ///
+    /// # Arguments
+    ///
+    /// * `instr` - The access.
+    /// * `at` - How far the register holding the pointer is past it.
+    /// * `bitness` - Decoder bitness (32 or 64).
+    fn see(&mut self, instr: &Instruction, at: i64, bitness: u32) {
+        self.addressed = true;
+        if instr.memory_index() != Register::None {
+            self.walk = Some(Witness::Walk);
+        }
+        self.widths.insert(instr.memory_size().size());
+        self.offsets
+            .insert(at.saturating_add(crate::disasm::displacement(instr, bitness)));
+    }
 }
 
 /// Infers which parameters are pointers, from the function dereferencing
@@ -116,10 +137,7 @@ pub(super) fn param_types(
             {
                 let slot = seen.entry(param).or_default();
                 if instr.mnemonic() != Mnemonic::Lea {
-                    slot.addressed = true;
-                    slot.widths.insert(instr.memory_size().size());
-                    slot.offsets
-                        .insert(at.saturating_add(crate::disasm::displacement(instr, ctx.bitness)));
+                    slot.see(instr, at, ctx.bitness);
                 }
             }
             let dst = (instr.op0_kind() == OpKind::Register)
@@ -230,7 +248,7 @@ fn finish_param_types(
     let mut types: BTreeMap<usize, String> = seen
         .into_iter()
         .filter(|(_, s)| s.addressed)
-        .map(|(p, s)| (p, pointee_type(&s.widths, &s.offsets).to_owned()))
+        .map(|(p, s)| (p, pointee_type(&s.widths, &s.offsets, s.walk).to_owned()))
         .collect();
     for (p, widths) in floats {
         let ty = match widths.into_iter().collect::<Vec<_>>().as_slice() {
@@ -240,40 +258,67 @@ fn finish_param_types(
         };
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
-    for p in spilled_u32_params(ctx, code, entry) {
-        types.entry(p).or_insert_with(|| "uint32_t".to_owned());
+    for (p, witness) in home_spills(ctx, code, entry) {
+        let ty = match witness {
+            Witness::WideSpill => word_type(64),
+            Witness::NarrowSpill => "uint32_t",
+            Witness::Walk | Witness::SteppedCopy => continue,
+        };
+        types.entry(p).or_insert_with(|| ty.to_owned());
     }
     types
 }
 
-/// Integer parameters on a 64-bit target whose incoming register is read
-/// only by a 4-byte store in the entry block before it is overwritten or
-/// clobbered by a call.
-fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) -> BTreeSet<usize> {
-    if ctx.bitness != 64
-        || (code.len() == 1
-            && code
-                .first()
-                .is_some_and(|c| !c.iter().any(|i| i.mnemonic() == Mnemonic::Call)))
-    {
-        return BTreeSet::new();
-    }
+/// What the code shows of a parameter's width, or of a pointer's walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Witness {
+    /// An unoptimized build stored the whole 64-bit register to the
+    /// parameter's home slot: the parameter is 64 bits wide.
+    WideSpill,
+    /// The home slot took only the low 32 bits: the parameter is 32 bits.
+    NarrowSpill,
+    /// An access added an index register to the pointer, or moved it as it
+    /// went (pre- or post-index): it walks memory.
+    Walk,
+    /// A copy of the pointer is stepped by a constant and read through.
+    SteppedCopy,
+}
+
+/// Returns the parameters an unoptimized build spills to their home slot.
+///
+/// A spill is the first read of a 64-bit target's incoming register, in
+/// the entry block before it is overwritten or clobbered by a call: a store
+/// of 8 or 4 bytes. An 8-byte store to the frame (`rbp` or `rsp` based)
+/// reads the whole register, which the convention leaves undefined above an
+/// `int`'s 32 bits, so the parameter was 64 bits whatever its uses truncate
+/// it to ([`Witness::WideSpill`]). That says nothing in a variadic function,
+/// or in a prologue that homes every argument register as a word whatever
+/// it holds (a varargs save area): there no 8-byte spill is a witness. A
+/// 4-byte store says 32 bits ([`Witness::NarrowSpill`]) only when nothing
+/// else reads the register, and not in a lone block that calls nothing,
+/// where it is a field store more than a spill.
+///
+/// # Returns
+///
+/// Per parameter position spilled, what the spill shows.
+fn home_spills(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) -> BTreeMap<usize, Witness> {
+    let mut out = BTreeMap::new();
+    let Some(entry_code) = code.get(entry).filter(|_| ctx.bitness == 64) else {
+        return out;
+    };
+    let leaf = code.len() == 1 && !entry_code.iter().any(|i| i.mnemonic() == Mnemonic::Call);
     let mut factory = InstructionInfoFactory::new();
-    let mut out = BTreeSet::new();
     for &r in &ctx.params {
         let Some(pos) = ctx.conv.param_pos(r, &ctx.params) else {
             continue;
         };
         let canon = lift::canon(r, 64);
-        let Some(entry_code) = code.get(entry) else {
-            continue;
-        };
-        let (mut spilled, mut bad) = (false, false);
+        let (mut spilled, mut bad) = (None, false);
         for instr in entry_code {
             let is_spill = instr.mnemonic() == Mnemonic::Mov
                 && instr.op0_kind() == OpKind::Memory
                 && instr.op1_kind() == OpKind::Register
-                && instr.memory_size().size() == 4
+                && matches!(instr.memory_size().size(), 4 | 8)
                 && lift::canon(instr.op1_register(), 64) == canon;
             let forwarded = matches!(
                 instr.flow_control(),
@@ -295,8 +340,9 @@ fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) ->
                     && u.access() == OpAccess::Write
             });
             if reads {
-                if is_spill && !spilled {
-                    spilled = true;
+                if is_spill && spilled.is_none() {
+                    let frame = matches!(instr.memory_base(), Register::RBP | Register::RSP);
+                    spilled = Some((instr.memory_size().size() == 8, frame));
                 } else {
                     bad = true;
                     break;
@@ -306,15 +352,25 @@ fn spilled_u32_params(ctx: &Ctx<'_>, code: &[Vec<Instruction>], entry: usize) ->
                 break;
             }
         }
-        if !spilled || bad {
-            continue;
+        match spilled {
+            Some((true, true)) => {
+                out.insert(pos, Witness::WideSpill);
+            }
+            Some((false, _)) if !bad && !leaf => {
+                let other_read = code.iter().enumerate().any(|(idx, instrs)| {
+                    idx != entry && block_reads_before_kill(ctx, &mut factory, instrs, canon)
+                });
+                if !other_read {
+                    out.insert(pos, Witness::NarrowSpill);
+                }
+            }
+            Some(_) | None => {}
         }
-        let other_read = code.iter().enumerate().any(|(idx, instrs)| {
-            idx != entry && block_reads_before_kill(ctx, &mut factory, instrs, canon)
-        });
-        if !other_read {
-            out.insert(pos);
-        }
+    }
+    let homes_all =
+        ctx.conv.args.len() == out.values().filter(|w| **w == Witness::WideSpill).count();
+    if ctx.variadic || homes_all {
+        out.retain(|_, w| *w != Witness::WideSpill);
     }
     out
 }
@@ -429,25 +485,39 @@ fn vector_read_bytes(instr: &Instruction) -> Option<usize> {
 /// Names what a pointer points at, from the accesses made through it.
 ///
 /// One width at offset zero is a pointer to a value of that width, and
-/// bytes read from the start on are bytes, which a byte pointer's
-/// arithmetic counts as the text does. Several widths, several offsets,
-/// or one offset away from the start is a structure, and `void *` says so without inventing a layout;
-/// `borer://layout` proposes one from the same evidence. A `uint32_t *`
-/// read only at 0x14 would make the text's `*(uint32_t*)(a2 + 0x14)` read,
-/// in C, the element at byte 0x50.
+/// bytes read from the start on through a computed index or a moving
+/// pointer are bytes, which a byte pointer's arithmetic counts as the text
+/// does. Several widths, several offsets, or one offset away from the
+/// start is a structure, and `void *` says so without inventing a layout;
+/// `borer://layout` proposes one from the same evidence. Bytes at two
+/// constant offsets are a structure's byte fields as much as a string's
+/// first characters, so they make no byte pointer without the walk. A
+/// `uint32_t *` read only at 0x14 would make the text's
+/// `*(uint32_t*)(a2 + 0x14)` read, in C, the element at byte 0x50.
 ///
 /// # Arguments
 ///
 /// * `widths` - Access widths in bytes.
 /// * `offsets` - Offsets from the pointer.
+/// * `walk` - What shows the pointer walks memory, rather than reading at
+///   constant offsets ([`Witness::Walk`], [`Witness::SteppedCopy`]); `None`
+///   when nothing does.
 ///
 /// # Returns
 ///
 /// The pointee type as C source.
-pub(super) fn pointee_type(widths: &BTreeSet<usize>, offsets: &BTreeSet<i64>) -> &'static str {
+pub(super) fn pointee_type(
+    widths: &BTreeSet<usize>,
+    offsets: &BTreeSet<i64>,
+    walk: Option<Witness>,
+) -> &'static str {
+    let walked = match walk {
+        Some(Witness::Walk | Witness::SteppedCopy) => true,
+        Some(Witness::WideSpill | Witness::NarrowSpill) | None => false,
+    };
     let one = widths.iter().copied().next().filter(|_| widths.len() == 1);
     match (one, offsets.len() == 1 && offsets.contains(&0)) {
-        (Some(1), _) if offsets.contains(&0) => "uint8_t *",
+        (Some(1), only) if only || (walked && offsets.contains(&0)) => "uint8_t *",
         (Some(2), true) => "uint16_t *",
         (Some(4), true) => "uint32_t *",
         (Some(8), true) => "uint64_t *",
@@ -1588,6 +1658,39 @@ pub(super) fn word_type(bitness: u32) -> &'static str {
     } else {
         "uint64_t"
     }
+}
+
+/// Returns the signature places of the parameters the code shows to be a
+/// whole machine word, which [`type_parameters`] keeps at the word.
+///
+/// A position counts when the body typed it the word ([`param_types`],
+/// [`home_spills`]) and the header prints it so, not a type a declaration,
+/// the debug information or a hint gave it. The places are the header's
+/// before a hidden result pointer moves to its own place, which only shifts
+/// a later one when that pointer did not already sit there.
+///
+/// # Arguments
+///
+/// * `typed` - The types the body shows, by position.
+/// * `params` - The header's parameters, by position, as `type name`.
+/// * `bitness` - Decoder bitness (32 or 64).
+pub(super) fn wide_params(
+    typed: &BTreeMap<usize, String>,
+    params: &[String],
+    bitness: u32,
+) -> BTreeSet<usize> {
+    let word = word_type(bitness);
+    typed
+        .iter()
+        .filter(|&(&i, ty)| {
+            ty == word
+                && params
+                    .get(i)
+                    .and_then(|p| p.strip_prefix(word))
+                    .is_some_and(|n| n.starts_with(' '))
+        })
+        .map(|(&i, _)| i)
+        .collect()
 }
 
 /// Tells whether the function runs under a structured exception handler.

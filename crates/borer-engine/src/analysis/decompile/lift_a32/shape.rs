@@ -16,7 +16,7 @@ use std::sync::Arc;
 use super::super::abi::{self, a32 as a32_abi};
 use super::super::expr::{Expr, Key};
 use super::super::lift::{self, Env};
-use super::super::{Ctx, Shape, declared_arity, new_ctx, pointee_type};
+use super::super::{Ctx, Shape, Witness, declared_arity, new_ctx, pointee_type};
 use super::{decode_blocks, live};
 use crate::analysis::{Analysis, Function, Overlay};
 use crate::isa::a32::{
@@ -1124,7 +1124,17 @@ pub(in crate::analysis::decompile) fn param_types(
             }
         }
     }
-    let mut widths: BTreeMap<usize, (BTreeSet<usize>, BTreeSet<i64>)> = BTreeMap::new();
+    /// Accesses through one parameter.
+    #[derive(Default)]
+    struct Seen {
+        /// Access widths, in bytes.
+        widths: BTreeSet<usize>,
+        /// Offsets from the pointer.
+        offsets: BTreeSet<i64>,
+        /// An access indexed it by a register or wrote the address back.
+        walk: Option<Witness>,
+    }
+    let mut seen: BTreeMap<usize, Seen> = BTreeMap::new();
     let order = code.get(entry).into_iter().chain(
         code.iter()
             .enumerate()
@@ -1142,14 +1152,20 @@ pub(in crate::analysis::decompile) fn param_types(
             None
         };
         if let Some((bytes, addr, dual)) = access
-            && let Offset::Imm(d) = addr.offset
             && let Some(&p) = holds.get(&addr.base)
         {
-            let e = widths.entry(p).or_default();
-            e.0.insert(bytes);
-            e.1.insert(i64::from(d));
+            let e = seen.entry(p).or_default();
+            e.widths.insert(bytes);
+            let d = match (addr.index, addr.offset) {
+                (Index::Offset | Index::Pre, Offset::Imm(d)) => d,
+                (Index::Post, _) | (_, Offset::Reg { .. }) => 0,
+            };
+            e.offsets.insert(i64::from(d));
+            if addr.index != Index::Offset || matches!(addr.offset, Offset::Reg { .. }) {
+                e.walk = Some(Witness::Walk);
+            }
             if dual {
-                e.1.insert(i64::from(d) + 4);
+                e.offsets.insert(i64::from(d) + 4);
             }
         }
         let copied = match i.op {
@@ -1176,8 +1192,8 @@ pub(in crate::analysis::decompile) fn param_types(
             holds.insert(rd, p);
         }
     }
-    for (p, (w, o)) in widths {
-        typed.insert(p, pointee_type(&w, &o).to_owned());
+    for (p, s) in seen {
+        typed.insert(p, pointee_type(&s.widths, &s.offsets, s.walk).to_owned());
     }
     typed
 }

@@ -22,7 +22,7 @@ fn a_zero_test_of_a_call_drops_its_cast() {
         "}\n",
         "return 0;\n",
     );
-    let out = super::type_parameters(text, "uint64_t");
+    let out = super::type_parameters(text, "uint64_t", &std::collections::BTreeSet::new());
     let out = quiet_zero_tests(&super::type_locals(&out));
     assert!(out.contains("if (sub_1() != 0)"), "{out}");
     assert!(!out.contains("(uint32_t)sub_1"), "{out}");

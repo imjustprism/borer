@@ -1074,18 +1074,17 @@ fn export_with(
 /// The text, `None` when the function does not decompile.
 fn named(program: &Program, analysis: &Analysis, overlay: &Overlay, entry: u64) -> Option<String> {
     let read = analysis.function(entry)?.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX;
-    let text = if read {
+    let (text, wide) = if read {
         let key = overlay.fingerprint();
-        crate::analysis::decompiled_cached(program, analysis, overlay, key, entry)
-            .as_ref()
-            .as_ref()?
-            .text
-            .clone()
+        let d = crate::analysis::decompiled_cached(program, analysis, overlay, key, entry);
+        let d = d.as_ref().as_ref()?;
+        (d.text.clone(), d.wide.clone())
     } else {
-        super::decompile_plain_full(program, analysis, overlay, entry)?.text
+        let d = super::decompile_plain_full(program, analysis, overlay, entry)?;
+        (d.text, d.wide)
     };
     super::name_fields(program, analysis, overlay, entry, &text)
-        .map(|out| super::finished(&out, program, analysis, overlay, entry))
+        .map(|out| super::finished(&out, program, analysis, overlay, entry, &wide))
 }
 
 /// Declares each function of the image a text names by that function's
