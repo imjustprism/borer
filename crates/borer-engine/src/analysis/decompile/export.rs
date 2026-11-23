@@ -10,6 +10,15 @@
 //! is declared by that signature alone, so the closure's own prototype or
 //! `static inline` copy of it is dropped.
 //!
+//! The file moves toward standard C where the `decompile` view is GNU C:
+//! each layout field is spelled as the load it names
+//! ([`super::lower_layouts`]), and the `void *` arithmetic of a parameter
+//! or a local is summed through `char *` ([`super::iso_arithmetic`]). What
+//! that pass leaves as written stays GNU C: a `void *` added to a number
+//! from the right, a step inside a larger expression, a global `void *`,
+//! and a chain whose operands the declarations do not type. Both keep every
+//! line where it was, so a record's line numbers point where they did.
+//!
 //! The functions come leaves first ([`order`]): each after every function
 //! it calls, a call cycle in entry order. Library code (a library or pack
 //! signature matched it, or it is a runtime helper) is left out unless
@@ -990,6 +999,7 @@ fn export_with(
                 BTreeSet::new(),
             )
         };
+        let text = super::iso_arithmetic(&super::lower_layouts(&text));
         let undeclared = super::unit::undeclared_words(&text);
         let out = own_callees(
             &super::unit::declare_globals(&text, &undeclared),

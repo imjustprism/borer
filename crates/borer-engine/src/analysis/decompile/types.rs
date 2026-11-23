@@ -6,10 +6,13 @@ use crate::analysis::protos::{local_depth, local_name};
 
 mod infer;
 mod regions;
+mod steps;
 
 pub(super) use super::signature::{signature_params, signature_places};
 pub(super) use infer::{Casts, inferred_type_on, scalar_width, signature_result, type_parameters};
 pub(super) use regions::filled_regions;
+use steps::{BYTE_POINTEES, byte_variables};
+pub(super) use steps::{Dialect, iso_arithmetic, steps_bytes};
 
 /// Most singletons whose fields [`decompile_named`] names in one function.
 pub(super) const SINGLETONS_MAX: usize = 8;
@@ -358,18 +361,6 @@ const SCALARS: [(&[&str], &str, u64); 10] = [
     (&["long double"], "long double", 10),
 ];
 
-/// The pointees whose arithmetic C already counts in bytes, as GNU C does
-/// for `void`.
-const BYTE_POINTEES: [&str; 7] = [
-    "void",
-    "uint8_t",
-    "int8_t",
-    "char",
-    "signed char",
-    "unsigned char",
-    "bool",
-];
-
 /// Rewrites the byte arithmetic on each typed pointer so that it still
 /// counts bytes.
 ///
@@ -411,8 +402,8 @@ pub(super) fn byte_arithmetic(text: &str, word: &str) -> String {
     out.join("\n") + "\n"
 }
 
-/// The parameters the signature declares as pointers to something wider
-/// than a byte, with their declared types.
+/// The parameters the signature declares as pointers whose GNU C sums do
+/// not count bytes ([`steps_bytes`]), with their declared types.
 ///
 /// # Arguments
 ///
@@ -420,31 +411,8 @@ pub(super) fn byte_arithmetic(text: &str, word: &str) -> String {
 fn typed_pointers(text: &str) -> Vec<(String, String)> {
     signature_params(text)
         .into_iter()
-        .filter(|(_, ty)| pointee_of(ty).is_some_and(|p| !BYTE_POINTEES.contains(&p)))
+        .filter(|(_, ty)| pointee_of(ty).is_some() && !steps_bytes(ty, Dialect::Gnu))
         .collect()
-}
-
-/// The variables a declaration line types as a byte, whose address counts
-/// bytes already.
-///
-/// # Arguments
-///
-/// * `text` - A decompiled function, declarations included.
-fn byte_variables(text: &str) -> BTreeSet<&str> {
-    let mut out = BTreeSet::new();
-    for line in text.lines() {
-        let code = line.split(" //").next().unwrap_or(line).trim_end();
-        let Some(names) = BYTE_POINTEES[1..]
-            .iter()
-            .find_map(|ty| code.strip_prefix(ty)?.strip_prefix(' ')?.strip_suffix(';'))
-        else {
-            continue;
-        };
-        if names.split(", ").all(is_ident) {
-            out.extend(names.split(", "));
-        }
-    }
-    out
 }
 
 /// Tells whether the operand between `head` and `tail` is a term of a sum
@@ -806,7 +774,7 @@ fn index_pointees(text: &str) -> BTreeMap<String, String> {
             } else {
                 continue;
             };
-            if !pointee.is_empty() && !BYTE_POINTEES.contains(&pointee) {
+            if !pointee.is_empty() && pointee != "void" && !BYTE_POINTEES.contains(&pointee) {
                 out.insert(name.to_owned(), pointee.to_owned());
             }
         }

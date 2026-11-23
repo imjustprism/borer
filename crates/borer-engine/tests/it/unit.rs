@@ -578,3 +578,148 @@ fn a_large_callee_keeps_its_abi_prototype() {
         "an ABI prototype names no parameter: {decls:?}"
     );
 }
+
+/// A System V x64 routine at [`TEXT`] that sums four fields of the object
+/// its first argument points at: the qword at 0, the dword at 8, the byte
+/// at 0x10 and the qword at 0x18.
+const FIELDS: [&[u8]; 7] = [
+    &[0x48, 0x8b, 0x07],       // ASM: mov rax, [rdi]
+    &[0x8b, 0x57, 0x08],       // ASM: mov edx, [rdi+8]
+    &[0x48, 0x01, 0xd0],       // ASM: add rax, rdx
+    &[0x0f, 0xb6, 0x57, 0x10], // ASM: movzx edx, byte [rdi+0x10]
+    &[0x48, 0x01, 0xd0],       // ASM: add rax, rdx
+    &[0x48, 0x03, 0x47, 0x18], // ASM: add rax, [rdi+0x18]
+    &[0xc3],                   // ASM: ret
+];
+
+/// An exported definition spells each layout field as its load.
+///
+/// Its `decompile` text has a layout line, and the definition, as a reader
+/// cuts it from its head line to its closing brace, has no member access
+/// and names nothing its signature, its own declarations, the C keywords
+/// and `<stdint.h>` do not declare.
+#[test]
+fn an_exported_definition_spells_its_layout_fields_as_loads() {
+    let mut p = crate::raw::image(Arch::X86_64, &FIELDS.concat(), &[]);
+    p.format = BinaryFormat::Elf;
+    p.symbols = vec![Symbol {
+        name: "sum".to_owned(),
+        addr: TEXT,
+        kind: SymbolKind::Export,
+    }];
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), TEXT).expect("decompiles");
+    assert!(text.contains("// layout "), "{text}");
+    let only = std::collections::BTreeSet::from([TEXT]);
+    let file = exported_file(&p, &a, &Overlay::default(), Some(&only));
+    let lines: Vec<&str> = file.lines().collect();
+    let head = lines
+        .iter()
+        .position(|l| l.contains(" sum(") && !l.ends_with(';') && !l.starts_with("//"))
+        .unwrap_or_else(|| panic!("sum is defined: {file}"));
+    let end = head
+        + lines[head..]
+            .iter()
+            .position(|l| *l == "}")
+            .expect("the definition ends");
+    let body = lines[head..=end].join("\n");
+    assert!(!body.contains("->"), "{body}");
+    let words = |s: &str| -> Vec<String> {
+        s.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+            .filter(|w| w.starts_with(|c: char| c.is_ascii_alphabetic() || c == '_'))
+            .map(str::to_owned)
+            .collect()
+    };
+    let mut known: Vec<String> = words(lines[head]);
+    for line in &lines[head + 1..end] {
+        let t = line.trim();
+        if let Some(decl) = t.strip_suffix(';').filter(|d| !d.contains(['=', '(', '+'])) {
+            known.extend(words(decl));
+        }
+    }
+    let c = "return if else while for do switch case default break continue goto void char int unsigned signed long short const uint8_t uint16_t uint32_t uint64_t int8_t int16_t int32_t int64_t uintptr_t";
+    known.extend(c.split(' ').map(str::to_owned));
+    let unknown: Vec<String> = words(&body)
+        .into_iter()
+        .filter(|w| !known.contains(w))
+        .collect();
+    assert!(unknown.is_empty(), "{unknown:?} in {body}");
+}
+
+/// A user's comment that reads as a layout line sizes no field of the
+/// export: the comment prints in the body, and the field keeps the width
+/// the header's layout gives it, the one the text check reads.
+#[test]
+fn a_comment_reading_as_a_layout_sizes_no_exported_field() {
+    let mut p = crate::raw::image(Arch::X86_64, &FIELDS.concat(), &[]);
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    o.comments.insert(TEXT + 3, "layout a1: 0x8 u8".to_owned());
+    let only = std::collections::BTreeSet::from([TEXT]);
+    let file = exported_file(&p, &a, &o, Some(&only));
+    assert!(file.contains("// layout a1: 0x8 u8"), "{file}");
+    let load = |ty: &str| {
+        file.contains(&format!("*({ty}*)(a1 + 8)"))
+            || file.contains(&format!("*({ty}*)((uintptr_t)a1 + 8)"))
+    };
+    assert!(load("uint32_t") && !load("uint8_t"), "{file}");
+}
+
+/// A System V x64 routine at [`TEXT`] + 0x40 that reads the dword its
+/// argument points at and returns the address 32 bytes past it.
+const NEXT: [&[u8]; 3] = [
+    &[0x8b, 0x07],             // ASM: mov eax, [rdi]
+    &[0x48, 0x8d, 0x47, 0x20], // ASM: lea rax, [rdi+0x20]
+    &[0xc3],                   // ASM: ret
+];
+
+/// The export takes no sum on a `void *`.
+///
+/// The export is standard C: no sum is taken on a `void *`, a parameter's
+/// or a local's, where the `decompile` view, GNU C, takes one. A name
+/// after a cast, `(uintptr_t)obj` or the load `*(uint64_t*)a1`, is no
+/// `void *` operand.
+#[test]
+fn the_export_takes_no_sum_on_a_void_pointer() {
+    let mut code = FIELDS.concat();
+    code.resize(0x40, 0xcc);
+    code.extend(NEXT.concat());
+    let mut p = crate::raw::image(Arch::X86_64, &code, &[]);
+    p.format = BinaryFormat::Elf;
+    let a = Analysis::compute(&p);
+    let mut o = Overlay::default();
+    let proto =
+        borer_engine::analysis::protos::Proto::parse("void *next(void *obj)").expect("parses");
+    o.prototypes.insert(TEXT + 0x40, proto);
+    let text = decompile(&p, &a, &o, TEXT + 0x40).expect("decompiles");
+    assert!(text.contains("return obj + 32;"), "{text}");
+    let file = exported_file(&p, &a, &o, None);
+    let mut voids: Vec<String> = Vec::new();
+    for line in file.lines() {
+        for part in line.split(['(', ',']) {
+            if let Some(name) = part.trim().strip_prefix("void *") {
+                let name = name.trim_end_matches([')', ';', ' ', '{']);
+                if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+                    voids.push(name.to_owned());
+                }
+            }
+        }
+    }
+    assert!(
+        ["a1", "obj"]
+            .iter()
+            .all(|n| voids.contains(&(*n).to_owned())),
+        "{file}"
+    );
+    for name in &voids {
+        for op in [" + ", " - ", " += ", " -= "] {
+            let sum = format!("{name}{op}");
+            for (at, _) in file.match_indices(&sum) {
+                let before = &file[..at];
+                let whole = !before.ends_with(|c: char| c.is_ascii_alphanumeric() || c == '_');
+                assert!(!whole || before.ends_with(')'), "{sum} in {file}");
+            }
+        }
+    }
+}

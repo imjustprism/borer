@@ -1,7 +1,12 @@
 //! Field names and layouts: members named by asserts and setters, by types
 //! the user applied to globals, and `this` rendered through them.
 
+use super::ctext::{Base, CTy};
 use super::*;
+
+mod lower;
+
+pub(super) use lower::lower_layouts;
 
 /// Names the fields a function's own assertions name.
 ///
@@ -197,26 +202,107 @@ pub(super) fn drop_array_runs(fields: &mut BTreeMap<i64, &'static str>) {
     }
 }
 
+/// One width a layout header names.
+#[derive(Debug)]
+pub(super) struct Width {
+    /// The C type a load of it casts to, `uint32_t`.
+    pub(super) c: &'static str,
+    /// Its letter in a layout header, `u32`.
+    pub(super) letter: &'static str,
+    /// The type the text check reads it as.
+    pub(super) ty: CTy,
+}
+
+/// Every width a layout header names, each once.
+static WIDTHS: [Width; 11] = [
+    width("uint8_t", "u8", CTy::int(8, false)),
+    width("uint16_t", "u16", CTy::int(16, false)),
+    width("uint32_t", "u32", CTy::int(32, false)),
+    width("uint64_t", "u64", CTy::int(64, false)),
+    width("uint128_t", "u128", CTy::of(Base::Wide)),
+    width("int8_t", "i8", CTy::int(8, true)),
+    width("int16_t", "i16", CTy::int(16, true)),
+    width("int32_t", "i32", CTy::int(32, true)),
+    width("int64_t", "i64", CTy::int(64, true)),
+    width("float", "f32", CTy::of(Base::Float(32))),
+    width("double", "f64", CTy::of(Base::Float(64))),
+];
+
+/// Returns one row of [`WIDTHS`].
+///
+/// # Arguments
+///
+/// * `c`, `letter`, `ty` - As [`Width`] names them.
+const fn width(c: &'static str, letter: &'static str, ty: CTy) -> Width {
+    Width { c, letter, ty }
+}
+
 /// The type letter of a load or store cast, for a layout header.
 ///
 /// # Arguments
 ///
 /// * `ty` - The C type name inside `*(T*)`.
 pub(super) fn layout_type(ty: &str) -> Option<&'static str> {
-    Some(match ty {
-        "uint8_t" => "u8",
-        "uint16_t" => "u16",
-        "uint32_t" => "u32",
-        "uint64_t" => "u64",
-        "uint128_t" => "u128",
-        "int8_t" => "i8",
-        "int16_t" => "i16",
-        "int32_t" => "i32",
-        "int64_t" => "i64",
-        "float" => "f32",
-        "double" => "f64",
-        _ => return None,
-    })
+    WIDTHS.iter().find(|w| w.c == ty).map(|w| w.letter)
+}
+
+/// Field widths by base and offset, as a text's layout lines give them, a
+/// negative offset below the base.
+pub(super) type Layouts = BTreeMap<String, BTreeMap<i64, &'static Width>>;
+
+/// Reads the layout lines [`apply_layouts`] writes, `// layout base: 0x8
+/// u32, -0x10 u64` and the `//  ` lines a long one continues on.
+///
+/// An item whose offset or letter does not read is left out.
+///
+/// # Arguments
+///
+/// * `lines` - A text's lines; every line but a layout line is passed
+///   over, and ends a layout.
+pub(super) fn read_layouts<S: AsRef<str>>(lines: &[S]) -> Layouts {
+    let mut out = Layouts::new();
+    let mut base: Option<&str> = None;
+    for line in lines {
+        let t = line.as_ref().trim();
+        let rest = match t.strip_prefix("// layout ").and_then(|l| l.split_once(':')) {
+            Some((b, rest)) => {
+                base = Some(b.trim());
+                rest
+            }
+            None => match t.strip_prefix("//  ").filter(|_| base.is_some()) {
+                Some(rest) => rest,
+                None => {
+                    base = None;
+                    continue;
+                }
+            },
+        };
+        let Some(b) = base else {
+            continue;
+        };
+        for item in rest.split(',') {
+            let mut words = item.split_whitespace();
+            let (Some(off), Some(letter)) = (words.next(), words.next()) else {
+                continue;
+            };
+            let (neg, mag) = off.strip_prefix('-').map_or((false, off), |m| (true, m));
+            let off = crate::analysis::parse_addr(mag)
+                .and_then(|m| i64::try_from(m).ok())
+                .map(|m| if neg { -m } else { m });
+            let Some((off, w)) = off.zip(WIDTHS.iter().find(|w| w.letter == letter)) else {
+                continue;
+            };
+            match out.get_mut(b) {
+                Some(fields) => {
+                    fields.insert(off, w);
+                }
+                None => {
+                    out.insert(b.to_owned(), BTreeMap::from([(off, w)]));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The field-style accesses in one line: `(base, offset, type letter)` for

@@ -28,7 +28,7 @@ crates/borer-engine/src/analysis/decompile/fields.rs::apply_layouts#1	107
 crates/borer-engine/src/analysis/decompile/format.rs::arguments#1	115
 crates/borer-engine/src/analysis/decompile/guarded.rs::plan#1	130
 crates/borer-engine/src/analysis/decompile/helper.rs::define#1	151
-crates/borer-engine/src/analysis/decompile/interp.rs	2397
+crates/borer-engine/src/analysis/decompile/interp.rs	2381
 crates/borer-engine/src/analysis/decompile/interp.rs::binary#1	111
 crates/borer-engine/src/analysis/decompile/interp.rs::read_as#1	178
 crates/borer-engine/src/analysis/decompile/interp.rs::solve_for#1	177
@@ -75,7 +75,7 @@ crates/borer-engine/src/analysis/decompile/replay/prove.rs::prove_or#1	298
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::step#1	254
 crates/borer-engine/src/analysis/decompile/replay/prove.rs::successor_claims#1	159
 crates/borer-engine/src/analysis/decompile/traces.rs::included#1	106
-crates/borer-engine/src/analysis/decompile/types.rs	2201
+crates/borer-engine/src/analysis/decompile/types.rs	2179
 crates/borer-engine/src/analysis/decompile/types.rs::callable_pointers#1	114
 crates/borer-engine/src/analysis/decompile/types.rs::stack_arrays#1	101
 crates/borer-engine/src/analysis/decompile/vars.rs	2214

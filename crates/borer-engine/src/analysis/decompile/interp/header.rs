@@ -10,7 +10,7 @@ use super::*;
 /// # Arguments
 ///
 /// * `text` - A decompiled function.
-pub(super) fn lines(text: &str) -> (Vec<&str>, usize) {
+pub(in crate::analysis::decompile) fn lines(text: &str) -> (Vec<&str>, usize) {
     let all: Vec<&str> = text
         .lines()
         .map(|l| if defines(l) { "//" } else { l })
@@ -25,12 +25,12 @@ pub(super) fn lines(text: &str) -> (Vec<&str>, usize) {
 /// The pieces of a decompiled function's header the run needs beside its
 /// signature.
 #[derive(Debug, Default)]
-pub(super) struct Header {
+pub(in crate::analysis::decompile) struct Header {
     /// Declared names: type, and the address a global's `// @` gives.
-    pub(super) declared: Vec<(String, CTy, Option<u64>)>,
+    pub(in crate::analysis::decompile) declared: Vec<(String, CTy, Option<u64>)>,
     /// The declared names that are arrays (`uint32_t local_28[8]`), whose
     /// name reads as the address of their first element.
-    pub(super) arrays: FxHashSet<String>,
+    pub(in crate::analysis::decompile) arrays: FxHashSet<String>,
     /// Field widths by base and offset.
     pub(super) layouts: FxHashMap<String, FxHashMap<u64, CTy>>,
 }
@@ -54,42 +54,19 @@ pub(super) struct Header {
 /// # Errors
 ///
 /// When a declaration does not tokenize.
-pub(super) fn header(lines: &[&str], word: u8) -> Result<Header, String> {
+pub(in crate::analysis::decompile) fn header(lines: &[&str], word: u8) -> Result<Header, String> {
     let mut h = Header::default();
-    let mut layout_base: Option<String> = None;
+    for (base, fields) in crate::analysis::decompile::fields::read_layouts(lines) {
+        let fields: FxHashMap<u64, CTy> = fields
+            .into_iter()
+            .filter_map(|(off, w)| Some((u64::try_from(off).ok()?, w.ty)))
+            .collect();
+        if !fields.is_empty() {
+            h.layouts.insert(base, fields);
+        }
+    }
     for raw in lines {
         let t = raw.trim();
-        let layout = t
-            .strip_prefix("// layout ")
-            .and_then(|l| l.split_once(':'))
-            .map(|(base, rest)| (Some(base.trim().to_owned()), rest))
-            .or_else(|| {
-                t.strip_prefix("//  ")
-                    .filter(|_| layout_base.is_some())
-                    .map(|rest| (None, rest))
-            });
-        if let Some((base, rest)) = layout {
-            if let Some(b) = base {
-                layout_base = Some(b);
-            }
-            let Some(b) = layout_base.clone() else {
-                continue;
-            };
-            for item in rest.split(',') {
-                let mut words = item.split_whitespace();
-                let (Some(off), Some(letter)) = (words.next(), words.next()) else {
-                    continue;
-                };
-                let Some(off) = crate::analysis::parse_addr(off) else {
-                    continue;
-                };
-                if let Some(ty) = layout_letter(letter) {
-                    h.layouts.entry(b.clone()).or_default().insert(off, ty);
-                }
-            }
-            continue;
-        }
-        layout_base = None;
         if t.starts_with("//") || t.is_empty() {
             continue;
         }

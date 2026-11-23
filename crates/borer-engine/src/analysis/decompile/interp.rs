@@ -55,7 +55,7 @@ use crate::num::from_usize;
 use crate::program::{Program, SymbolKind};
 
 mod compile;
-mod header;
+pub(super) mod header;
 mod names;
 
 use header::global_name;
@@ -558,28 +558,6 @@ fn stated_local(overlay: &Overlay, entry: u64, name: &str) -> Option<i64> {
             crate::analysis::protos::VarKey::Param(_)
             | crate::analysis::protos::VarKey::Slot(_) => None,
         })
-}
-
-/// The type a layout line's width letter spells.
-///
-/// # Arguments
-///
-/// * `letter` - `u8` .. `u128`, `i8` .. `i64`, `f32` or `f64`.
-fn layout_letter(letter: &str) -> Option<CTy> {
-    Some(match letter {
-        "u8" => CTy::int(8, false),
-        "u16" => CTy::int(16, false),
-        "u32" => CTy::int(32, false),
-        "u64" => CTy::int(64, false),
-        "i8" => CTy::int(8, true),
-        "i16" => CTy::int(16, true),
-        "i32" => CTy::int(32, true),
-        "i64" => CTy::int(64, true),
-        "f32" => CTy::of(Base::Float(32)),
-        "f64" => CTy::of(Base::Float(64)),
-        "u128" => CTy::of(Base::Wide),
-        _ => return None,
-    })
 }
 
 /// The bytes a 128-bit value takes.
