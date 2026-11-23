@@ -20,21 +20,79 @@ pub struct EnumTable {
 }
 
 impl EnumTable {
-    /// The member named for `value`, if the table has one that C can spell.
+    /// The member named for `value`, if the table has one C reads as that
+    /// value in the body.
     ///
-    /// A member is the literal the code pairs the value with, and a literal
-    /// such as `.STRUCT` or `a-b` is no identifier: written in place of the
-    /// value it would not be C, so the value stays the number.
+    /// A member is the literal the code pairs the value with, or the name a
+    /// user stated, and the value stays the number when the name would not
+    /// read as it: no identifier (`.STRUCT`), a keyword of any C standard
+    /// (`true` reads as 1, `inline` does not parse), a macro C defines
+    /// ([`DEFINED`]), a name another value of the table shares, or a name
+    /// the body already uses (`a1` in `switch (a1)`).
     ///
     /// # Arguments
     ///
     /// * `value` - The constant.
-    pub(super) fn member(&self, value: u64) -> Option<&str> {
-        self.members
+    /// * `taken` - The names the body uses.
+    pub(super) fn member(&self, value: u64, taken: &Taken<'_>) -> Option<&str> {
+        let name = self
+            .members
             .iter()
             .find(|(k, _)| *k == value)
-            .map(|(_, lit)| lit.as_str())
-            .filter(|lit| cir::Ident::new(lit).is_some())
+            .map(|(_, lit)| lit.as_str())?;
+        let reads = cir::Ident::spells(name)
+            && !cir::LATER_KEYWORDS.contains(&name)
+            && !DEFINED.contains(&name)
+            && self.members.iter().all(|(k, n)| n != name || *k == value);
+        (reads && !taken.holds(name)).then_some(name)
+    }
+}
+
+/// Macros the C library defines that a name table may spell: `NULL` reads
+/// as a null pointer, not as the member.
+const DEFINED: [&str; 1] = ["NULL"];
+
+/// The identifiers a body spells outside literals and comments, read on
+/// the first lookup: most bodies print no member, and those pay nothing.
+pub(super) struct Taken<'t> {
+    /// The body.
+    text: &'t str,
+    /// Its identifiers, once read.
+    names: std::cell::OnceCell<BTreeSet<&'t str>>,
+}
+
+impl<'t> Taken<'t> {
+    /// Returns the names `text` uses, unread.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The body.
+    pub(super) fn new(text: &'t str) -> Self {
+        Self {
+            text,
+            names: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Tells whether the body uses `name` as an identifier.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The identifier.
+    fn holds(&self, name: &str) -> bool {
+        self.names
+            .get_or_init(|| {
+                self.text
+                    .lines()
+                    .flat_map(|line| {
+                        lexer::lex(line)
+                            .into_iter()
+                            .filter(|t| t.lex == lexer::Lex::Name)
+                            .filter_map(move |t| line.get(t.at..t.end))
+                    })
+                    .collect()
+            })
+            .contains(name)
     }
 }
 
@@ -623,6 +681,7 @@ pub(super) fn spell_own_enum(text: &str) -> String {
         members: listed.members,
         param: None,
     };
+    let taken = Taken::new(text);
     let mut switches: Vec<(usize, bool)> = Vec::new();
     let mut depth = 0usize;
     let mut out = String::with_capacity(text.len());
@@ -631,9 +690,9 @@ pub(super) fn spell_own_enum(text: &str) -> String {
         switches.retain(|(inner, _)| depth >= *inner);
         let mut written = line.to_owned();
         if switches.last().is_some_and(|(_, on)| *on) {
-            written = rename_case_labels(&written, &table);
+            written = rename_case_labels(&written, &table, &taken);
         }
-        written = rename_compared(&written, &var, &table);
+        written = rename_compared(&written, &var, &table, &taken);
         let (opens, closes) = brace_delta(t);
         if let Some(inner) = switch_opener(t) {
             switches.push((depth + opens, switch_subject(inner, &var)));
@@ -705,7 +764,8 @@ fn switch_subject(inner: &str, var: &str) -> bool {
 ///
 /// * `line` - One line.
 /// * `table` - The function's own table.
-fn rename_case_labels(line: &str, table: &EnumTable) -> String {
+/// * `taken` - The names the body uses.
+fn rename_case_labels(line: &str, table: &EnumTable, taken: &Taken<'_>) -> String {
     let trimmed = line.trim_start();
     let pad = line.len() - trimmed.len();
     if !trimmed.starts_with("case ") {
@@ -725,7 +785,7 @@ fn rename_case_labels(line: &str, table: &EnumTable) -> String {
         };
         let token = after[..colon].trim();
         let tail = &after[colon + 1..];
-        match parse_const(token).and_then(|k| table.member(k)) {
+        match parse_const(token).and_then(|k| table.member(k, taken)) {
             Some(name) => {
                 changed = true;
                 built.push_str("case ");
@@ -774,6 +834,7 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
     if enums.is_empty() {
         return body.to_owned();
     }
+    let taken = Taken::new(body);
     let mut carriers: BTreeMap<String, &EnumTable> = BTreeMap::new();
     let mut switches: Vec<(usize, &EnumTable)> = Vec::new();
     let mut out = String::with_capacity(body.len());
@@ -782,15 +843,8 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
         let ind = indent_of(line);
         let mut text = line.to_owned();
         switches.retain(|(depth, _)| *depth < ind || t != "}");
-        if t.starts_with("case ")
-            && let Some((_, table)) = switches.last()
-            && let Some(k) = t
-                .strip_prefix("case ")
-                .and_then(|r| r.strip_suffix(':'))
-                .and_then(parse_const)
-            && let Some(name) = table.member(k)
-        {
-            text = format!("{}case {name}:", " ".repeat(ind));
+        if let Some(named) = case_named(t, ind, &switches, &taken) {
+            text = named;
         }
         if let Some(inner) = switch_opener(t)
             && let Some(table) = carriers.get(inner.trim())
@@ -798,14 +852,15 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
             switches.push((ind, table));
         }
         for (var, table) in &carriers {
-            text = rename_compared(&text, var, table);
+            text = rename_compared(&text, var, table, &taken);
         }
         for (callee, table) in enums {
             match table.param {
-                Some(pos) => text = rename_argument(&text, callee, pos, table),
+                Some(pos) => text = rename_argument(&text, callee, pos, table, &taken),
                 None => {
-                    text =
-                        rename_call_compared(&text, callee, |k| table.member(k).map(str::to_owned));
+                    text = rename_call_compared(&text, callee, |k| {
+                        table.member(k, &taken).map(str::to_owned)
+                    });
                 }
             }
         }
@@ -829,6 +884,34 @@ pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
         out.push('\n');
     }
     out
+}
+
+/// Names a `case K:` line by the table of the innermost open `switch`.
+///
+/// # Arguments
+///
+/// * `t` - The trimmed line.
+/// * `ind` - Its indentation.
+/// * `switches` - The open switches over a table, innermost last.
+/// * `taken` - The names the body uses.
+///
+/// # Returns
+///
+/// The line with the member in place of `K`, or `None` when it is no
+/// `case K:` or the table names no member C reads as `K`.
+fn case_named(
+    t: &str,
+    ind: usize,
+    switches: &[(usize, &EnumTable)],
+    taken: &Taken<'_>,
+) -> Option<String> {
+    let (_, table) = switches.last()?;
+    let k = t
+        .strip_prefix("case ")?
+        .strip_suffix(':')
+        .and_then(parse_const)?;
+    let name = table.member(k, taken)?;
+    Some(format!("{}case {name}:", " ".repeat(ind)))
 }
 
 /// Names the constants a library call's result is compared with
@@ -988,7 +1071,13 @@ fn rename_against(line: &str, var: &str, name: impl Fn(u64) -> Option<String>) -
 /// * `line` - The line.
 /// * `var` - The variable carrying the table.
 /// * `table` - Its table.
-pub(super) fn rename_compared(line: &str, var: &str, table: &EnumTable) -> String {
+/// * `taken` - The names the body uses.
+pub(super) fn rename_compared(
+    line: &str,
+    var: &str,
+    table: &EnumTable,
+    taken: &Taken<'_>,
+) -> String {
     let mut text = line.to_owned();
     for op in [" == ", " != "] {
         let mut from = 0;
@@ -1012,7 +1101,7 @@ pub(super) fn rename_compared(line: &str, var: &str, table: &EnumTable) -> Strin
             let renamed = text
                 .get(at + op.len()..value_end)
                 .and_then(parse_const)
-                .and_then(|k| table.member(k))
+                .and_then(|k| table.member(k, taken))
                 .filter(|_| left_ok)
                 .map(str::to_owned);
             match renamed {
@@ -1035,7 +1124,14 @@ pub(super) fn rename_compared(line: &str, var: &str, table: &EnumTable) -> Strin
 /// * `callee` - The table function's display name.
 /// * `pos` - The argument position, from zero.
 /// * `table` - Its table.
-pub(super) fn rename_argument(line: &str, callee: &str, pos: usize, table: &EnumTable) -> String {
+/// * `taken` - The names the body uses.
+pub(super) fn rename_argument(
+    line: &str,
+    callee: &str,
+    pos: usize,
+    table: &EnumTable,
+    taken: &Taken<'_>,
+) -> String {
     let needle = format!("{callee}(");
     let Some(start) = line.find(&needle) else {
         return line.to_owned();
@@ -1067,7 +1163,7 @@ pub(super) fn rename_argument(line: &str, callee: &str, pos: usize, table: &Enum
     let renamed = parts
         .get(pos)
         .and_then(|a| parse_const(a))
-        .and_then(|k| table.member(k))
+        .and_then(|k| table.member(k, taken))
         .map(str::to_owned);
     match (renamed, parts.get_mut(pos)) {
         (Some(name), Some(slot)) => {
@@ -1178,6 +1274,10 @@ pub(super) fn user_enum_globals(
 /// their constants, until the local is assigned something else. No call
 /// arguments are renamed: a user enum types a value, not a parameter.
 ///
+/// The user states the names, but a name is printed under the same rule as
+/// a recovered one ([`EnumTable::member`]): a stated `inline`, or a name the
+/// body already uses, would not read as the value, so it stays the number.
+///
 /// # Arguments
 ///
 /// * `body` - The cleaned body text.
@@ -1187,6 +1287,7 @@ pub(super) fn user_enum_globals(
 ///
 /// The body with member names in place of the constants.
 pub(super) fn apply_user_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
+    let taken = Taken::new(body);
     let mut carriers: BTreeMap<String, &EnumTable> = BTreeMap::new();
     let mut switches: Vec<(usize, &EnumTable)> = Vec::new();
     let mut out = String::with_capacity(body.len());
@@ -1195,15 +1296,8 @@ pub(super) fn apply_user_enums(body: &str, enums: &BTreeMap<String, EnumTable>) 
         let ind = indent_of(line);
         let mut text = line.to_owned();
         switches.retain(|(depth, _)| *depth < ind || t != "}");
-        if t.starts_with("case ")
-            && let Some((_, table)) = switches.last()
-            && let Some(k) = t
-                .strip_prefix("case ")
-                .and_then(|r| r.strip_suffix(':'))
-                .and_then(parse_const)
-            && let Some(name) = table.member(k)
-        {
-            text = format!("{}case {name}:", " ".repeat(ind));
+        if let Some(named) = case_named(t, ind, &switches, &taken) {
+            text = named;
         }
         if let Some(inner) = switch_opener(t)
             && let Some(table) = enums
@@ -1213,7 +1307,7 @@ pub(super) fn apply_user_enums(body: &str, enums: &BTreeMap<String, EnumTable>) 
             switches.push((ind, table));
         }
         for (var, table) in enums.iter().chain(carriers.iter().map(|(v, t)| (v, *t))) {
-            text = rename_compared(&text, var, table);
+            text = rename_compared(&text, var, table, &taken);
         }
         if let Some((lhs, rhs)) = t.strip_suffix(';').and_then(|s| s.split_once(" = "))
             && is_ident(lhs)

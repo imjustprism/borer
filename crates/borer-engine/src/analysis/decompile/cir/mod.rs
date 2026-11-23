@@ -161,12 +161,21 @@ impl Ident {
     /// The identifier, or `None` when the text is not a C identifier or is
     /// a keyword.
     pub(super) fn new(text: &str) -> Option<Self> {
+        Self::spells(text).then(|| Self(text.to_owned()))
+    }
+
+    /// Tells whether [`Ident::new`] takes a text, without building it.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The spelling.
+    pub(super) fn spells(text: &str) -> bool {
         let mut chars = text.chars();
-        let first = chars.next()?;
-        let ok = (first.is_ascii_alphabetic() || first == '_')
+        chars
+            .next()
+            .is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
             && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-            && !KEYWORDS.contains(&text);
-        ok.then(|| Self(text.to_owned()))
+            && !KEYWORDS.contains(&text)
     }
 
     /// Returns the spelling.

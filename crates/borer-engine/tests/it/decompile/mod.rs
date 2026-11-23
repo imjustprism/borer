@@ -36,6 +36,7 @@ mod shifts;
 mod sigstrings;
 mod solve;
 mod switches;
+mod tables;
 mod thumb;
 mod values;
 mod variadic;
