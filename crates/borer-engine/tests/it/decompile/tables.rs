@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 use super::*;
 use borer_engine::analysis::decompile::{EnumTable, apply_enums};
+use borer_engine::analysis::protos::Proto;
 use borer_engine::analysis::utypes::{build_enum, parse_type};
 
 /// Where [`program64_with_data`] maps `.text`.
@@ -65,7 +66,8 @@ fn named_values(prefix: &[u8], cases: [(u8, &str); 3]) -> borer_engine::program:
 /// `"Undefined"` for 5, the shape of cc65's `GetScopeType`, so its table
 /// pairs each value with its literal. `case .STRUCT:` is no C. The caller
 /// passes 3 and 5 to it, decompiled with the tables of the functions it
-/// calls.
+/// calls; named `Undefined` itself, or stating an unused parameter of that
+/// name, it passes 5 as the number.
 #[test]
 fn a_table_member_that_is_no_identifier_stays_a_number() {
     let cases = [(3, ".STRUCT"), (4, ".ENUM"), (5, "Undefined")];
@@ -94,12 +96,23 @@ fn a_table_member_that_is_no_identifier_stays_a_number() {
     let text = decompile(&p, &a, &o, TEXT).unwrap_or_default();
     assert!(text.contains("sub_140001020(3)"), "{text}");
     assert!(text.contains("sub_140001020(Undefined)"), "{text}");
+    let mut named = o.clone();
+    named.names.insert(TEXT, "Undefined".to_owned());
+    let text = decompile(&p, &a, &named, TEXT).unwrap_or_default();
+    assert!(text.contains("sub_140001020(5)"), "{text}");
+    let mut stated = o;
+    let proto = Proto::parse("void caller(uint32_t Undefined)").expect("a prototype");
+    stated.prototypes.insert(TEXT, proto);
+    let text = decompile(&p, &a, &stated, TEXT).unwrap_or_default();
+    assert!(text.contains("sub_140001020(5)"), "{text}");
 }
 
 /// A member C reads as something else stays a number: a keyword of any C
-/// standard, a name two values share, or a name the function already uses.
+/// standard, a name the export's headers define, a name two values share,
+/// or a name the function already uses.
 ///
-/// `case true:` would read as 1, `case inline:` does not parse, two `case
+/// `case true:` would read as 1, `case inline:` does not parse, `case
+/// EXIT_FAILURE:` compiles as 1, `case free:` names a function, two `case
 /// Foo:` labels are ambiguous, and `case a1:` in `switch (a1)` names the
 /// parameter.
 #[test]
@@ -107,6 +120,10 @@ fn a_member_c_reads_otherwise_stays_a_number() {
     for (cases, labels) in [
         (
             [(3, "true"), (4, "false"), (5, "inline")],
+            ["case 3:", "case 4:", "case 5:"],
+        ),
+        (
+            [(3, "EXIT_FAILURE"), (4, "free"), (5, "INT32_MAX")],
             ["case 3:", "case 4:", "case 5:"],
         ),
         (
@@ -146,7 +163,7 @@ fn a_parser_result_names_only_the_members_c_reads() {
     };
     let tables = BTreeMap::from([("parse".to_owned(), table)]);
     let body = "v = parse(a1);\nif (v == 2) {\n  return 0;\n}\nswitch (v) {\ncase 1:\n  break;\ncase 3:\n  break;\ncase 4:\n  break;\ncase 5:\n  break;\n}\nif (parse(a2) == 1) {\n  return 1;\n}\n";
-    let out = apply_enums(body, &tables);
+    let out = apply_enums(body, &tables, &[]);
     for said in [
         "if (v == Green) {",
         "case Red:",

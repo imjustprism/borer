@@ -149,6 +149,159 @@ pub(super) const LATER_KEYWORDS: [&str; 30] = [
     "_Pragma",
 ];
 
+/// What one header the export includes reserves ([`super::export::PRELUDE`]).
+pub(super) struct Header {
+    /// The header, as the `#include` names it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "read by the test tying the table to the includes")
+    )]
+    pub(super) file: &'static str,
+    /// The object-like macros it defines, which a name would read as.
+    macros: &'static [&'static str],
+    /// The patterns of names it defines or the standard reserves for it.
+    patterns: &'static [Reserved],
+}
+
+/// A pattern of names a header reserves.
+enum Reserved {
+    /// Starts with the first text and ends with the second, past both
+    /// (`INT` and `_MAX`: `INT8_MAX`, `INTPTR_MAX`).
+    Affix(&'static str, &'static str),
+    /// The text, then an uppercase letter (`FP_NAN`, `M_PI`).
+    Upper(&'static str),
+    /// The text, then a lowercase letter (`strdup`, `memccpy`).
+    Lower(&'static str),
+}
+
+impl Reserved {
+    /// Tells whether `name` is of the pattern.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The identifier.
+    fn holds(&self, name: &str) -> bool {
+        let next = |prefix: &str| name.strip_prefix(prefix).and_then(|r| r.chars().next());
+        match self {
+            Self::Affix(start, end) => {
+                name.len() > start.len() + end.len()
+                    && name.starts_with(start)
+                    && name.ends_with(end)
+            }
+            Self::Upper(prefix) => next(prefix).is_some_and(|c| c.is_ascii_uppercase()),
+            Self::Lower(prefix) => next(prefix).is_some_and(|c| c.is_ascii_lowercase()),
+        }
+    }
+}
+
+/// Typedef names end `_t` in every header the export includes.
+const TYPEDEFS: Reserved = Reserved::Affix("", "_t");
+
+/// The headers the export includes, each with the names it reserves.
+///
+/// Functions and typedefs are not listed: the SDK type library declares
+/// the C runtime's functions ([`crate::analysis::typelib::declared`]), and
+/// every typedef here ends `_t` ([`TYPEDEFS`]). Function-like macros that
+/// are no function (`isnan`, `offsetof`) are listed with the macros.
+pub(super) const HEADERS: [Header; 6] = [
+    Header {
+        file: "stdint.h",
+        macros: &[
+            "SIZE_MAX",
+            "PTRDIFF_MAX",
+            "PTRDIFF_MIN",
+            "WCHAR_MAX",
+            "WCHAR_MIN",
+            "WINT_MAX",
+            "WINT_MIN",
+            "SIG_ATOMIC_MAX",
+            "SIG_ATOMIC_MIN",
+        ],
+        patterns: &[
+            Reserved::Affix("INT", "_MAX"),
+            Reserved::Affix("INT", "_MIN"),
+            Reserved::Affix("INT", "_C"),
+            Reserved::Affix("UINT", "_MAX"),
+            Reserved::Affix("UINT", "_C"),
+            Reserved::Affix("INT", "_WIDTH"),
+            Reserved::Affix("UINT", "_WIDTH"),
+        ],
+    },
+    Header {
+        file: "stddef.h",
+        macros: &["NULL", "offsetof", "unreachable"],
+        patterns: &[],
+    },
+    Header {
+        file: "stdbool.h",
+        macros: &["bool", "true", "false", "__bool_true_false_are_defined"],
+        patterns: &[],
+    },
+    Header {
+        file: "string.h",
+        macros: &["NULL"],
+        patterns: &[
+            Reserved::Lower("str"),
+            Reserved::Lower("mem"),
+            Reserved::Lower("wcs"),
+        ],
+    },
+    Header {
+        file: "stdlib.h",
+        macros: &[
+            "NULL",
+            "EXIT_SUCCESS",
+            "EXIT_FAILURE",
+            "RAND_MAX",
+            "MB_CUR_MAX",
+        ],
+        patterns: &[Reserved::Lower("str")],
+    },
+    Header {
+        file: "math.h",
+        macros: &[
+            "NAN",
+            "INFINITY",
+            "HUGE_VAL",
+            "HUGE_VALF",
+            "HUGE_VALL",
+            "MATH_ERRNO",
+            "MATH_ERREXCEPT",
+            "math_errhandling",
+            "isnan",
+            "isinf",
+            "isfinite",
+            "isnormal",
+            "signbit",
+            "fpclassify",
+            "isgreater",
+            "isgreaterequal",
+            "isless",
+            "islessequal",
+            "islessgreater",
+            "isunordered",
+        ],
+        patterns: &[Reserved::Upper("FP_"), Reserved::Upper("M_")],
+    },
+];
+
+/// Tells whether a name is one the export's headers define or reserve, so
+/// a name the text adds would read as theirs or clash with it.
+///
+/// # Arguments
+///
+/// * `name` - The identifier.
+pub(super) fn reserved(name: &str) -> bool {
+    use crate::program::BinaryFormat;
+    TYPEDEFS.holds(name)
+        || HEADERS
+            .iter()
+            .any(|h| h.macros.contains(&name) || h.patterns.iter().any(|p| p.holds(name)))
+        || [BinaryFormat::Elf, BinaryFormat::Pe]
+            .into_iter()
+            .any(|format| crate::analysis::typelib::declared(name, format).is_some())
+}
+
 impl Ident {
     /// Builds an identifier from its text.
     ///

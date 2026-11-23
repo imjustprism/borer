@@ -1736,12 +1736,12 @@ fn decompile_in<L: Lifter>(
     let body = body.map_if(returns_nothing && skip.runs(Pass::DropDeadResults), |b| {
         drop_dead_results(b, result_reg)
     });
-    let body = skip.apply(Pass::ApplyEnums, body, |body| match overlay.enum_source {
-        EnumSource::Given => apply_enums(body, &overlay.enums),
-        EnumSource::Binary => apply_enums(body, &called_tables(program, analysis, overlay, body)),
+    let own = declared_names(&ctx, analysis, overlay, f.entry, shape.count);
+    let body = skip.apply(Pass::ApplyEnums, body, |b| {
+        apply_tables(b, program, analysis, overlay, &own)
     });
-    let body = skip.apply(Pass::ApplyResults, body, |body| {
-        apply_results(body, &ctx.result_groups)
+    let body = skip.apply(Pass::ApplyResults, body, |b| {
+        apply_results(b, &ctx.result_groups)
     });
     let names = ctx.names();
     let mut user_typed = typed_globals(
@@ -1784,7 +1784,7 @@ fn decompile_in<L: Lifter>(
     );
     let user_enums = user_enum_globals(overlay, &ctx.globals, &names);
     let body = body.map_if(!user_enums.is_empty() && skip.runs(Pass::UserEnums), |b| {
-        apply_user_enums(b, &user_enums)
+        apply_user_enums(b, &user_enums, &own)
     });
 
     let value_return = body

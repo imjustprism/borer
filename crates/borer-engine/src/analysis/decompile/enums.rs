@@ -26,9 +26,10 @@ impl EnumTable {
     /// A member is the literal the code pairs the value with, or the name a
     /// user stated, and the value stays the number when the name would not
     /// read as it: no identifier (`.STRUCT`), a keyword of any C standard
-    /// (`true` reads as 1, `inline` does not parse), a macro C defines
-    /// ([`DEFINED`]), a name another value of the table shares, or a name
-    /// the body already uses (`a1` in `switch (a1)`).
+    /// (`true` reads as 1, `inline` does not parse), a name the export's
+    /// headers define or reserve ([`cir::reserved`]: `EXIT_FAILURE`,
+    /// `INT32_MAX`, `free`), a name another value of the table shares, or a
+    /// name the function already uses ([`Taken`]: `a1` in `switch (a1)`).
     ///
     /// # Arguments
     ///
@@ -42,21 +43,23 @@ impl EnumTable {
             .map(|(_, lit)| lit.as_str())?;
         let reads = cir::Ident::spells(name)
             && !cir::LATER_KEYWORDS.contains(&name)
-            && !DEFINED.contains(&name)
+            && !cir::reserved(name)
             && self.members.iter().all(|(k, n)| n != name || *k == value);
         (reads && !taken.holds(name)).then_some(name)
     }
 }
 
-/// Macros the C library defines that a name table may spell: `NULL` reads
-/// as a null pointer, not as the member.
-const DEFINED: [&str; 1] = ["NULL"];
-
-/// The identifiers a body spells outside literals and comments, read on
-/// the first lookup: most bodies print no member, and those pay nothing.
+/// The names a function uses, which no member may take.
+///
+/// They are the identifiers its text spells outside literals and comments,
+/// its `// signature:` line's included, read on the first lookup (most
+/// bodies print no member, and those pay nothing), and the names it
+/// declares outside the body ([`declared_names`]).
 pub(super) struct Taken<'t> {
-    /// The body.
+    /// The text.
     text: &'t str,
+    /// The names declared outside it.
+    declared: &'t [String],
     /// Its identifiers, once read.
     names: std::cell::OnceCell<BTreeSet<&'t str>>,
 }
@@ -66,10 +69,12 @@ impl<'t> Taken<'t> {
     ///
     /// # Arguments
     ///
-    /// * `text` - The body.
-    pub(super) fn new(text: &'t str) -> Self {
+    /// * `text` - The body, or the whole decompilation.
+    /// * `declared` - The names the function declares outside `text`.
+    pub(super) fn new(text: &'t str, declared: &'t [String]) -> Self {
         Self {
             text,
+            declared,
             names: std::cell::OnceCell::new(),
         }
     }
@@ -80,20 +85,53 @@ impl<'t> Taken<'t> {
     ///
     /// * `name` - The identifier.
     fn holds(&self, name: &str) -> bool {
-        self.names
-            .get_or_init(|| {
-                self.text
-                    .lines()
-                    .flat_map(|line| {
-                        lexer::lex(line)
-                            .into_iter()
-                            .filter(|t| t.lex == lexer::Lex::Name)
-                            .filter_map(move |t| line.get(t.at..t.end))
-                    })
-                    .collect()
-            })
-            .contains(name)
+        self.declared.iter().any(|d| d == name)
+            || self
+                .names
+                .get_or_init(|| {
+                    self.text
+                        .lines()
+                        .map(|line| line.strip_prefix("// signature: ").unwrap_or(line))
+                        .flat_map(|line| {
+                            lexer::lex(line)
+                                .into_iter()
+                                .filter(|t| t.lex == lexer::Lex::Name)
+                                .filter_map(move |t| line.get(t.at..t.end))
+                        })
+                        .collect()
+                })
+                .contains(name)
     }
+}
+
+/// Returns the names a function declares outside its body.
+///
+/// The passes renaming constants run before the signature is printed, so
+/// these are its own name and every name a parameter may print under (the
+/// text's, a stated or debug one, `aN`, `this` and `result`), an unused
+/// parameter's included.
+///
+/// # Arguments
+///
+/// * `ctx` - The function's decompilation state.
+/// * `analysis` - Its analysis, for the function's name.
+/// * `overlay` - The names the user gave.
+/// * `entry` - The function's entry address.
+/// * `count` - How many parameters the signature lists.
+pub(super) fn declared_names(
+    ctx: &Ctx<'_>,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    count: usize,
+) -> Vec<String> {
+    let name = name_of(analysis, overlay, entry);
+    let mut out = ctx.names().params(count);
+    out.extend((1..=count).map(|i| format!("a{i}")));
+    out.extend(ctx.debug_params.iter().map(|p| p.name.clone()));
+    out.extend(["this", "result", crate::analysis::bare_name(&name)].map(str::to_owned));
+    out.push(name);
+    out
 }
 
 /// The name in a `"..."` token, or `None` when the token is not a literal
@@ -681,7 +719,7 @@ pub(super) fn spell_own_enum(text: &str) -> String {
         members: listed.members,
         param: None,
     };
-    let taken = Taken::new(text);
+    let taken = Taken::new(text, &[]);
     let mut switches: Vec<(usize, bool)> = Vec::new();
     let mut depth = 0usize;
     let mut out = String::with_capacity(text.len());
@@ -826,15 +864,17 @@ fn rename_case_labels(line: &str, table: &EnumTable, taken: &Taken<'_>) -> Strin
 ///
 /// * `body` - The cleaned body text.
 /// * `enums` - Tables by the display name of the function encoding each.
+/// * `declared` - The names the function declares outside the body
+///   ([`declared_names`]), which no member may take.
 ///
 /// # Returns
 ///
 /// The body with member names in place of the constants.
-pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
+pub fn apply_enums(body: &str, enums: &BTreeMap<String, EnumTable>, declared: &[String]) -> String {
     if enums.is_empty() {
         return body.to_owned();
     }
-    let taken = Taken::new(body);
+    let taken = Taken::new(body, declared);
     let mut carriers: BTreeMap<String, &EnumTable> = BTreeMap::new();
     let mut switches: Vec<(usize, &EnumTable)> = Vec::new();
     let mut out = String::with_capacity(body.len());
@@ -912,6 +952,38 @@ fn case_named(
         .and_then(parse_const)?;
     let name = table.member(k, taken)?;
     Some(format!("{}case {name}:", " ".repeat(ind)))
+}
+
+/// Renders constants by the member names of the tables the overlay's
+/// enum source gives ([`apply_enums`]): the overlay's own, or those of the
+/// binary's functions the body calls.
+///
+/// # Arguments
+///
+/// * `body` - The cleaned body text.
+/// * `program` - The loaded binary.
+/// * `analysis` - Its analysis.
+/// * `overlay` - The tables, or where to read them from.
+/// * `declared` - The names the function declares outside the body.
+///
+/// # Returns
+///
+/// The body with member names in place of the constants.
+pub(super) fn apply_tables(
+    body: &str,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    declared: &[String],
+) -> String {
+    match overlay.enum_source {
+        EnumSource::Given => apply_enums(body, &overlay.enums, declared),
+        EnumSource::Binary => apply_enums(
+            body,
+            &called_tables(program, analysis, overlay, body),
+            declared,
+        ),
+    }
 }
 
 /// Names the constants a library call's result is compared with
@@ -1282,12 +1354,18 @@ pub(super) fn user_enum_globals(
 ///
 /// * `body` - The cleaned body text.
 /// * `enums` - The tables of [`user_enum_globals`].
+/// * `declared` - The names the function declares outside the body
+///   ([`declared_names`]).
 ///
 /// # Returns
 ///
 /// The body with member names in place of the constants.
-pub(super) fn apply_user_enums(body: &str, enums: &BTreeMap<String, EnumTable>) -> String {
-    let taken = Taken::new(body);
+pub(super) fn apply_user_enums(
+    body: &str,
+    enums: &BTreeMap<String, EnumTable>,
+    declared: &[String],
+) -> String {
+    let taken = Taken::new(body, declared);
     let mut carriers: BTreeMap<String, &EnumTable> = BTreeMap::new();
     let mut switches: Vec<(usize, &EnumTable)> = Vec::new();
     let mut out = String::with_capacity(body.len());

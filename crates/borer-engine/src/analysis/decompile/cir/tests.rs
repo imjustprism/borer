@@ -484,3 +484,31 @@ fn an_arm_left_empty_goes() {
         "if (a1 != 0) {\n  f();\n} else if (a2 != 0) {\n  g();\n}\nreturn a2;\n"
     );
 }
+
+/// Every header the export includes lists the names it reserves, in the
+/// order the export includes them, and those names are reserved.
+#[test]
+fn every_included_header_lists_its_names() {
+    let included: Vec<&str> = super::super::export::PRELUDE
+        .lines()
+        .filter_map(|l| l.strip_prefix("#include <")?.strip_suffix('>'))
+        .collect();
+    let listed: Vec<&str> = HEADERS.iter().map(|h| h.file).collect();
+    assert_eq!(included, listed);
+    for name in [
+        "INT32_MAX",
+        "UINTPTR_MAX",
+        "EXIT_FAILURE",
+        "M_PI",
+        "FP_NAN",
+        "size_t",
+        "log",
+        "free",
+        "strdup",
+    ] {
+        assert!(reserved(name), "{name}");
+    }
+    for name in ["Undefined", "Foo", "Red", "MouseOver", "M_", "INT_"] {
+        assert!(!reserved(name), "{name}");
+    }
+}
