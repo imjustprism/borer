@@ -528,31 +528,27 @@ pub(super) fn apply_layouts(text: &str) -> String {
     out
 }
 
-/// Counts assignments to identifiers in one trimmed line, including `for (` headers.
+/// Counts assignments to identifiers in one trimmed line, including each
+/// part of a `for (` header: its first value and its step both write.
 fn note_assigned_line<'a>(t: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
-    if let Some(inner) = t.strip_prefix("for (").and_then(|s| s.strip_suffix(") {")) {
-        for part in inner.split("; ") {
-            if let Some((lhs, _)) = part.split_once(" = ")
+    /// Counts the assignment one statement or header part opens with.
+    fn note<'a>(t: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
+        for op in [
+            " = ", " += ", " -= ", " |= ", " &= ", " ^= ", " <<= ", " >>= ", " *= ",
+        ] {
+            if let Some((lhs, _)) = t.split_once(op)
                 && is_ident(lhs)
             {
                 *assigned.entry(lhs).or_default() += 1;
             }
         }
     }
-    if let Some((lhs, _)) = t.split_once(" = ")
-        && is_ident(lhs)
-    {
-        *assigned.entry(lhs).or_default() += 1;
-    }
-    for op in [
-        " += ", " -= ", " |= ", " &= ", " ^= ", " <<= ", " >>= ", " *= ",
-    ] {
-        if let Some((lhs, _)) = t.split_once(op)
-            && is_ident(lhs)
-        {
-            *assigned.entry(lhs).or_default() += 1;
+    if let Some(inner) = t.strip_prefix("for (").and_then(|s| s.strip_suffix(") {")) {
+        for part in inner.split("; ") {
+            note(part, assigned);
         }
     }
+    note(t, assigned);
 }
 
 /// Rewrites `*(T*)base` (no offset) in one line as `base->name`.
@@ -1202,7 +1198,7 @@ fn call_args_at(line: &str, open: usize, limit: usize) -> Option<Vec<&str>> {
     reason = "assertions are the point of a test"
 )]
 mod tests {
-    use super::{api_typed, rename_typed};
+    use super::{api_typed, apply_layouts, rename_typed};
     use crate::program::BinaryFormat;
 
     /// Unicode, quoted and commented calls name no API.
@@ -1287,5 +1283,30 @@ mod tests {
             ")x ".repeat(20_000),
         );
         assert_eq!(api_typed(&hostile, BinaryFormat::Pe, 8).len(), 1);
+    }
+
+    /// A counter a `for` header steps is assigned twice, so it is no base
+    /// for a layout however often the body reads at offsets from it; one
+    /// assigned once still is.
+    #[test]
+    fn a_counter_a_for_header_steps_is_no_layout_base() {
+        let body = "  if (*(uint64_t*)(var1 + 0x10) != 0) {
+    *(uint64_t*)(var1 + 0x8) = *(uint64_t*)(var1 + 0x10);
+  }
+  *(uint64_t*)(var1 + 0x20) = 0;
+}
+return 0;
+";
+        let counted = format!(
+            "for (var1 = 64; var1 != 0x5e0; var1 += 72) {{
+{body}"
+        );
+        assert_eq!(apply_layouts(&counted), counted);
+        let once = format!(
+            "var1 = a1;
+while (sub_1(var1) != 0) {{
+{body}"
+        );
+        assert!(apply_layouts(&once).contains("// layout var1:"), "{once}");
     }
 }
