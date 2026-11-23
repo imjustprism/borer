@@ -290,19 +290,19 @@ impl Pass {
     }
 
     /// The pass's bit in a [`Passes`] set: its position in [`Pass::ALL`].
-    fn bit(self) -> u64 {
+    fn bit(self) -> u128 {
         Self::ALL
             .iter()
             .position(|p| *p == self)
             .and_then(|k| u32::try_from(k).ok())
-            .and_then(|k| 1u64.checked_shl(k))
+            .and_then(|k| 1u128.checked_shl(k))
             .unwrap_or(0)
     }
 }
 
 /// A set of passes a decompile leaves out; empty for the full pipeline.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct Passes(u64);
+pub struct Passes(u128);
 
 impl Passes {
     /// Leaves nothing out: the full pipeline.
@@ -316,7 +316,7 @@ impl Passes {
 
     /// The set's bits, one per [`Pass`], for a fingerprint.
     #[must_use]
-    pub const fn bits(self) -> u64 {
+    pub const fn bits(self) -> u128 {
         self.0
     }
 
@@ -400,7 +400,7 @@ mod tests {
             assert!(seen.runs(p), "{} is listed twice", p.name());
             seen = seen.without(p);
         }
-        assert!(Pass::ALL.len() <= 64);
+        assert!(Pass::ALL.len() <= 128);
         assert_eq!(Passes::after(0), seen);
         assert!(Passes::after(Pass::ALL.len()).is_empty());
     }
