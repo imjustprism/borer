@@ -108,8 +108,11 @@ fn a_chain_of_jumps_past_a_start_stays_bounded() {
 }
 
 /// Analyzes a Thumb image on a thread of its own and waits at most
-/// [`BOUND_SECS`] for it, so that a quadratic discovery fails the test
-/// instead of hanging it.
+/// [`BOUND_SECS`] for it.
+///
+/// A quadratic discovery then fails the test instead of hanging it. The
+/// thread frees the analysis before it answers, so no heap it held is
+/// freed while a later test measures its own.
 ///
 /// # Arguments
 ///
@@ -131,8 +134,10 @@ fn analyze_bounded(name: &str, halves: &[u16], entry: usize) -> (bool, usize) {
     let (send, done) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let a = Analysis::compute(&p);
-        send.send((a.function(at).is_some(), a.functions.len()))
-            .expect("the test waits");
+        let found = (a.function(at).is_some(), a.functions.len());
+        drop(a);
+        drop(p);
+        send.send(found).expect("the test waits");
     });
     done.recv_timeout(std::time::Duration::from_secs(BOUND_SECS))
         .expect("the analysis ends within the bound")
@@ -253,4 +258,65 @@ fn a_sled_of_calls_into_the_jumper_stays_bounded() {
     halves.push(0x4770);
     let (found, _) = analyze_bounded("sled.elf", &halves, 0);
     assert!(found, "the entry is a function");
+}
+
+/// Most heap the analysis of [`many_holders_spanning_many_starts_stay_small`]'s
+/// image may take: what its functions need, not one set of starts per walk.
+const SPAN_HEAP: usize = 8 << 20;
+
+/// Many walks that share a tail target across a span of starts do not each
+/// keep a set of those starts.
+///
+/// Five hundred and twelve wrappers jump to eight bodies past a thousand
+/// starts, sixty-four to each. Weighing a shared target built, for every
+/// holder, the set of starts its span steps over and kept it to the end of
+/// the round, though only a target one walk holds reads it: half a million
+/// entries for a ten kilobyte file.
+#[test]
+fn many_holders_spanning_many_starts_stay_small() {
+    let _serial = serial();
+    /// Wrappers, a multiple of [`TARGETS`].
+    const WRAPPERS: usize = 512;
+    /// Starts the wrappers' spans cross.
+    const MIDDLE: usize = 1000;
+    /// Bodies the wrappers jump to.
+    const TARGETS: usize = 8;
+    let calls = WRAPPERS + MIDDLE;
+    let wrappers = 2 + 4 * calls + 2;
+    let middle = wrappers + 4 * WRAPPERS;
+    let targets = middle + 2 * MIDDLE;
+    let mut halves: Vec<u16> = vec![0xb508]; // ASM: push {r3, lr}
+    for k in 0..calls {
+        let to = if k < WRAPPERS {
+            wrappers + 4 * k
+        } else {
+            middle + 2 * (k - WRAPPERS)
+        };
+        halves.extend(branch(2 + 4 * k, to, true));
+    }
+    halves.push(0xbd08); // ASM: pop {r3, pc}
+    for k in 0..WRAPPERS {
+        let t = targets + 4 * (k / (WRAPPERS / TARGETS));
+        halves.extend(branch(wrappers + 4 * k, t, false));
+    }
+    halves.extend(std::iter::repeat_n(0x4770, MIDDLE)); // ASM: bx lr
+    for _ in 0..TARGETS {
+        halves.extend([
+            0xb500, // ASM: push {lr}
+            0xbd00, // ASM: pop {pc}
+        ]);
+    }
+    let code: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
+    let p = Program::from_bytes(PathBuf::from("span.elf"), thumb_image(&code, 0)).expect("parses");
+    let (a, extra) = super::heap::measured(|| Analysis::compute(&p));
+    println!("span: {} byte file, {extra} bytes of heap", code.len());
+    assert!(
+        a.functions.len() > WRAPPERS,
+        "{} functions",
+        a.functions.len()
+    );
+    assert!(
+        extra <= SPAN_HEAP,
+        "the analysis took {extra} bytes of heap"
+    );
 }

@@ -36,9 +36,10 @@ const BODY_MAX: usize = 1 << 14;
 /// them reaches it that way ([`shared_tails`]). The caller is walked again
 /// and the jump becomes a tail call.
 ///
-/// The predecessors and [`Shape`] built for each walk are charged to the
-/// walks' fuel; when it runs out, or the cancel flag in force is raised,
-/// the round stops there and the discovery is marked incomplete.
+/// Every start read and edge followed for a walk (its [`Apart`],
+/// predecessors and [`Shape`]) is charged to the round's [`Budget`]; when
+/// it runs out, or the cancel flag in force is raised, the round stops
+/// there and the discovery is marked incomplete.
 ///
 /// # Arguments
 ///
@@ -52,14 +53,11 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
     let mut promote = Vec::new();
     let mut shared = BTreeSet::new();
     let mut held = None;
-    let mut spent = 0u64;
-    let mut stopped = false;
+    let mut budget = Budget::new(walks.fuel);
     for (&entry, w) in &walks.walked {
-        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
-            stopped = true;
+        if !budget.charge(0) {
             break;
         }
-        let size = crate::num::from_usize(w.seen.len());
         let mut pred = None;
         let mut shape = None;
         let mut apart: Option<Apart> = None;
@@ -68,35 +66,32 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
                 continue;
             }
             if t > entry && apart.is_none() {
-                let Some(built) = Apart::of(&walks.starts, w, walks.fuel.saturating_sub(spent))
-                else {
-                    stopped = true;
-                    break;
-                };
-                spent = spent.saturating_add(built.cost);
-                apart = Some(built);
+                apart = Apart::of(&walks.starts, w, &mut budget);
             }
             let stepped = t > entry && apart.as_ref().is_some_and(|a| a.steps_over(entry, t));
-            if !stepped && t > entry {
+            if budget.out || (!stepped && t > entry) {
                 continue;
             }
             if pred.is_none() {
-                spent = spent.saturating_add(size);
+                pred = predecessors(w, &mut budget);
             }
-            let pred = pred.get_or_insert_with(|| predecessors(w));
-            let balanced = |shape: &mut Option<Shape>, spent: &mut u64| {
+            let Some(pred) = pred.as_ref() else {
+                continue;
+            };
+            let mut balanced = |budget: &mut Budget| {
                 if shape.is_none() {
-                    *spent = spent.saturating_add(size);
+                    shape = Shape::of(w, entry, budget);
                 }
-                let shape = shape.get_or_insert_with(|| Shape::of(w, entry, Apart::default()));
-                pred.get(&t)
-                    .copied()
-                    .flatten()
-                    .is_some_and(|j| shape.depth.get(&j) == Some(&Some(0)))
+                shape.as_ref().is_some_and(|shape| {
+                    pred.get(&t)
+                        .copied()
+                        .flatten()
+                        .is_some_and(|j| shape.depth.get(&j) == Some(&Some(0)))
+                })
             };
             if (stepped && straight_return(w, t, pred))
                 || (after_pop(w, t, pred)
-                    && balanced(&mut shape, &mut spent)
+                    && balanced(&mut budget)
                     && held
                         .get_or_insert_with(|| owners(&walks.walked))
                         .get(&t)
@@ -107,16 +102,13 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
                 shared.insert(t);
             }
         }
-        if stopped {
-            break;
-        }
     }
-    walks.fuel = walks.fuel.saturating_sub(spent);
-    walks.incomplete |= stopped;
     let shared: Vec<u64> = shared.into_iter().take(SHARED_MAX).collect();
-    if !stopped {
-        promote.extend(shared_tails(program, walks, &shared));
+    if !budget.out {
+        promote.extend(shared_tails(program, walks, &shared, &mut budget));
     }
+    walks.fuel = budget.left;
+    walks.incomplete |= budget.out;
     promote.sort_unstable();
     promote.dedup();
     let promoted = !promote.is_empty();
@@ -125,6 +117,49 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
         walks.guessed.insert(t);
     }
     promoted
+}
+
+/// The work a round of [`outlines`] may still do. Every edge, start and
+/// lookup the round's passes make is charged here, and the cancel flag in
+/// force is read at each charge.
+struct Budget {
+    /// Steps left: the walks' fuel when the round began, less what it did.
+    left: u64,
+    /// Whether the steps ran out or the cancel flag was raised.
+    out: bool,
+}
+
+impl Budget {
+    /// Makes a budget of `left` steps.
+    ///
+    /// # Arguments
+    ///
+    /// * `left` - The steps.
+    fn new(left: u64) -> Self {
+        Self { left, out: false }
+    }
+
+    /// Charges `n` steps.
+    ///
+    /// # Arguments
+    ///
+    /// * `n` - The steps.
+    ///
+    /// # Returns
+    ///
+    /// Whether the work may go on: `false` once the steps ran out or the
+    /// cancel flag in force was raised.
+    fn charge(&mut self, n: u64) -> bool {
+        if !self.out {
+            if n > self.left || crate::cancel::Cancel::raised() {
+                self.out = true;
+                self.left = 0;
+            } else {
+                self.left -= n;
+            }
+        }
+        !self.out
+    }
 }
 
 /// Returns the targets among `cands` that every walk holding them reaches
@@ -143,53 +178,49 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
 /// more than [`HOLDERS_MAX`] walks hold is not weighed: it stays a block,
 /// the safe answer, rather than cost every holder against every other.
 ///
-/// Each walk's [`Shape`] is built once, and the work is charged to the
-/// walks' fuel: when it runs out, or the cancel flag in force is raised,
-/// the targets not yet weighed stay blocks and the discovery is marked
-/// incomplete.
+/// Every step is charged to `budget`; when it runs out the targets not yet
+/// weighed stay blocks. Each holder's [`Shape`] is made for the one target
+/// and dropped after it, so the heap held is one walk's, not a round's.
 ///
 /// # Arguments
 ///
 /// * `program` - The image.
-/// * `walks` - The walks; their fuel is spent.
+/// * `walks` - The walks.
 /// * `cands` - The targets, at most [`SHARED_MAX`].
-fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<u64> {
+/// * `budget` - The round's budget.
+fn shared_tails(
+    program: &Program,
+    walks: &Walks<'_>,
+    cands: &[u64],
+    budget: &mut Budget,
+) -> Vec<u64> {
     let cands: BTreeSet<u64> = cands
         .iter()
         .copied()
         .filter(|&t| super::guess::ends_before(program, walks, t))
         .collect();
     let mut holders: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-    let mut spent = 0u64;
     for (&entry, w) in &walks.walked {
-        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
-            walks.incomplete = true;
-            return Vec::new();
-        }
         if let (Some((&lo, _)), Some((&hi, _))) =
             (w.seen.first_key_value(), w.seen.last_key_value())
         {
             for &t in cands.range(lo..=hi) {
-                spent = spent.saturating_add(1);
+                if !budget.charge(1) {
+                    return Vec::new();
+                }
                 if w.seen.contains_key(&t) {
                     holders.entry(t).or_default().push(entry);
                 }
             }
         }
     }
-    let mut shapes: BTreeMap<u64, Shape> = BTreeMap::new();
     let mut found = Vec::new();
     for (t, mut held) in holders {
-        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
-            walks.incomplete = true;
-            break;
-        }
-        if held.len() > HOLDERS_MAX {
-            continue;
-        }
         let pairs =
             crate::num::from_usize(held.len()).saturating_mul(crate::num::from_usize(held.len()));
-        spent = spent.saturating_add(pairs);
+        if held.len() > HOLDERS_MAX || !budget.charge(pairs) {
+            continue;
+        }
         let inner: Vec<u64> = held
             .iter()
             .copied()
@@ -199,41 +230,21 @@ fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<
             })
             .collect();
         held.retain(|e| !inner.contains(e));
-        for &entry in &held {
-            let Some(w) = walks
-                .walked
-                .get(&entry)
-                .filter(|_| !shapes.contains_key(&entry))
-            else {
-                continue;
-            };
-            let budget = walks.fuel.saturating_sub(spent);
-            let Some(apart) = Apart::of(&walks.starts, w, budget) else {
-                walks.incomplete = true;
-                walks.fuel = 0;
-                return found;
-            };
-            spent = spent
-                .saturating_add(apart.cost)
-                .saturating_add(crate::num::from_usize(w.seen.len()));
-            shapes.insert(entry, Shape::of(w, entry, apart));
-        }
         let alone = held.len() == 1;
         let tail = held.iter().all(|entry| {
-            let (Some(w), Some(shape)) = (walks.walked.get(entry), shapes.get(entry)) else {
-                return false;
-            };
-            tail_jump(*entry, w, shape, t, alone, &mut spent)
+            walks
+                .walked
+                .get(entry)
+                .is_some_and(|w| tail_jump(&walks.starts, *entry, w, t, alone, budget))
         });
-        if tail {
+        if tail && !budget.out {
             found.push(t);
         }
     }
-    walks.fuel = walks.fuel.saturating_sub(spent);
     found
 }
 
-/// What [`tail_jump`] reads off one walk, built once per round.
+/// What [`tail_jump`] and the pop rule of [`outlines`] read off one walk.
 struct Shape {
     /// Every instruction that falls, jumps or dispatches to each address
     /// of the walk.
@@ -245,8 +256,6 @@ struct Shape {
     /// only on the path that leaves, so the path past it keeps the depth;
     /// any other conditional move of `sp` leaves the depth unknown.
     depth: BTreeMap<u64, Option<i64>>,
-    /// The starts the walk does not run through ([`Apart`]).
-    apart: Apart,
 }
 
 impl Shape {
@@ -256,9 +265,13 @@ impl Shape {
     ///
     /// * `w` - The walk.
     /// * `entry` - Its entry.
-    /// * `apart` - The starts it does not run through.
-    fn of(w: &Walked, entry: u64, apart: Apart) -> Self {
-        let preds = all_preds(w);
+    /// * `budget` - Charged one step per edge followed.
+    ///
+    /// # Returns
+    ///
+    /// The shape, or `None` when the budget ran out.
+    fn of(w: &Walked, entry: u64, budget: &mut Budget) -> Option<Self> {
+        let preds = all_preds(w, budget)?;
         let mut depth: BTreeMap<u64, Option<i64>> = BTreeMap::from([(entry, Some(0))]);
         let mut pending = vec![entry];
         while let Some(va) = pending.pop() {
@@ -272,7 +285,9 @@ impl Shape {
                 k => k,
             };
             let after = d.zip(step).map(|(d, k)| d.saturating_add(k));
+            let mut edges = 0u64;
             let mut next = |to: u64| {
+                edges += 1;
                 let new = match depth.get(&to) {
                     None => after,
                     Some(old) if *old == after || old.is_none() => return,
@@ -284,12 +299,11 @@ impl Shape {
                 }
             };
             successors(w, i, &mut next);
+            if !budget.charge(edges) {
+                return None;
+            }
         }
-        Self {
-            preds,
-            depth,
-            apart,
-        }
+        Some(Self { preds, depth })
     }
 }
 
@@ -371,45 +385,61 @@ fn sp_step(i: &Insn) -> Option<i64> {
 /// function.
 ///
 /// When no other walk holds `t`, it lies before the walk's entry or past
-/// the start of a function the walk does not run through, so a block laid
-/// out after the jump stays the jumper's own. Every way into `t` from outside the code `t` reaches is an
-/// unconditional jump at the entry's stack depth, the frame given back or
-/// never built ([`Shape::depth`]); no
-/// instruction of that code is reached from outside it, and the entry is
-/// not in it, so the code at `t` shares no block with the jumper. Code of
-/// more than [`BODY_MAX`] instructions is not followed: the target stays.
+/// the start of a function the walk does not run through ([`steps_over`]),
+/// so a block laid out after the jump stays the jumper's own. Every way
+/// into `t` from outside the code `t` reaches is an unconditional jump at
+/// the entry's stack depth, the frame given back or never built
+/// ([`Shape::depth`]); no instruction of that code is reached from outside
+/// it, and the entry is not in it, so the code at `t` shares no block with
+/// the jumper. Code of more than [`BODY_MAX`] instructions is not
+/// followed: the target stays. The walk's [`Shape`] is made only once
+/// those cheaper tests pass, and dropped on return.
 ///
 /// # Arguments
 ///
+/// * `starts` - The known function starts.
 /// * `entry` - The walk's entry.
 /// * `w` - The walk.
-/// * `shape` - Its shape.
 /// * `t` - The jump target.
 /// * `alone` - Whether no other walk holds `t`.
-/// * `spent` - The work done, increased by the instructions followed.
-fn tail_jump(entry: u64, w: &Walked, shape: &Shape, t: u64, alone: bool, spent: &mut u64) -> bool {
-    let apart = t < entry || (t > entry && shape.apart.steps_over(entry, t));
-    if t == entry || (alone && !apart) {
+/// * `budget` - Charged for every start read and edge followed.
+fn tail_jump(
+    starts: &BTreeSet<u64>,
+    entry: u64,
+    w: &Walked,
+    t: u64,
+    alone: bool,
+    budget: &mut Budget,
+) -> bool {
+    if t == entry || (alone && t > entry && !steps_over(starts, w, entry, t, budget)) {
         return false;
     }
-    let Some(body) = reach(w, t, BODY_MAX) else {
-        *spent = spent.saturating_add(crate::num::from_usize(BODY_MAX));
+    let Some(body) = reach(w, t, BODY_MAX, budget) else {
         return false;
     };
-    *spent = spent.saturating_add(crate::num::from_usize(body.len()));
-    let preds = |va: u64| shape.preds.get(&va).map_or(&[][..], Vec::as_slice);
-    let shut = body
-        .iter()
-        .all(|&b| b == t || preds(b).iter().all(|p| body.contains(p)));
-    if body.contains(&entry) || !shut {
+    if body.contains(&entry) {
         return false;
+    }
+    let Some(shape) = Shape::of(w, entry, budget) else {
+        return false;
+    };
+    let preds = |va: u64| shape.preds.get(&va).map_or(&[][..], Vec::as_slice);
+    let mut shut = true;
+    for &b in body.iter().filter(|&&b| b != t) {
+        let from = preds(b);
+        if !budget.charge(crate::num::from_usize(from.len()))
+            || !from.iter().all(|p| body.contains(p))
+        {
+            shut = false;
+            break;
+        }
     }
     let ins: Vec<u64> = preds(t)
         .iter()
         .copied()
         .filter(|p| !body.contains(p))
         .collect();
-    !ins.is_empty()
+    shut && !ins.is_empty()
         && ins.iter().all(|p| {
             w.seen.get(p).is_some_and(|j| {
                 j.flow() == Flow::Jump
@@ -418,6 +448,32 @@ fn tail_jump(entry: u64, w: &Walked, shape: &Shape, t: u64, alone: bool, spent: 
                     && shape.depth.get(p) == Some(&Some(0))
             })
         })
+}
+
+/// Tells whether a start the walk does not run through lies between its
+/// entry and `t`, a target past the entry.
+///
+/// The starts between them are read one by one: this answers the one pair
+/// [`tail_jump`] asks about, where [`Apart`] would hold a walk's whole
+/// span.
+///
+/// # Arguments
+///
+/// * `starts` - The known function starts.
+/// * `w` - The walk.
+/// * `entry` - Its entry.
+/// * `t` - The target, past `entry`.
+/// * `budget` - Charged one step per start read.
+fn steps_over(starts: &BTreeSet<u64>, w: &Walked, entry: u64, t: u64, budget: &mut Budget) -> bool {
+    for s in starts.range(entry.saturating_add(1)..t) {
+        if !budget.charge(1) {
+            return false;
+        }
+        if !w.seen.contains_key(s) {
+            return true;
+        }
+    }
+    false
 }
 
 /// The function starts within a walk's span the walk does not run
@@ -429,8 +485,6 @@ struct Apart {
     starts: BTreeSet<u64>,
     /// The first start past the walk's highest address: apart too.
     past: Option<u64>,
-    /// The starts read to find them: what building this cost the fuel.
-    cost: u64,
 }
 
 impl Apart {
@@ -440,12 +494,12 @@ impl Apart {
     ///
     /// * `starts` - The known function starts.
     /// * `w` - The walk.
-    /// * `budget` - Most starts read.
+    /// * `budget` - Charged one step per start read.
     ///
     /// # Returns
     ///
-    /// The starts, or `None` when the span holds more than `budget`.
-    fn of(starts: &BTreeSet<u64>, w: &Walked, budget: u64) -> Option<Self> {
+    /// The starts, or `None` when the budget ran out.
+    fn of(starts: &BTreeSet<u64>, w: &Walked, budget: &mut Budget) -> Option<Self> {
         let (Some((&lo, _)), Some((&hi, _))) = (w.seen.first_key_value(), w.seen.last_key_value())
         else {
             return Some(Self::default());
@@ -453,11 +507,9 @@ impl Apart {
         let mut apart = Self {
             starts: BTreeSet::new(),
             past: starts.range(hi.saturating_add(1)..).next().copied(),
-            cost: 0,
         };
         for &s in starts.range(lo..=hi) {
-            apart.cost = apart.cost.saturating_add(1);
-            if apart.cost > budget {
+            if !budget.charge(1) {
                 return None;
             }
             if !w.seen.contains_key(&s) {
@@ -481,14 +533,15 @@ impl Apart {
 }
 
 /// Returns the addresses of a walk reached from `from`, `from` included,
-/// or `None` past `cap` of them.
+/// or `None` past `cap` of them or once the budget runs out.
 ///
 /// # Arguments
 ///
 /// * `w` - The walk.
 /// * `from` - Where to start.
 /// * `cap` - Most addresses gathered.
-fn reach(w: &Walked, from: u64, cap: usize) -> Option<BTreeSet<u64>> {
+/// * `budget` - Charged one step per edge followed.
+fn reach(w: &Walked, from: u64, cap: usize, budget: &mut Budget) -> Option<BTreeSet<u64>> {
     let mut seen = BTreeSet::from([from]);
     let mut pending = vec![from];
     while let Some(va) = pending.pop() {
@@ -498,12 +551,17 @@ fn reach(w: &Walked, from: u64, cap: usize) -> Option<BTreeSet<u64>> {
         let Some(i) = w.seen.get(&va) else {
             continue;
         };
+        let mut edges = 0u64;
         let mut go = |to: u64| {
+            edges += 1;
             if w.seen.contains_key(&to) && seen.insert(to) {
                 pending.push(to);
             }
         };
         successors(w, i, &mut go);
+        if !budget.charge(edges) {
+            return None;
+        }
     }
     Some(seen)
 }
@@ -532,16 +590,26 @@ fn successors(w: &Walked, i: &Insn, edge: &mut impl FnMut(u64)) {
 /// # Arguments
 ///
 /// * `w` - The walk.
-fn all_preds(w: &Walked) -> BTreeMap<u64, Vec<u64>> {
+/// * `budget` - Charged one step per edge.
+///
+/// # Returns
+///
+/// The map, or `None` when the budget ran out.
+fn all_preds(w: &Walked, budget: &mut Budget) -> Option<BTreeMap<u64, Vec<u64>>> {
     let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
     for i in w.seen.values() {
+        let mut edges = 0u64;
         successors(w, i, &mut |to| {
+            edges += 1;
             if w.seen.contains_key(&to) {
                 preds.entry(to).or_default().push(i.va);
             }
         });
+        if !budget.charge(edges) {
+            return None;
+        }
     }
-    preds
+    Some(preds)
 }
 
 /// Calls `edge` with each address an instruction passes control to inside
@@ -670,17 +738,24 @@ fn popped(pop: &Insn) -> bool {
 /// # Arguments
 ///
 /// * `w` - The walk.
-fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
-    all_preds(w)
-        .into_iter()
-        .map(|(to, from)| {
-            let one = match from.as_slice() {
-                [one] => Some(*one),
-                _ => None,
-            };
-            (to, one)
-        })
-        .collect()
+/// * `budget` - Charged one step per edge.
+///
+/// # Returns
+///
+/// The map, or `None` when the budget ran out.
+fn predecessors(w: &Walked, budget: &mut Budget) -> Option<BTreeMap<u64, Option<u64>>> {
+    let all = all_preds(w, budget)?;
+    Some(
+        all.into_iter()
+            .map(|(to, from)| {
+                let one = match from.as_slice() {
+                    [one] => Some(*one),
+                    _ => None,
+                };
+                (to, one)
+            })
+            .collect(),
+    )
 }
 
 /// Tells whether `t` is a straight run that returns without using the
