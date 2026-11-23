@@ -300,3 +300,50 @@ fn a32_byte_pointers_need_a_walk() {
     );
     assert!(indexed.contains("uint8_t *a1"), "{indexed}");
 }
+
+/// A chain write shares its constant, not a type.
+///
+/// The slot `getenv` fills is a `char *`; the one zeroed with it is not.
+#[test]
+fn a_chain_write_shares_no_type() {
+    let raw = concat!(
+        "// signature: void f(void)\n",
+        "uint64_t local_10;\n",
+        "uint64_t local_8;\n",
+        "\n",
+        "local_10 = local_8 = 0;\n",
+        "local_8 = getenv(\"HOME\");\n",
+        "puts(local_8);\n",
+        "sub_2000(local_10);\n",
+    );
+    let out = polish(raw, 64, &Packs::default());
+    assert!(out.contains("char* local_8;"), "{out}");
+    assert!(!out.contains("char* local_10"), "{out}");
+}
+
+/// A copy of a located global the text declares `char *` types the slot;
+/// one the text declares only by its width does not.
+///
+/// The type comes from the copy, not from the chain that zeroed it.
+#[test]
+fn a_copy_of_a_char_pointer_global_types_the_slot() {
+    let raw = |declared: &str| {
+        [
+            "// signature: void f(void)",
+            "uint64_t local_10;",
+            "uint64_t local_8;",
+            &format!("extern {declared}optarg; // @ 0x8040"),
+            "",
+            "local_10 = local_8 = 0;",
+            "local_8 = optarg;",
+            "sub_2000(local_8);",
+            "sub_2000(local_10);",
+        ]
+        .join("\n")
+    };
+    let out = polish(&raw("char *"), 64, &Packs::default());
+    assert!(out.contains("char* local_8;"), "{out}");
+    assert!(!out.contains("char* local_10"), "{out}");
+    let untyped = polish(&raw("uint64_t "), 64, &Packs::default());
+    assert!(!untyped.contains("char* local_8"), "{untyped}");
+}

@@ -666,9 +666,25 @@ fn classify_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsTyp
     RhsType::NonPointer
 }
 
-/// Classifies an identifier right-hand side against signature parameters
-/// and single-assignment definitions.
+/// Classifies an identifier right-hand side by what declares or defines it.
+///
+/// A signature parameter, a located global the text declares `char *`
+/// (the C library's `optarg`, which the declaration states only when the
+/// binary's format exports it, [`typelib::data_type`]) and a
+/// single-assignment definition each say what it is.
 fn classify_ident_rhs(lines: &[String], rhs: &str, depth: u8, before: usize) -> RhsType {
+    let located_char_pointer = |l: &String| {
+        let (code, note) = l.split_once(" //").unwrap_or((l, ""));
+        let code: String = code
+            .trim()
+            .trim_start_matches("extern ")
+            .split_whitespace()
+            .collect();
+        note.trim_start().starts_with('@') && code == format!("char*{rhs};")
+    };
+    if lines.iter().any(located_char_pointer) {
+        return RhsType::Known("char*");
+    }
     for line in lines {
         if let Some(sig) = line.strip_prefix("// signature: ") {
             for p in sig.split(['(', ',', ')']).map(str::trim) {
@@ -836,7 +852,10 @@ fn ternary_arms<'a>(l: &Line<'a>) -> Option<(&'a str, &'a str)> {
 /// The library pointer type (`char*` or `FILE*`) a stack slot takes from a
 /// copy of another typed stack slot.
 ///
-/// The slot may only step by bytes or compare with the source slot.
+/// The slot may only step by bytes or compare with the source slot. The
+/// other targets of a chain write (`a = b = v;`) pass their type on only
+/// when `v` is no constant: slots zeroed together share the zero, not
+/// what each holds later.
 ///
 /// # Arguments
 ///
@@ -863,8 +882,10 @@ fn local_copy_pointer(
             && parts[..parts.len() - 1].contains(&name);
         if is_chain_write {
             let rhs = parts[parts.len() - 1].trim();
+            let constant = parse_const(rhs).is_some() || matches!(rhs, "NULL" | "nullptr");
             if let Some((_, ty)) = parts[..parts.len() - 1]
                 .iter()
+                .filter(|_| !constant)
                 .find_map(|&lhs| ptrs.iter().find(|(n, _)| n == lhs))
             {
                 if found.is_some_and(|f| f != *ty) {
