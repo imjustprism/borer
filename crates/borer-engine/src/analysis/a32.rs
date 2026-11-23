@@ -1618,6 +1618,12 @@ impl Walks<'_> {
     ///
     /// * `program` - The image.
     fn settle(&mut self, program: &Program) {
+        let exiting: BTreeSet<u64> = program
+            .symbols
+            .iter()
+            .filter(|s| exits_on_status_name(bare_name(&s.name)))
+            .map(|s| s.addr)
+            .collect();
         for _ in 0..SETTLE_ROUNDS {
             let ends: BTreeSet<u64> = self
                 .walked
@@ -1630,10 +1636,7 @@ impl Walks<'_> {
                     self.walked
                         .get(c)
                         .is_some_and(|w| never_returns(w, &self.noreturn))
-                        && !program
-                            .symbols
-                            .iter()
-                            .any(|s| s.addr == *c && exits_on_status_name(bare_name(&s.name)))
+                        && !exiting.contains(c)
                 })
                 .collect();
             let now: BTreeSet<u64> = self.named.union(&learned).copied().collect();
