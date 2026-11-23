@@ -66,7 +66,7 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             if t == entry || walks.starts.contains(&t) {
                 continue;
             }
-            let stepped = t > entry && walks.starts.range((entry + 1)..t).next().is_some();
+            let stepped = t > entry && steps_over(&walks.starts, w, entry, t);
             if !stepped && t > entry {
                 continue;
             }
@@ -362,10 +362,7 @@ fn tail_jump(
     alone: bool,
     spent: &mut u64,
 ) -> bool {
-    let apart = t < entry
-        || starts
-            .range((entry + 1)..t)
-            .any(|s| !w.seen.contains_key(s));
+    let apart = t < entry || (t > entry && steps_over(starts, w, entry, t));
     if t == entry || (alone && !apart) {
         return false;
     }
@@ -395,6 +392,22 @@ fn tail_jump(
                     && shape.depth.get(p) == Some(&Some(0))
             })
         })
+}
+
+/// Tells whether a function start the walk does not run through lies
+/// between its entry and `t`, a target past the entry: a start the
+/// jumper's own code falls into is no other function stepped over.
+///
+/// # Arguments
+///
+/// * `starts` - The known function starts.
+/// * `w` - The walk.
+/// * `entry` - Its entry.
+/// * `t` - The target, past `entry`.
+fn steps_over(starts: &BTreeSet<u64>, w: &Walked, entry: u64, t: u64) -> bool {
+    starts
+        .range(entry.saturating_add(1)..t)
+        .any(|s| !w.seen.contains_key(s))
 }
 
 /// Returns the addresses of a walk reached from `from`, `from` included,

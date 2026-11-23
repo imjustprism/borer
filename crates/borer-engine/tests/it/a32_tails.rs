@@ -33,3 +33,26 @@ fn a_start_inside_the_jumper_steps_over_nothing() {
     ];
     assert_eq!(thumb_entries("inside.elf", &text), [0, 0xc, 0xe, 0x1c]);
 }
+
+/// A start the jumper falls into does not make a straight run after it a
+/// tail call either: the run stays a block of the jumper.
+#[test]
+fn a_start_inside_the_jumper_makes_no_straight_run_a_function() {
+    let text: [u16; 17] = [
+        0xb508, // ASM: push {r3, lr}
+        0xf000, 0xf803, // ASM: bl 0xc
+        0xf000, 0xf808, // ASM: bl 0x1a
+        0xbd08, // ASM: pop {r3, pc}
+        0x2001, // ASM: movs r0, #1
+        0x2002, // ASM: movs r0, #2
+        0xe000, // ASM: b 0x14
+        0xbf00, // ASM: nop
+        0x2003, // ASM: movs r0, #3
+        0x4770, // ASM: bx lr
+        0xbf00, // ASM: nop
+        0xb508, // ASM: push {r3, lr}
+        0xf7ff, 0xfff7, // ASM: bl 0xe
+        0xbd08, // ASM: pop {r3, pc}
+    ];
+    assert_eq!(thumb_entries("straight.elf", &text), [0, 0xc, 0xe, 0x1a]);
+}
