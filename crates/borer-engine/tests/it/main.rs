@@ -27,6 +27,7 @@ mod a32;
 mod a32_decompile;
 mod a32_emulate;
 mod a32_lift;
+mod a32_noreturn;
 mod a32_tails;
 mod a64;
 mod a64_decompile;

@@ -24,7 +24,7 @@ use borer_engine::isa::a32::{ItState, Mode, decode, text};
 use borer_engine::program::{Arch, BinaryFormat, Program};
 
 /// Where the ELF's code is mapped.
-const ELF_TEXT: u64 = 0x1_0080;
+pub(crate) const ELF_TEXT: u64 = 0x1_0080;
 
 /// `STT_FUNC` with `STB_GLOBAL`.
 const GLOBAL_FUNC: u8 = 0x12;
@@ -63,7 +63,7 @@ fn put(out: &mut [u8], off: usize, v: u64, n: usize) {
 /// * `text` - The code.
 /// * `syms` - Each symbol's name, value and `st_info`, all in `.text`.
 /// * `entry` - `e_entry`.
-fn elf32(text: &[u8], syms: &[(&str, u64, u8)], entry: u64) -> Vec<u8> {
+pub(crate) fn elf32(text: &[u8], syms: &[(&str, u64, u8)], entry: u64) -> Vec<u8> {
     /// The file offset of `.text`.
     const TEXT_OFF: usize = 0x80;
     let mut strtab = vec![0u8];

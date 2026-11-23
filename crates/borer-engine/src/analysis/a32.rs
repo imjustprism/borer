@@ -1736,7 +1736,10 @@ impl Walks<'_> {
 ///
 /// Every path decodes, none returns, none leaves through a register jump
 /// the walk did not resolve, and every function it tail-calls never
-/// returns either.
+/// returns either. A trap (`bkpt 0xab` asks a debugger for a service
+/// and goes on) and a call whose path ended at a start or a stop rather
+/// than at a callee known never to return say nothing either way, so
+/// they are no evidence.
 ///
 /// # Arguments
 ///
@@ -1747,9 +1750,14 @@ fn never_returns(w: &Walked, noreturn: &BTreeSet<u64>) -> bool {
         && w.seen.len() < WALK_MAX
         && w.tails.iter().all(|t| noreturn.contains(t))
         && w.seen.values().all(|i| match i.flow() {
-            Flow::Return => false,
+            Flow::Return | Flow::Invalid => false,
             Flow::Jump => i.target().is_some() || w.tables.contains_key(&i.va),
-            Flow::Next | Flow::CondJump | Flow::Call | Flow::Invalid => true,
+            Flow::Call => {
+                guarded(i)
+                    || w.seen.contains_key(&i.next())
+                    || i.target().is_some_and(|c| noreturn.contains(&c))
+            }
+            Flow::Next | Flow::CondJump => true,
         })
 }
 
