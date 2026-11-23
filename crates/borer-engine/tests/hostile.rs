@@ -52,6 +52,8 @@ mod names;
 mod pdb;
 #[path = "hostile/projects.rs"]
 mod projects;
+#[path = "hostile/records.rs"]
+mod records;
 #[path = "hostile/search.rs"]
 mod search;
 

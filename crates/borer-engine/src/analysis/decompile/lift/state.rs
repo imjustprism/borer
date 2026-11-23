@@ -333,6 +333,9 @@ impl<'a> Exec<'_, 'a> {
         if matches!(seg, Register::FS | Register::GS) {
             e = fold(Op::Add, Expr::Var(Key::Reg(seg)), e, 64);
         }
+        if let Expr::Sp(k) = &e {
+            self.rounded(base, *k);
+        }
         self.in_alloca(e)
     }
 
@@ -754,6 +757,7 @@ impl<'a> Exec<'_, 'a> {
     /// * `r` - The register as written in the instruction.
     /// * `v` - The new value.
     pub(super) fn reg_write(&mut self, r: Register, v: Expr) {
+        self.env.frame_written(r);
         if self.is_stack_pointer(r) {
             /// Most bytes a `sub esp` outside the prologue makes room for
             /// arguments with: a structure passed by value is copied there.
@@ -781,6 +785,7 @@ impl<'a> Exec<'_, 'a> {
                     if matches!(**l, Expr::Sp(_))
                         && matches!(**m, Expr::Const(c) if c.wrapping_neg().is_power_of_two() && c.wrapping_neg() <= 4096) =>
                 {
+                    self.env.rounding.sp = true;
                     match **l {
                         Expr::Sp(k) => Some(k),
                         _ => None,

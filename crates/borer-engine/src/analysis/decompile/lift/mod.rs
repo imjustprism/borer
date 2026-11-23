@@ -179,6 +179,48 @@ pub(super) struct Env {
     /// that nothing wrote since: their text variables name no value the
     /// machine holds.
     pub clobbered: BTreeSet<Key>,
+    /// Whether a rounding of the stack pointer reaches here, kept out of the
+    /// fixpoint's equality ([`Rounding`]).
+    pub rounding: Rounding,
+}
+
+/// Whether an `and` rounded the stack pointer down on some path to a point,
+/// a fact only the export records read ([`super::Decompiled::realigned`]).
+///
+/// It compares equal to every other value, so the dataflow fixpoint over
+/// [`Env`] runs the same passes with it as without it and the lift is
+/// unchanged by construction; the fixpoint carries it over monotonically
+/// beside the state.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Rounding {
+    /// A rounding happened on some path here: the offset in [`Env::sp`] is
+    /// the one before it, so an address it makes is off by up to the
+    /// alignment.
+    pub(crate) sp: bool,
+    /// The frame pointer was last written after such a rounding on some
+    /// path here, so an address it makes is off as well.
+    pub(crate) fp: bool,
+}
+
+impl PartialEq for Rounding {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl Rounding {
+    /// Returns the facts of both sides of a join: a rounding on either path
+    /// reaches the join.
+    ///
+    /// # Arguments
+    ///
+    /// * `other` - The facts arriving over the other edge.
+    pub(super) fn join(self, other: Self) -> Self {
+        Self {
+            sp: self.sp | other.sp,
+            fp: self.fp | other.fp,
+        }
+    }
 }
 
 impl Env {
@@ -203,6 +245,7 @@ impl Env {
             fresh: BTreeSet::new(),
             touched: BTreeSet::new(),
             clobbered: BTreeSet::new(),
+            rounding: Rounding::default(),
         }
     }
 
@@ -240,25 +283,53 @@ impl Env {
     /// Returns the state with nothing known, rsp included.
     pub(super) fn unknown() -> Env {
         Env {
-            vals: BTreeMap::new(),
-            slot_bits: BTreeMap::new(),
             sp: None,
-            chkstk: None,
-            allocas: Vec::new(),
-            flags: Flags::Unknown,
             df: None,
-            classes: BTreeMap::new(),
-            result_in_rax: false,
-            slot_types: BTreeMap::new(),
-            tls_arrays: BTreeSet::new(),
-            tls_blocks: BTreeSet::new(),
-            narrow: FxHashMap::default(),
-            unset: BTreeSet::new(),
-            fpu_cmp: None,
-            fresh: BTreeSet::new(),
-            touched: BTreeSet::new(),
-            clobbered: BTreeSet::new(),
+            ..Env::entry()
         }
+    }
+
+    /// Notes that the frame pointer is written now, after a rounding of the
+    /// stack pointer on some path here or not ([`Rounding::fp`]).
+    ///
+    /// # Arguments
+    ///
+    /// * `r` - The register written.
+    pub(super) fn frame_written(&mut self, r: Register) {
+        if r.full_register() == Register::RBP {
+            self.rounding.fp = self.rounding.sp;
+        }
+    }
+
+    /// Tells whether an address a memory operand based on `base` makes is
+    /// off by a rounding of the stack pointer: one happened on some path
+    /// here, and `base` is no frame pointer set before it.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The operand's base register.
+    pub(super) fn off_by_rounding(&self, base: Register) -> bool {
+        self.rounding.sp && (base.full_register() != Register::RBP || self.rounding.fp)
+    }
+
+    /// Takes `new` over this state when they differ beyond
+    /// [`Env::rounding`], else joins only its rounding in, so the rounding
+    /// never drives the dataflow fixpoint.
+    ///
+    /// # Arguments
+    ///
+    /// * `new` - The state the fixpoint computed now.
+    ///
+    /// # Returns
+    ///
+    /// Whether the states differed beyond the rounding.
+    pub(super) fn settle(&mut self, new: Env) -> bool {
+        if *self == new {
+            self.rounding = self.rounding.join(new.rounding);
+            return false;
+        }
+        *self = new;
+        true
     }
 
     /// Meets two states at a join: only facts both sides agree on survive.
@@ -302,6 +373,7 @@ impl Env {
         self.touched.extend(other.touched.iter().copied());
         self.clobbered.extend(other.clobbered.iter().copied());
         self.result_in_rax &= other.result_in_rax;
+        self.rounding = self.rounding.join(other.rounding);
         if self.sp != other.sp {
             self.sp = None;
         }
@@ -887,6 +959,28 @@ impl<'c, 'a> Exec<'c, 'a> {
 }
 
 impl Exec<'_, '_> {
+    /// Returns `off` after noting it, addressed through `base`, as a stack
+    /// offset whose true place a rounding of the stack pointer hid
+    /// ([`Env::off_by_rounding`], [`super::Decompiled::realigned`]); the lift
+    /// itself never reads the note.
+    ///
+    /// # Arguments
+    ///
+    /// * `base` - The register the address is made from.
+    /// * `off` - The stack offset it names, before the rounding.
+    pub(super) fn rounded(&self, base: Register, off: i64) -> i64 {
+        if self.env.off_by_rounding(base) {
+            self.ctx.realigned.borrow_mut().insert(off);
+        }
+        off
+    }
+
+    /// Returns the stack pointer's offset, the slot a `push` writes or a
+    /// `pop` reads, noted when a rounding hid it ([`Exec::rounded`]).
+    pub(super) fn sp_slot(&self) -> Option<i64> {
+        self.env.sp.map(|sp| self.rounded(Register::RSP, sp))
+    }
+
     /// Full calling-convention stack words pushed since the last call.
     pub(super) fn args_pushed(&self) -> u32 {
         self.push_bytes / u32::try_from(self.ctx.conv.word).unwrap_or(4)

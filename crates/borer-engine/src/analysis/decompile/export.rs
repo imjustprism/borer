@@ -23,9 +23,13 @@
 //! bounded window of texts and the hoisted declarations, never the file;
 //! the caller writes [`Hoisted::head`] above what the sink received.
 
+pub mod records;
+
+use super::Origins;
 use super::{Analysis, BTreeMap, BTreeSet, Function, Overlay, Program, name_of};
 use crate::analysis::NameSource;
 use crate::progress::cores;
+use records::{Record, SinkLine};
 use std::fmt::Write as _;
 
 /// What the file declares before any declaration a function hoists: the
@@ -84,6 +88,16 @@ pub enum Library {
     Skip,
     /// Write them like any other function.
     Include,
+}
+
+/// Whether an export also writes each definition's record
+/// ([`records`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Records {
+    /// The C file alone.
+    Skip,
+    /// The C file and the records beside it.
+    Write,
 }
 
 /// Tells whether the export leaves a function out.
@@ -352,15 +366,12 @@ impl Hoisted {
             return;
         };
         self.written += 1;
-        let lines: Vec<&str> = text.lines().collect();
-        let comments = lines.iter().take_while(|l| l.starts_with("//")).count();
-        let decls_end = super::declarations_end(text).unwrap_or(comments);
-        let bare = super::expr_render::bare(name);
-        let head = lines
-            .iter()
-            .take(comments)
-            .find_map(|l| l.strip_prefix("// signature: "))
-            .map_or_else(|| format!("void {bare}(void)"), |s| s.trim().to_owned());
+        let Split {
+            lines,
+            comments,
+            decls_end,
+            head,
+        } = Split::of(name, text);
         let proto = format!("{head};");
         let kept = self.defined.add(&declared_name(&head), &proto);
         self.conflict(kept, &proto);
@@ -486,6 +497,57 @@ impl Hoisted {
         }
         out.push('\n');
         out
+    }
+}
+
+/// One function's finished text as [`Hoisted::add`] splits it.
+struct Split<'t> {
+    /// Its lines.
+    lines: Vec<&'t str>,
+    /// How many comment lines it opens with.
+    comments: usize,
+    /// One past its last declaration line ([`super::declarations_end`]).
+    decls_end: usize,
+    /// The definition's head: the `// signature:`, else `void name(void)`.
+    head: String,
+}
+
+impl<'t> Split<'t> {
+    /// Splits a function's finished text.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The function's name, for a text with no signature.
+    /// * `text` - Its finished text.
+    fn of(name: &str, text: &'t str) -> Self {
+        let lines: Vec<&str> = text.lines().collect();
+        let comments = lines.iter().take_while(|l| l.starts_with("//")).count();
+        let decls_end = super::declarations_end(text).unwrap_or(comments);
+        let bare = super::expr_render::bare(name);
+        let head = lines
+            .iter()
+            .take(comments)
+            .find_map(|l| l.strip_prefix("// signature: "))
+            .map_or_else(|| format!("void {bare}(void)"), |s| s.trim().to_owned());
+        Self {
+            lines,
+            comments,
+            decls_end,
+            head,
+        }
+    }
+
+    /// Returns the declarations the definition keeps as its locals, in
+    /// order: those [`classify`] hoists none of.
+    ///
+    /// # Arguments
+    ///
+    /// * `functions` - The names of the binary's functions, as a text
+    ///   spells them.
+    fn locals(&self, functions: &BTreeSet<String>) -> Vec<&'t str> {
+        let decls = self.lines.get(self.comments..self.decls_end);
+        let decls = decls.unwrap_or_default().iter().copied();
+        decls.filter(|l| classify(l, functions).is_none()).collect()
     }
 }
 
@@ -689,12 +751,150 @@ pub fn export_units(
     )
 }
 
+/// Exports every function as [`export`] does, the same text, and hands
+/// each written definition's record ([`records::record`]) to
+/// `records` as soon as its text goes to `sink`.
+///
+/// The text is read traced ([`super::origin`]), the text [`export`] writes
+/// with the block each line stands for, and those blocks are carried onto
+/// the definition the file holds.
+///
+/// # Arguments
+///
+/// * `program`, `analysis`, `overlay`, `library`, `only`, `sink` - As for
+///   [`export`].
+/// * `records` - Takes each definition's record and the line its head
+///   stands on, counted from 0 over what `sink` received: the file's line
+///   is that plus the lines of [`Hoisted::head`], plus 1.
+///
+/// # Returns
+///
+/// The hoisted declarations and the counts.
+///
+/// # Errors
+///
+/// The first error `sink` or `records` returns, which stops the export.
+pub fn export_recorded(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    library: Library,
+    only: Option<&BTreeSet<u64>>,
+    sink: &mut dyn FnMut(&str) -> anyhow::Result<()>,
+    records: &mut dyn FnMut(SinkLine, Record) -> anyhow::Result<()>,
+) -> anyhow::Result<Hoisted> {
+    let sink = Sink::Recorded(sink, records);
+    export_with(cores(), program, analysis, overlay, library, only, sink)
+}
+
 /// Where an export's definitions go.
 enum Sink<'a> {
     /// Runs of definitions about [`SINK_BYTES`] long.
     Runs(&'a mut dyn FnMut(&str) -> anyhow::Result<()>),
     /// Each function's definition alone, with its entry.
     Functions(&'a mut dyn FnMut(u64, &str, Written) -> anyhow::Result<()>),
+    /// Runs as [`Sink::Runs`], and each definition's record with the line
+    /// its head stands on among the runs.
+    Recorded(
+        &'a mut dyn FnMut(&str) -> anyhow::Result<()>,
+        &'a mut dyn FnMut(SinkLine, Record) -> anyhow::Result<()>,
+    ),
+}
+
+/// Returns the record of the definition `added` holds, the text after
+/// the `// name @ entry` comment [`Hoisted::add`] writes first.
+///
+/// # Arguments
+///
+/// * `program`, `analysis`, `overlay` - As for [`export`].
+/// * `entry` - The function's entry.
+/// * `name` - Its name.
+/// * `rendered` - The text [`Hoisted::add`] split, with its origins, and
+///   what it wrote for it.
+/// * `functions` - The names of the binary's functions, as a text spells
+///   them.
+/// * `budget` - The starts the export's records may still list
+///   ([`records::starts_budget`]).
+///
+/// # Returns
+///
+/// The record and how many lines of `added` come before the head.
+fn recorded(
+    (program, analysis, overlay): (&Program, &Analysis, &Overlay),
+    entry: u64,
+    name: &str,
+    (rendered, added): (&Rendered, &str),
+    functions: &BTreeSet<String>,
+    budget: &mut usize,
+) -> (Record, usize) {
+    let skip = usize::from(added.starts_with("//"));
+    let definition = added.split_inclusive('\n').skip(skip).collect::<String>();
+    let origins = rendered
+        .origins
+        .as_ref()
+        .map_or_else(Origins::default, |o| o.carried(&rendered.text, &definition));
+    let split = Split::of(name, &rendered.text);
+    let locals = split.locals(functions);
+    let bare = super::expr_render::bare(name);
+    let w = records::Written {
+        entry,
+        name: &bare,
+        locals: &locals,
+        head: &split.head,
+        definition: &definition,
+        origins: &origins,
+        realigned: &rendered.realigned,
+    };
+    (records::record(program, analysis, overlay, w, budget), skip)
+}
+
+/// Returns the text [`export`] writes for one function, read traced
+/// ([`super::origin::traced`]), with the stack offsets its lift addressed
+/// through a realigned stack pointer.
+///
+/// The traced text is kept nowhere: a recorded export of 25,000 functions
+/// holds no more traced texts than [`in_order`]'s window ([`Window`]), as a
+/// plain one. A function a caller may read too (at most
+/// [`super::finish::CALLEE_INSTRUCTIONS_MAX`] instructions) shares the plain
+/// decompilation memo as [`named`] does, an item of
+/// [`crate::analysis::Derived`] that its byte budget evicts least recently
+/// read first, so the export adds no memo beyond the plain one's; a larger
+/// function is decompiled afresh and kept nowhere.
+///
+/// # Arguments
+///
+/// * `program`, `analysis`, `overlay` - As for [`export`].
+/// * `entry` - The function's entry.
+fn traced_text(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+) -> Option<(String, Option<Origins>, BTreeSet<i64>)> {
+    let small = analysis.function(entry)?.instr_count <= super::finish::CALLEE_INSTRUCTIONS_MAX;
+    let (traced, realigned) = super::origin::traced(program, analysis, overlay, entry, small)?;
+    let (text, origins) = traced.into_parts();
+    Some((text, origins, realigned))
+}
+
+/// One function's text as a worker of [`in_order`] renders it, with the
+/// block each of its lines stands for when the export records them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Rendered {
+    /// The text.
+    text: String,
+    /// The block each line stands for, `None` when not traced.
+    origins: Option<Origins>,
+    /// The stack offsets the lift addressed through a realigned stack
+    /// pointer, empty when not traced.
+    realigned: BTreeSet<i64>,
+}
+
+impl Rendered {
+    /// Returns the heap bytes it holds.
+    fn bytes(&self) -> usize {
+        self.text.len() + self.origins.as_ref().map_or(0, Origins::bytes)
+    }
 }
 
 /// Exports as [`export`] does, rendering on at most `cores` workers.
@@ -776,22 +976,35 @@ fn export_with(
             .map(|f| f.blocks.len())
             .filter(|&n| n > BUDGET_BLOCKS)
     };
+    let traced = matches!(sink, Sink::Recorded(..));
     let render = |entry: u64| {
-        over(entry)
-            .is_none()
-            .then(|| named(program, analysis, overlay, entry))
-            .flatten()
-            .map(|text| {
-                let undeclared = super::unit::undeclared_words(&text);
-                own_callees(
-                    &super::unit::declare_globals(&text, &undeclared),
-                    &undeclared,
-                    program,
-                    analysis,
-                    overlay,
-                    entry,
-                )
-            })
+        if over(entry).is_some() {
+            return None;
+        }
+        let (text, origins, realigned) = if traced {
+            traced_text(program, analysis, overlay, entry)?
+        } else {
+            (
+                named(program, analysis, overlay, entry)?,
+                None,
+                BTreeSet::new(),
+            )
+        };
+        let undeclared = super::unit::undeclared_words(&text);
+        let out = own_callees(
+            &super::unit::declare_globals(&text, &undeclared),
+            &undeclared,
+            program,
+            analysis,
+            overlay,
+            entry,
+        );
+        let origins = origins.map(|o| o.carried(&text, &out));
+        Some(Rendered {
+            text: out,
+            origins,
+            realigned,
+        })
     };
     let mut out = String::new();
     let cost = |entry: u64| match over(entry) {
@@ -799,9 +1012,12 @@ fn export_with(
         None => analysis.function(entry).map_or(0, |f| f.blocks.len()),
     };
     let window = Window::export(cores, entries.len());
+    let mut lines = 0usize;
+    let mut budget = records::starts_budget(program);
     in_order(&entries, window, &cost, &render, &mut |entry, text| {
         let name = name_of(analysis, overlay, entry);
-        let written = match (over(entry), text.as_deref()) {
+        let at = out.len();
+        let written = match (over(entry), text.as_ref().map(|r| r.text.as_str())) {
             (Some(blocks), _) => {
                 hoisted.cut(&name, entry, blocks, &mut out);
                 Written::Cut
@@ -811,15 +1027,23 @@ fn export_with(
                 text.map_or(Written::Failed, |_| Written::Body)
             }
         };
+        let added = out.get(at..).unwrap_or_default();
+        if let (Sink::Recorded(_, records), Some(rendered)) = (&mut sink, text.as_ref()) {
+            let on = (program, analysis, overlay);
+            let both = (rendered, added);
+            let (record, skip) = recorded(on, entry, &name, both, &hoisted.functions, &mut budget);
+            records(SinkLine(lines.saturating_add(skip)), record)?;
+        }
+        lines = lines.saturating_add(added.matches('\n').count());
         match &mut sink {
-            Sink::Runs(_) if out.len() < SINK_BYTES => return Ok(()),
-            Sink::Runs(run) => run(&out)?,
+            Sink::Runs(_) | Sink::Recorded(..) if out.len() < SINK_BYTES => return Ok(()),
+            Sink::Runs(run) | Sink::Recorded(run, _) => run(&out)?,
             Sink::Functions(each) => each(entry, &out, written)?,
         }
         out.clear();
         Ok(())
     })?;
-    if let Sink::Runs(run) = &mut sink {
+    if let Sink::Runs(run) | Sink::Recorded(run, _) = &mut sink {
         run(&out)?;
     }
     Ok(hoisted)
@@ -1022,13 +1246,45 @@ fn own_signature(
 #[derive(Debug)]
 struct Queue {
     /// Each finished text by its position in the entries, until taken.
-    done: BTreeMap<usize, Option<String>>,
+    done: BTreeMap<usize, Option<Rendered>>,
     /// Bytes of the texts in `done`.
     held: usize,
     /// The position the taker waits for next: every one before it is taken.
     taken: usize,
     /// Whether the taker stopped, so the workers stop too.
     stop: bool,
+}
+
+impl Queue {
+    /// Holds a finished text until it is taken.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Its position in the entries.
+    /// * `text` - The text, `None` when the function has none.
+    fn put(&mut self, i: usize, text: Option<Rendered>) {
+        self.held = self
+            .held
+            .saturating_add(text.as_ref().map_or(0, Rendered::bytes));
+        self.done.insert(i, text);
+    }
+
+    /// Takes the text at a position once it is finished.
+    ///
+    /// # Arguments
+    ///
+    /// * `i` - Its position in the entries.
+    ///
+    /// # Returns
+    ///
+    /// The text, `None` while it is not finished.
+    fn take(&mut self, i: usize) -> Option<Option<Rendered>> {
+        let text = self.done.remove(&i)?;
+        self.held = self
+            .held
+            .saturating_sub(text.as_ref().map_or(0, Rendered::bytes));
+        Some(text)
+    }
 }
 
 /// How far [`in_order`] renders ahead of the taking, and on how many
@@ -1092,8 +1348,8 @@ fn in_order(
     entries: &[u64],
     window: Window,
     cost: &dyn Fn(u64) -> usize,
-    render: &(dyn Fn(u64) -> Option<String> + Sync),
-    take: &mut dyn FnMut(u64, Option<String>) -> anyhow::Result<()>,
+    render: &(dyn Fn(u64) -> Option<Rendered> + Sync),
+    take: &mut dyn FnMut(u64, Option<Rendered>) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     use std::sync::{Condvar, Mutex, PoisonError};
     let Window {
@@ -1155,9 +1411,7 @@ fn in_order(
                             render(entry)
                         }));
                         let mut q = queue.lock().unwrap_or_else(PoisonError::into_inner);
-                        let text = text.ok().flatten();
-                        q.held = q.held.saturating_add(text.as_ref().map_or(0, String::len));
-                        q.done.insert(i, text);
+                        q.put(i, text.ok().flatten());
                         ready.notify_one();
                     }
                 });
@@ -1172,8 +1426,7 @@ fn in_order(
                 } else {
                     let mut q = queue.lock().unwrap_or_else(PoisonError::into_inner);
                     let text = loop {
-                        if let Some(text) = q.done.remove(&i) {
-                            q.held = q.held.saturating_sub(text.as_ref().map_or(0, String::len));
+                        if let Some(text) = q.take(i) {
                             break text;
                         }
                         q = ready.wait(q).unwrap_or_else(PoisonError::into_inner);
@@ -1198,8 +1451,8 @@ fn in_order(
 #[cfg(test)]
 mod tests {
     use super::{
-        BTreeSet, BUDGET_BLOCKS, Hoisted, Kind, Library, Window, classify, cores, declared_name,
-        export, export_on, in_order,
+        BTreeSet, BUDGET_BLOCKS, Hoisted, Kind, Library, Rendered, Split, Window, classify, cores,
+        declared_name, export, export_on, in_order,
     };
     use crate::analysis::{Analysis, Overlay};
     use crate::program::{Arch, Program, Section};
@@ -1278,18 +1531,14 @@ mod tests {
         (h.head("t") + body.as_str(), h.written)
     }
 
-    /// One worker and many write the same file, head and conflict list
-    /// included, every time.
-    ///
-    /// Twenty-four functions that call each other in a ring, each reading
-    /// a byte through its parameter, so each text declares its callees and
-    /// the workers finish them in no fixed order.
+    /// Returns twenty-four functions that call each other in a ring, each
+    /// reading a byte through its parameter, so each text declares its
+    /// callees and the workers finish them in no fixed order.
     ///
     /// # Panics
     ///
-    /// When a many-worker file differs from the one-worker file.
-    #[test]
-    fn one_worker_and_many_write_the_same_file() {
+    /// Never: every offset fits.
+    pub(super) fn ring() -> Program {
         const N: u64 = 24;
         const SIZE: u64 = 0x40;
         let call = |from: u64, to: u64| -> [u8; 5] {
@@ -1315,7 +1564,18 @@ mod tests {
         }
         let len = u64::try_from(code.len()).expect("a small image");
         let text = Section::mapped(".text", 0x1000, 0, len, false, true);
-        let p = Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text]);
+        Program::raw(code, Arch::X86_64, 0, Some(0x1000), vec![text])
+    }
+
+    /// One worker and many write the same file, head and conflict list
+    /// included, every time ([`ring`]).
+    ///
+    /// # Panics
+    ///
+    /// When a many-worker file differs from the one-worker file.
+    #[test]
+    fn one_worker_and_many_write_the_same_file() {
+        let p = ring();
         let (one, written) = exported(&p, 1);
         assert_eq!(written, 24, "{one}");
         for _ in 0..4 {
@@ -1334,7 +1594,7 @@ mod tests {
     #[test]
     fn texts_are_taken_in_order_and_an_error_stops_them() {
         let entries: Vec<u64> = (0..20_000).rev().collect();
-        let render = |e: u64| (!e.is_multiple_of(7)).then(|| format!("{e}"));
+        let render = |e: u64| (!e.is_multiple_of(7)).then(|| plain(format!("{e}")));
         let mut seen = Vec::new();
         in_order(
             &entries,
@@ -1398,7 +1658,7 @@ mod tests {
     /// * `rendered` - Functions other than entry 0 rendered so far.
     /// * `at_release` - Where the count when entry 0 finishes is kept.
     /// * `e` - The entry to render.
-    fn slow_first(rendered: &AtomicUsize, at_release: &AtomicUsize, e: u64) -> Option<String> {
+    fn slow_first(rendered: &AtomicUsize, at_release: &AtomicUsize, e: u64) -> Option<Rendered> {
         if e == 0 {
             for _ in 0..10_000 {
                 if rendered.load(Ordering::SeqCst) >= NARROW.ahead - 1 {
@@ -1411,7 +1671,53 @@ mod tests {
         } else {
             rendered.fetch_add(1, Ordering::SeqCst);
         }
-        Some(format!("{e}"))
+        Some(plain(format!("{e}")))
+    }
+
+    /// Returns a text rendered untraced.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text.
+    fn plain(text: String) -> Rendered {
+        Rendered {
+            text,
+            origins: None,
+            realigned: BTreeSet::new(),
+        }
+    }
+
+    /// The declarations a definition keeps end where its statements start.
+    ///
+    /// A body with no locals that opens `return a1;` or with a `goto`
+    /// declares none, and a body with locals keeps them, not the globals
+    /// or prototypes it hoists.
+    ///
+    /// # Panics
+    ///
+    /// When a statement reads as a local or a local is lost.
+    #[test]
+    fn locals_end_where_the_statements_start() {
+        let functions = BTreeSet::from(["g".to_owned()]);
+        let text =
+            |body: &str| format!("// f @ 0x1000\n// signature: uint64_t f(uint64_t a1)\n{body}");
+        for body in [
+            "return a1;\n",
+            "goto label_1010;\nlabel_1010:\nreturn a1;\n",
+        ] {
+            let t = text(body);
+            let split = Split::of("f", &t);
+            assert!(split.locals(&functions).is_empty(), "{body}");
+            assert_eq!(split.head, "uint64_t f(uint64_t a1)");
+        }
+        let t = text(
+            "extern uint64_t g(uint64_t);\nuint32_t local_10;\nuint8_t local_30[48];\n\nreturn a1;\n",
+        );
+        let split = Split::of("f", &t);
+        assert_eq!(
+            split.locals(&functions),
+            ["uint32_t local_10;", "uint8_t local_30[48];"]
+        );
     }
 
     /// While the first text is slow, the workers render only the window
@@ -1435,7 +1741,7 @@ mod tests {
                 &|_| 0,
                 &|e| slow_first(&rendered, &at_release, e),
                 &mut |e, text| {
-                    assert_eq!(text, Some(format!("{e}")));
+                    assert_eq!(text, Some(plain(format!("{e}"))));
                     seen.push(e);
                     Ok(())
                 },

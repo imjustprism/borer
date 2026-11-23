@@ -612,7 +612,7 @@ fn write_isa_line<S: Sink>(text: &str, target: Option<u64>, isa: Isa, a: &Analys
 ///
 /// * `isa` - The instruction set.
 /// * `word` - Candidate identifier token.
-fn isa_is_register(isa: Isa, word: &str) -> bool {
+pub(crate) fn isa_is_register(isa: Isa, word: &str) -> bool {
     match isa {
         Isa::A64 => a64::is_register(word),
         Isa::A32 => a32::is_register(word),

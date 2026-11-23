@@ -1506,7 +1506,7 @@ impl Exec<'_, '_> {
             for (at, v) in slots.zip(pushed.into_iter().rev()) {
                 self.env.vals.insert(Key::Slot(at), Expr::Const(v));
                 self.env.slot_bits.insert(at, 32);
-                seeded.push(at);
+                seeded.push(self.rounded(Register::RSP, at));
             }
         }
         self.env.sp = self.env.sp.and_then(|sp| sp.checked_sub(word));

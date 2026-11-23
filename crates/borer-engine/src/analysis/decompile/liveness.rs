@@ -1001,9 +1001,8 @@ pub(super) fn dataflow<L: Lifter>(
                         }
                     }
                 }
-                let differs = ins[b] != m || assumes[b] != held;
+                let differs = ins[b].settle(m) || assumes[b] != held;
                 if differs {
-                    ins[b] = m;
                     assumes[b] = held;
                     changed = true;
                     clock += 1;
@@ -1059,10 +1058,7 @@ pub(super) fn dataflow<L: Lifter>(
                 branch: out.branch,
                 flag_src: out.flag_src,
             };
-            if outs[b] != env {
-                outs[b] = env;
-                changed = true;
-            }
+            changed |= outs[b].settle(env);
             clock += 1;
             stamp[b] = clock;
         }

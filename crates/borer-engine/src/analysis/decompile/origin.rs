@@ -36,7 +36,7 @@
 //! addresses they came from; the tree's provenance will then feed the same
 //! [`Origins`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::{Deref, Range};
 use std::sync::Arc;
 
@@ -292,7 +292,7 @@ impl Origins {
     ///
     /// * `old` - The text before the rewrite.
     /// * `new` - The text after it.
-    fn carried(&self, old: &str, new: &str) -> Self {
+    pub(super) fn carried(&self, old: &str, new: &str) -> Self {
         if !self.known() || Cancel::raised() {
             return Self::unknown(new.lines().count());
         }
@@ -584,9 +584,7 @@ impl Deref for Traced {
 ///
 /// It is memoized per function under the names in force through
 /// [`Analysis::derived`] apart from the untraced text, so only a caller
-/// asking for origins pays for them. The decompilation is the
-/// shared one when a traced build made it ([`decompiled_kept`]), else a
-/// traced build of its own.
+/// asking for origins pays for them ([`traced`] builds it).
 ///
 /// # Arguments
 ///
@@ -608,39 +606,58 @@ pub(super) fn named(
         "traced_text",
         overlay.fingerprint(),
         entry,
-        || {
-            let key = overlay.fingerprint();
-            let shared = decompiled_kept(program, analysis, overlay, key, entry, Kept::ORIGINS);
-            let fresh;
-            let d = match shared.as_ref() {
-                Some(d) if d.origins.is_some() => d,
-                _ => {
-                    fresh = decompile_with(
-                        program,
-                        analysis,
-                        overlay,
-                        entry,
-                        true,
-                        &[],
-                        Kept::ORIGINS,
-                    )?;
-                    &fresh
-                }
-            };
-            let laid = || {
-                Some(finished_traced(
-                    d.traced(),
-                    program,
-                    analysis,
-                    overlay,
-                    entry,
-                ))
-            };
-            let text = (d.text.as_str(), d.origins.as_ref());
-            named_from(program, analysis, overlay, entry, text, laid)?.1
-        },
+        || traced(program, analysis, overlay, entry, true).map(|(t, _)| t),
         |t| t.as_ref().map_or(0, Traced::bytes),
     )
+}
+
+/// Builds the text [`named`] memoizes, from the shared decompilation when
+/// a traced build made it and `shared` allows it ([`decompiled_kept`]),
+/// else from a traced build of its own that nothing keeps.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image.
+/// * `analysis` - Discovery results.
+/// * `overlay` - User names and comments.
+/// * `entry` - The function's entry address.
+/// * `shared` - Whether to read and fill the shared decompilation memo.
+///
+/// # Returns
+///
+/// The traced text and the stack offsets its lift addressed through a
+/// realigned stack pointer ([`super::Decompiled::realigned`]), `None` when
+/// the function does not decompile.
+pub(super) fn traced(
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+    entry: u64,
+    shared: bool,
+) -> Option<(Traced, BTreeSet<i64>)> {
+    let key = overlay.fingerprint();
+    let kept =
+        shared.then(|| decompiled_kept(program, analysis, overlay, key, entry, Kept::ORIGINS));
+    let fresh;
+    let d = match kept.as_deref() {
+        Some(Some(d)) if d.origins.is_some() => d,
+        _ => {
+            fresh = decompile_with(program, analysis, overlay, entry, true, &[], Kept::ORIGINS)?;
+            &fresh
+        }
+    };
+    let laid = || {
+        Some(finished_traced(
+            d.traced(),
+            program,
+            analysis,
+            overlay,
+            entry,
+        ))
+    };
+    let text = (d.text.as_str(), d.origins.as_ref());
+    let traced = named_from(program, analysis, overlay, entry, text, laid)?.1?;
+    Some((traced, d.realigned.clone()))
 }
 
 /// Returns the origins of an answer: a traced text's, with `under` unknown

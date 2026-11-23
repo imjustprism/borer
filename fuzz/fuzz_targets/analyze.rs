@@ -1,6 +1,7 @@
 //! Loads arbitrary bytes, lists the code at its entry, analyzes what loads,
 //! builds the control-flow graph of its first functions, decompiles them
-//! and reads each text as a view and its next steps, reads the template
+//! and reads each text as a view and its next steps, exports them with
+//! their records, reads the template
 //! signatures each references (every string the program references is
 //! parsed for them on the first ask), proposes a struct
 //! through its first argument, lists the types and opens the first page of
@@ -17,6 +18,7 @@
 #![no_main]
 
 use borer_engine::analysis::classes::{class_layout, render_layout};
+use borer_engine::analysis::decompile::export::{Library, export_recorded};
 use borer_engine::analysis::decompile::view::view_of;
 use borer_engine::analysis::decompile::{decompile, unit_of};
 use borer_engine::analysis::modsdk::{self, header::class_headers};
@@ -94,6 +96,24 @@ fuzz_target!(|data: &[u8]| {
         }
         _ = propose(&program, &analysis, &overlay, &format!("{:#x}", f.entry));
     }
+    let first: std::collections::BTreeSet<u64> =
+        analysis.functions.iter().take(DECOMPILED).map(|f| f.entry).collect();
+    let (mut c, mut records) = (0usize, Vec::new());
+    _ = export_recorded(
+        &program,
+        &analysis,
+        &overlay,
+        Library::Include,
+        Some(&first),
+        &mut |t| {
+            c += t.len();
+            Ok(())
+        },
+        &mut |line, r| {
+            records.push((line, r));
+            Ok(())
+        },
+    );
     for row in type_rows(&program, &analysis, &overlay, None, 0, TYPES).rows {
         _ = type_detail(
             &program, &analysis, &overlay, &row.name, row.source, row.kind,

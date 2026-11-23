@@ -1137,7 +1137,7 @@ impl Exec<'_, '_> {
             Mnemonic::Push if let Some((word, ty)) = stack_value(instr) => {
                 let v = self.val(instr, 0);
                 self.env.sp = self.env.sp.and_then(|sp| sp.checked_sub(word));
-                if let Some(sp) = self.env.sp {
+                if let Some(sp) = self.sp_slot() {
                     if self.makes_room(&v) {
                         self.env.vals.remove(&Key::Slot(sp));
                         self.env.slot_bits.remove(&sp);
@@ -1150,7 +1150,7 @@ impl Exec<'_, '_> {
                     }
                 }
             }
-            Mnemonic::Pop if let Some((word, ty)) = stack_value(instr) => match self.env.sp {
+            Mnemonic::Pop if let Some((word, ty)) = stack_value(instr) => match self.sp_slot() {
                 Some(sp) => {
                     let v = self.slot_read(sp, ty);
                     self.env.sp = sp.checked_add(word);

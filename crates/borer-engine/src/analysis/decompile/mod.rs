@@ -296,7 +296,7 @@ struct Ctx<'a> {
     debug_params: std::sync::Arc<[crate::dwarf::Parameter]>,
     /// The source file and line the debug information states the function
     /// was written in - the PDB's rows, or a Go function's `pclntab`
-    /// record ([`pdb_sources`], [`go_source`]) - for the header's
+    /// record ([`pdb_sources`], [`declared::go_source`]) - for the header's
     /// `// source:` line; `None` when nothing was recorded, which leaves
     /// the line to what the body's own assertions cite. The PDB's rows
     /// are read lazily, so the first header that states one pays their
@@ -311,6 +311,10 @@ struct Ctx<'a> {
     debug_locals: std::sync::Arc<BTreeMap<i64, String>>,
     /// The function's virtual calls that resolved (emission pass).
     vcalls: BTreeSet<VirtualCall>,
+    /// The stack offsets the lift addressed through a stack pointer an
+    /// `and` rounded down, or a frame pointer set after it ([`lift::Env`]),
+    /// whose true place it does not know.
+    realigned: std::cell::RefCell<BTreeSet<i64>>,
     /// Callees whose whole body is `ret`, whose calls are left out of the
     /// text (emission pass); the header names them.
     empty_calls: BTreeSet<u64>,
@@ -746,29 +750,6 @@ fn pdb_sources(
     })
 }
 
-/// The source file and line a Go function's own table states it starts
-/// at, where the debug information said nothing.
-///
-/// Go's `pclntab` names the file and line runs beside the function names
-/// it already gave, read straight from the section the load found the
-/// table in. One function's lookup is two short varint runs, so unlike
-/// [`pdb_sources`] no walk is worth memoizing.
-///
-/// # Arguments
-///
-/// * `program` - The loaded image, holding the table.
-/// * `entry` - The function's entry.
-///
-/// # Returns
-///
-/// The `(file, line)` the table states, or `None` when no table was
-/// kept, it does not list `entry`, or it predates the file tables.
-fn go_source(program: &Program, entry: u64) -> Option<(String, u32)> {
-    let go = program.go.as_ref()?;
-    let bytes = program.section_bytes(program.section_at(go.at)?)?;
-    go.source_of(bytes, entry)
-}
-
 /// The per-function state the lifter runs with, before the parameters and
 /// the calling convention are read from the code.
 ///
@@ -840,9 +821,10 @@ fn new_ctx<'a>(
         debug_source: pdb_sources(program, analysis)
             .get(&f.entry)
             .cloned()
-            .or_else(|| go_source(program, f.entry)),
+            .or_else(|| declared::go_source(program, f.entry)),
         debug_locals: std::sync::Arc::new(declared::locals(debug, vars)),
         vcalls: BTreeSet::new(),
+        realigned: std::cell::RefCell::default(),
         empty_calls: BTreeSet::new(),
         read_in_place: BTreeSet::new(),
         dispatches: BTreeMap::new(),
@@ -1244,6 +1226,9 @@ pub(crate) struct Decompiled {
     settle: Settle,
     /// The choice points the lift met besides the passes, in order.
     pub(crate) sites: Vec<Site>,
+    /// The stack offsets the lift addressed through a realigned stack
+    /// pointer, whose true place it does not know ([`Ctx::realigned`]).
+    pub(crate) realigned: BTreeSet<i64>,
 }
 
 impl Decompiled {
@@ -1816,8 +1801,7 @@ fn decompile_in<L: Lifter>(
         (true, 32) => "uint32_t",
         (true, _) => word_type(ctx.bitness),
     };
-    let recorded_ret = ctx.debug_ret.as_deref();
-    let ret_ty = recorded_ret.unwrap_or(inferred);
+    let ret_ty = ctx.debug_ret.as_deref().unwrap_or(inferred);
     let typed = L::param_types(&ctx, &code, &succs, entry_block);
     let name = name_of(analysis, overlay, f.entry);
     let library = (ctx.stated.is_none()
@@ -2368,6 +2352,7 @@ fn decompile_in<L: Lifter>(
         witness: std::sync::Mutex::new(witness),
         settle,
         sites: ctx.sites.iter().copied().collect(),
+        realigned: ctx.realigned.borrow().clone(),
     })
 }
 

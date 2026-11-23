@@ -268,6 +268,29 @@ pub(super) fn contradictions(
     out
 }
 
+/// The source file and line a Go function's own table states it starts
+/// at, where the debug information said nothing.
+///
+/// Go's `pclntab` names the file and line runs beside the function names
+/// it already gave, read straight from the section the load found the
+/// table in. One function's lookup is two short varint runs, so unlike
+/// [`super::pdb_sources`] no walk is worth memoizing.
+///
+/// # Arguments
+///
+/// * `program` - The loaded image, holding the table.
+/// * `entry` - The function's entry.
+///
+/// # Returns
+///
+/// The `(file, line)` the table states, or `None` when no table was
+/// kept, it does not list `entry`, or it predates the file tables.
+pub(super) fn go_source(program: &Program, entry: u64) -> Option<(String, u32)> {
+    let go = program.go.as_ref()?;
+    let bytes = program.section_bytes(program.section_at(go.at)?)?;
+    go.source_of(bytes, entry)
+}
+
 #[cfg(test)]
 #[expect(
     clippy::missing_panics_doc,
