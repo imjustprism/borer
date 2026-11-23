@@ -126,7 +126,12 @@ pub(crate) fn of(
 /// is listed at `id`, when no slot holds it alone, when a symbol has two
 /// entries, or when two of its slots say apart: a missed source, never a
 /// false one.
-fn import(program: &Program, analysis: &Analysis, id: u64, spelled: &str) -> Option<Said> {
+pub(super) fn import(
+    program: &Program,
+    analysis: &Analysis,
+    id: u64,
+    spelled: &str,
+) -> Option<Said> {
     let slots = super::import_slots(program, analysis, id)?;
     let held = import_symbols(program, analysis);
     let mut said = slots.iter().filter_map(|&slot| {
@@ -161,7 +166,10 @@ fn import(program: &Program, analysis: &Analysis, id: u64, spelled: &str) -> Opt
 ///
 /// * `program` - The loaded image, whose symbols list the imports.
 /// * `analysis` - Its analysis, holding the memo.
-fn import_symbols(program: &Program, analysis: &Analysis) -> Arc<BTreeMap<u64, Vec<usize>>> {
+pub(super) fn import_symbols(
+    program: &Program,
+    analysis: &Analysis,
+) -> Arc<BTreeMap<u64, Vec<usize>>> {
     analysis
         .derived
         .get_or_build("view_import_symbols", (), || {

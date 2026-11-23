@@ -126,6 +126,7 @@ mod unit;
 mod validate;
 mod view;
 mod view_lines;
+mod view_peek;
 mod view_said;
 mod void_results;
 mod wire_tables;

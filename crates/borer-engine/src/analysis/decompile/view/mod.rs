@@ -55,6 +55,7 @@ use std::sync::Arc;
 
 mod data;
 mod fields;
+pub mod peek;
 pub(crate) mod said;
 
 use super::lexer::{Lex, Piece, Spanned, code_before, directive, scan, spelled, tagged, word};
