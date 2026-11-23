@@ -131,7 +131,7 @@ pub(super) fn export(args: &[String], s: &Session) -> anyhow::Result<()> {
             &s.program,
             &mut a,
             &s.overlay,
-            asked.library,
+            (asked.library, asked.records),
             only,
             out,
             replace,

@@ -6,3 +6,4 @@ pub mod index;
 pub mod output;
 pub mod packs;
 pub mod project;
+pub mod records;

@@ -12,7 +12,9 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
-use borer_engine::analysis::decompile::export::{BUDGET_BLOCKS, Hoisted, Library, export};
+use borer_engine::analysis::decompile::export::{
+    BUDGET_BLOCKS, Hoisted, Library, Records, export, export_recorded,
+};
 use borer_engine::analysis::{Analysis, Overlay};
 use borer_engine::program::Program;
 use borer_engine::text::short_path;
@@ -95,7 +97,16 @@ pub fn write_c(
     out: &str,
     existing: Existing,
 ) -> anyhow::Result<Written> {
-    write_with_set(program, analysis, overlay, library, None, out, existing)
+    let records = Records::Skip;
+    write_with_set(
+        program,
+        analysis,
+        overlay,
+        (library, records),
+        None,
+        out,
+        existing,
+    )
 }
 
 /// Exports the entries in `only`, or every function when `only` is `None`.
@@ -110,6 +121,8 @@ pub fn write_c(
 /// * `analysis` - Its analysis.
 /// * `overlay` - Names, types and comments to apply.
 /// * `library` - Whether library code is written.
+/// * `records` - Whether each definition's record goes beside the file
+///   ([`crate::records`]).
 /// * `only` - Entries to write, or every function when `None`.
 /// * `out` - The C file to write.
 /// * `existing` - Whether a regular file already at `out` is replaced;
@@ -121,13 +134,13 @@ pub fn write_c(
 ///
 /// # Errors
 ///
-/// When the file or its `.part` beside it cannot be written, or a file
-/// is at `out` and `existing` keeps it.
+/// When the file, the records or a `.part` beside them cannot be
+/// written, or a file is at `out` and `existing` keeps it.
 pub fn write_entries(
     program: &Program,
     analysis: &mut Analysis,
     overlay: &Overlay,
-    library: Library,
+    (library, records): (Library, Records),
     only: Option<&[u64]>,
     out: &str,
     existing: Existing,
@@ -150,7 +163,7 @@ pub fn write_entries(
         program,
         analysis,
         overlay,
-        library,
+        (library, records),
         set.as_ref(),
         out,
         existing,
@@ -168,7 +181,7 @@ fn write_with_set(
     program: &Program,
     analysis: &Analysis,
     overlay: &Overlay,
-    library: Library,
+    (library, records): (Library, Records),
     set: Option<&BTreeSet<u64>>,
     out: &str,
     existing: Existing,
@@ -185,39 +198,48 @@ fn write_with_set(
     if occupied {
         anyhow::bail!("{shown} exists; nothing was written");
     }
+    let mut recs = crate::records::Part::new(out, records, existing)?;
     let mut bodies = std::io::BufWriter::new(
         create(part, Existing::Replace).with_context(|| format!("creating {shown}.part"))?,
     );
-    let hoisted = export(program, analysis, overlay, library, set, &mut |text| {
+    let mut sink = |text: &str| {
         bodies
             .write_all(text.as_bytes())
             .with_context(|| format!("writing {shown}.part"))
-    })?;
-    bodies
-        .flush()
-        .with_context(|| format!("writing {shown}.part"))?;
-    drop(bodies);
-    if borer_engine::cancel::Cancel::raised() {
-        std::fs::remove_file(part).with_context(|| format!("removing {shown}.part"))?;
-        anyhow::bail!(
-            "the request's deadline passed before every function was decompiled, so {shown} was left as it was; export fewer functions (a filter or a list) or raise BORER_DEADLINE_SECS"
-        );
+    };
+    let streamed = match recs.as_mut() {
+        None => export(program, analysis, overlay, library, set, &mut sink),
+        Some(part) => {
+            let mut each = |line, record| part.add(line, &record);
+            export_recorded(
+                program, analysis, overlay, library, set, &mut sink, &mut each,
+            )
+        }
     }
+    .and_then(|h| {
+        bodies
+            .flush()
+            .with_context(|| format!("writing {shown}.part"))?;
+        Ok(h)
+    });
+    drop(bodies);
+    let hoisted = match streamed {
+        Err(e) => return Err(crate::records::discard(e, part, recs)),
+        Ok(_) if borer_engine::cancel::Cancel::raised() => {
+            let cut = anyhow::anyhow!(
+                "the request's deadline passed before every function was decompiled, so {shown} was left as it was; export fewer functions (a filter or a list) or raise BORER_DEADLINE_SECS"
+            );
+            return Err(crate::records::discard(cut, part, recs));
+        }
+        Ok(h) => h,
+    };
     let binary = short_path(&program.path.display().to_string());
-    let mut file = std::io::BufWriter::new(
-        create(path, existing).with_context(|| format!("creating {shown}"))?,
-    );
-    file.write_all(hoisted.head(&binary).as_bytes())
-        .with_context(|| format!("writing {shown}"))?;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "the part file this export just wrote"
-    )]
-    let mut from = std::fs::File::open(part).with_context(|| format!("reading {shown}.part"))?;
-    std::io::copy(&mut from, &mut file).with_context(|| format!("writing {shown}"))?;
-    file.flush().with_context(|| format!("writing {shown}"))?;
-    drop(from);
-    std::fs::remove_file(part).with_context(|| format!("removing {shown}.part"))?;
+    let head = hoisted.head(&binary);
+    match (write_head_and_part(path, part, &head, existing), recs) {
+        (Err(e), r) => return Err(crate::records::discard(e, part, r)),
+        (Ok(_), None) => {}
+        (Ok(c), Some(r)) => r.finish(head.lines().count(), c)?,
+    }
     #[expect(clippy::disallowed_methods, reason = "the file this export just wrote")]
     let bytes = std::fs::metadata(path)
         .with_context(|| format!("reading {shown}"))?
@@ -227,6 +249,51 @@ fn write_with_set(
         bytes,
         unmatched: Vec::new(),
     })
+}
+
+/// Writes the C file at `path`: `head`, then the definitions `part` holds,
+/// and removes `part`.
+///
+/// # Returns
+///
+/// The bytes written and their hash, which the records name.
+///
+/// # Arguments
+///
+/// * `path` - The C file.
+/// * `part` - The `.part` file the definitions streamed to.
+/// * `head` - The hoisted declarations ([`Hoisted::head`]).
+/// * `existing` - Whether a regular file already at `path` is replaced.
+///
+/// # Errors
+///
+/// When a file cannot be created, read, written or removed.
+fn write_head_and_part(
+    path: &Path,
+    part: &Path,
+    head: &str,
+    existing: Existing,
+) -> anyhow::Result<crate::records::Content> {
+    let shown = short_path(&path.display().to_string());
+    let mut file = std::io::BufWriter::new(
+        create(path, existing).with_context(|| format!("creating {shown}"))?,
+    );
+    let mut content = crate::records::Content::default();
+    content.add(head.as_bytes());
+    file.write_all(head.as_bytes())
+        .with_context(|| format!("writing {shown}"))?;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the part file this export just wrote"
+    )]
+    let mut from = std::fs::File::open(part).with_context(|| format!("reading {shown}.part"))?;
+    content
+        .copy(&mut from, &mut file)
+        .with_context(|| format!("writing {shown} from its .part"))?;
+    file.flush().with_context(|| format!("writing {shown}"))?;
+    drop(from);
+    std::fs::remove_file(part).with_context(|| format!("removing {shown}.part"))?;
+    Ok(content)
 }
 
 /// A file a mod author loads, written from the program's mod SDK
@@ -834,7 +901,7 @@ impl Tally {
 #[cfg(test)]
 #[expect(clippy::disallowed_methods, reason = "the tests read their own files")]
 mod tests {
-    use super::{Existing, Library, write_c, write_entries};
+    use super::{Existing, Library, Records, write_c, write_entries};
     use borer_engine::analysis::{Analysis, Overlay};
     use borer_engine::program::{Arch, Program, Section};
 
@@ -907,7 +974,7 @@ mod tests {
             &p,
             &mut a,
             &Overlay::default(),
-            Library::Skip,
+            (Library::Skip, Records::Skip),
             Some(&only),
             &out,
             Existing::Replace,
