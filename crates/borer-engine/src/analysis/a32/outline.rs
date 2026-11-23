@@ -34,6 +34,10 @@ const BODY_MAX: usize = 1 << 14;
 /// them reaches it that way ([`shared_tails`]). The caller is walked again
 /// and the jump becomes a tail call.
 ///
+/// The predecessors and [`Shape`] built for each walk are charged to the
+/// walks' fuel; when it runs out, or the cancel flag in force is raised,
+/// the round stops there and the discovery is marked incomplete.
+///
 /// # Arguments
 ///
 /// * `program` - The image.
@@ -46,7 +50,14 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
     let mut promote = Vec::new();
     let mut shared = BTreeSet::new();
     let mut held = None;
+    let mut spent = 0u64;
+    let mut stopped = false;
     for (&entry, w) in &walks.walked {
+        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
+            stopped = true;
+            break;
+        }
+        let size = crate::num::from_usize(w.seen.len());
         let mut pred = None;
         let mut shape = None;
         for &t in &w.followed {
@@ -57,8 +68,14 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             if !stepped && t > entry {
                 continue;
             }
+            if pred.is_none() {
+                spent = spent.saturating_add(size);
+            }
             let pred = pred.get_or_insert_with(|| predecessors(w));
-            let balanced = |shape: &mut Option<Shape>| {
+            let balanced = |shape: &mut Option<Shape>, spent: &mut u64| {
+                if shape.is_none() {
+                    *spent = spent.saturating_add(size);
+                }
                 let shape = shape.get_or_insert_with(|| Shape::of(w, entry));
                 pred.get(&t)
                     .copied()
@@ -67,7 +84,7 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             };
             if (stepped && straight_return(w, t, pred))
                 || (after_pop(w, t, pred)
-                    && balanced(&mut shape)
+                    && balanced(&mut shape, &mut spent)
                     && held
                         .get_or_insert_with(|| owners(&walks.walked))
                         .get(&t)
@@ -79,8 +96,12 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             }
         }
     }
+    walks.fuel = walks.fuel.saturating_sub(spent);
+    walks.incomplete |= stopped;
     let shared: Vec<u64> = shared.into_iter().take(SHARED_MAX).collect();
-    promote.extend(shared_tails(program, walks, &shared));
+    if !stopped {
+        promote.extend(shared_tails(program, walks, &shared));
+    }
     promote.sort_unstable();
     promote.dedup();
     let promoted = !promote.is_empty();
@@ -192,19 +213,7 @@ impl Shape {
     /// * `w` - The walk.
     /// * `entry` - Its entry.
     fn of(w: &Walked, entry: u64) -> Self {
-        let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
-        for i in w.seen.values() {
-            edges(i, &mut |to| {
-                if w.seen.contains_key(&to) {
-                    preds.entry(to).or_default().push(i.va);
-                }
-            });
-        }
-        for t in &w.tables {
-            for &target in &t.targets {
-                preds.entry(target).or_default().push(t.site);
-            }
-        }
+        let preds = all_preds(w);
         let mut depth: BTreeMap<u64, Option<i64>> = BTreeMap::from([(entry, Some(0))]);
         let mut pending = vec![entry];
         while let Some(va) = pending.pop() {
@@ -229,10 +238,7 @@ impl Shape {
                     pending.push(to);
                 }
             };
-            edges(i, &mut next);
-            for t in w.tables.iter().filter(|t| t.site == va) {
-                t.targets.iter().for_each(|&x| next(x));
-            }
+            successors(w, i, &mut next);
         }
         Self { preds, depth }
     }
@@ -400,12 +406,45 @@ fn reach(w: &Walked, from: u64, cap: usize) -> Option<BTreeSet<u64>> {
                 pending.push(to);
             }
         };
-        edges(i, &mut go);
-        for t in w.tables.iter().filter(|t| t.site == va) {
-            t.targets.iter().for_each(|&x| go(x));
-        }
+        successors(w, i, &mut go);
     }
     Some(seen)
+}
+
+/// Calls `edge` with each address an instruction of a walk passes control
+/// to inside its function.
+///
+/// Those are the edges [`edges`] names, and the cases of the jump table
+/// it dispatches through, if the walk resolved one.
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+/// * `i` - One of its instructions.
+/// * `edge` - Called with each address.
+fn successors(w: &Walked, i: &Insn, edge: &mut impl FnMut(u64)) {
+    edges(i, edge);
+    if let Some(t) = w.tables.get(&i.va) {
+        t.targets.iter().for_each(|&x| edge(x));
+    }
+}
+
+/// Returns, for each address of a walk, every instruction of it that
+/// falls, jumps or dispatches there ([`successors`]).
+///
+/// # Arguments
+///
+/// * `w` - The walk.
+fn all_preds(w: &Walked) -> BTreeMap<u64, Vec<u64>> {
+    let mut preds: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    for i in w.seen.values() {
+        successors(w, i, &mut |to| {
+            if w.seen.contains_key(&to) {
+                preds.entry(to).or_default().push(i.va);
+            }
+        });
+    }
+    preds
 }
 
 /// Calls `edge` with each address an instruction passes control to inside
@@ -535,24 +574,16 @@ fn popped(pop: &Insn) -> bool {
 ///
 /// * `w` - The walk.
 fn predecessors(w: &Walked) -> BTreeMap<u64, Option<u64>> {
-    let mut pred = BTreeMap::new();
-    let mut note = |from: u64, to: u64| {
-        if !w.seen.contains_key(&to) {
-            return;
-        }
-        pred.entry(to)
-            .and_modify(|seen| *seen = None)
-            .or_insert(Some(from));
-    };
-    for i in w.seen.values() {
-        edges(i, &mut |to| note(i.va, to));
-    }
-    for t in &w.tables {
-        for &target in &t.targets {
-            note(t.site, target);
-        }
-    }
-    pred
+    all_preds(w)
+        .into_iter()
+        .map(|(to, from)| {
+            let one = match from.as_slice() {
+                [one] => Some(*one),
+                _ => None,
+            };
+            (to, one)
+        })
+        .collect()
 }
 
 /// Tells whether `t` is a straight run that returns without using the

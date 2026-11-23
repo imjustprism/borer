@@ -565,8 +565,8 @@ struct Walked {
     callees: BTreeSet<u64>,
     /// Jump targets it followed.
     followed: BTreeSet<u64>,
-    /// The jump tables it resolved.
-    tables: Vec<Table>,
+    /// The jump tables it resolved, by the address of their dispatch.
+    tables: BTreeMap<u64, Table>,
     /// Whether a path ran into bytes that decode to no instruction.
     bad: bool,
     /// Whether a path leaves the function: a return, a jump through a
@@ -767,7 +767,7 @@ fn walk_until(
                                 w.followed.insert(t);
                                 pending.push((t, ItState::default()));
                             }
-                            w.tables.push(tab);
+                            w.tables.insert(tab.site, tab);
                         }
                         None => w.exits = true,
                     },
@@ -874,7 +874,7 @@ fn walk_gap(
                                 w.followed.insert(t);
                                 pending.push((t, ItState::default()));
                             }
-                            w.tables.push(tab);
+                            w.tables.insert(tab.site, tab);
                         }
                         None => w.exits = true,
                     },
@@ -1153,7 +1153,7 @@ pub(crate) fn start_gap_function(
         added.push((next, func.callees.clone()));
         let pos = analysis.functions.partition_point(|f| f.entry < next);
         analysis.functions.insert(pos, func);
-        for t in &w.tables {
+        for t in w.tables.values() {
             analysis.jump_tables.insert(t.site, t.targets.clone());
         }
         for (target, site, kind) in sites {
@@ -1291,7 +1291,7 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
             targets.extend(i.target().filter(|t| present(*t)));
         }
     }
-    for t in &w.tables {
+    for t in w.tables.values() {
         targets.extend(t.targets.iter().copied().filter(|t| present(*t)));
     }
     let groups = groups(entry, w, &targets);
@@ -1307,7 +1307,6 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
             leaders.insert(i.va);
         }
     }
-    let table_of: BTreeMap<u64, &Table> = w.tables.iter().map(|t| (t.site, t)).collect();
     let mut blocks: Vec<BasicBlock> = Vec::new();
     let mut current: Option<BasicBlock> = None;
     let mut last: Option<&Insn> = None;
@@ -1338,7 +1337,7 @@ fn assemble(entry: u64, w: &Walked) -> (Function, Vec<(u64, u64, RefKind)>) {
                 Some(t) => (BlockTerm::Jmp, vec![t]),
                 None => (
                     BlockTerm::Indirect,
-                    table_of
+                    w.tables
                         .get(&l.va)
                         .map(|t| t.targets.clone())
                         .unwrap_or_default(),
@@ -1599,11 +1598,14 @@ impl Walks<'_> {
     /// * `program` - The image.
     fn settle(&mut self, program: &Program) {
         for _ in 0..SETTLE_ROUNDS {
-            let learned: Vec<u64> = self
+            let ends: BTreeSet<u64> = self
                 .walked
                 .values()
                 .flat_map(|w| w.ends.iter().copied())
                 .filter(|c| !self.noreturn.contains(c))
+                .collect();
+            let learned: Vec<u64> = ends
+                .into_iter()
                 .filter(|c| {
                     self.walked
                         .get(c)
@@ -1676,7 +1678,7 @@ impl Walks<'_> {
                 };
                 i.literal().map(|lit| lit..lit + len)
             })
-            .chain(w.tables.iter().map(|t| t.bytes.clone()))
+            .chain(w.tables.values().map(|t| t.bytes.clone()))
     }
 
     /// Marks covered again what the walks hold, after some were dropped.
@@ -1717,7 +1719,7 @@ fn never_returns(w: &Walked, noreturn: &BTreeSet<u64>) -> bool {
         && w.tails.iter().all(|t| noreturn.contains(t))
         && w.seen.values().all(|i| match i.flow() {
             Flow::Return => false,
-            Flow::Jump => i.target().is_some() || w.tables.iter().any(|t| t.site == i.va),
+            Flow::Jump => i.target().is_some() || w.tables.contains_key(&i.va),
             Flow::Next | Flow::CondJump | Flow::Call | Flow::Invalid => true,
         })
 }
@@ -1809,7 +1811,7 @@ pub(crate) fn discover(program: &Program) -> Analysis {
         for (t, va) in data {
             push_site(&mut analysis.xrefs, t, va, RefKind::Data, Some(*entry));
         }
-        for t in &w.tables {
+        for t in w.tables.values() {
             analysis.jump_tables.insert(t.site, t.targets.clone());
         }
         functions.push(f);

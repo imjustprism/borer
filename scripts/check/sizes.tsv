@@ -1,6 +1,6 @@
 # over budget (fn 100, file 1500 code lines): may shrink, never grow
 crates/borer-engine/examples/fnscore.rs::main#1	310
-crates/borer-engine/src/analysis/a32.rs::assemble#1	152
+crates/borer-engine/src/analysis/a32.rs::assemble#1	151
 crates/borer-engine/src/analysis/a64/discover.rs::walk#1	183
 crates/borer-engine/src/analysis/a64/refs.rs::data#1	132
 crates/borer-engine/src/analysis/a64/refs.rs::writes#1	130

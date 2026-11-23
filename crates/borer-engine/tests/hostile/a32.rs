@@ -13,13 +13,18 @@ const TEXT_VA: u64 = 0x8000;
 /// header.
 const TEXT_AT: usize = 0x60;
 
+/// Seconds an analysis here may take before the test fails; a fixed one
+/// takes a few, the quadratic ones it stands for took hours.
+const BOUND_SECS: u64 = 120;
+
 /// Returns a stripped 32-bit little-endian `EM_ARM` executable holding
-/// `code` as `.text`, entered in Thumb at its first byte.
+/// `code` as `.text`, entered in Thumb at byte `entry` of it.
 ///
 /// # Arguments
 ///
 /// * `code` - The bytes of `.text`.
-fn thumb_image(code: &[u8]) -> Vec<u8> {
+/// * `entry` - The entry's offset into `code`.
+fn thumb_image(code: &[u8], entry: usize) -> Vec<u8> {
     let names = b"\0.text\0.shstrtab\0";
     let names_at = TEXT_AT + code.len();
     let headers_at = (names_at + names.len()).next_multiple_of(4);
@@ -31,7 +36,7 @@ fn thumb_image(code: &[u8]) -> Vec<u8> {
         (16, 2, 2),
         (18, 40, 2),
         (20, 1, 4),
-        (24, TEXT_VA | 1, 4),
+        (24, (TEXT_VA + wide(entry)) | 1, 4),
         (28, 52, 4),
         (32, wide(headers_at), 4),
         (36, 0x0500_0400, 4),
@@ -97,13 +102,94 @@ fn a_chain_of_jumps_past_a_start_stays_bounded() {
     ];
     halves.extend(std::iter::repeat_n(0xe7ff, JUMPS));
     halves.push(0x4770);
+    let (entry, count) = analyze_bounded("chain.elf", &halves, 0);
+    assert!(entry, "the entry is a function");
+    assert!(count <= 2 + 4 * 1024, "{count} functions");
+}
+
+/// Analyzes a Thumb image on a thread of its own and waits at most
+/// [`BOUND_SECS`] for it, so that a quadratic discovery fails the test
+/// instead of hanging it.
+///
+/// # Arguments
+///
+/// * `name` - The file name.
+/// * `halves` - The halfwords of `.text`.
+/// * `entry` - The entry's offset into `.text`, in bytes.
+///
+/// # Returns
+///
+/// Whether the entry is a function, and how many functions were found.
+///
+/// # Panics
+///
+/// When the analysis takes longer than [`BOUND_SECS`].
+fn analyze_bounded(name: &str, halves: &[u16], entry: usize) -> (bool, usize) {
     let code: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
-    let p = Program::from_bytes(PathBuf::from("chain.elf"), thumb_image(&code)).expect("parses");
-    let a = Analysis::compute(&p);
-    assert!(a.function(TEXT_VA).is_some(), "the entry is a function");
-    assert!(
-        a.functions.len() <= 2 + 4 * 1024,
-        "{} functions",
-        a.functions.len()
-    );
+    let p = Program::from_bytes(PathBuf::from(name), thumb_image(&code, entry)).expect("parses");
+    let at = TEXT_VA + u64::try_from(entry).expect("fits");
+    let (send, done) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let a = Analysis::compute(&p);
+        send.send((a.function(at).is_some(), a.functions.len()))
+            .expect("the test waits");
+    });
+    done.recv_timeout(std::time::Duration::from_secs(BOUND_SECS))
+        .expect("the analysis ends within the bound")
+}
+
+/// Returns the two halfwords of a Thumb `b.w` (`link` false) or `bl`
+/// (`link` true) at `from` to `to`, both offsets into `.text`.
+///
+/// # Arguments
+///
+/// * `from` - The instruction's offset.
+/// * `to` - The target's offset.
+/// * `link` - Whether it is a `bl`.
+fn branch(from: usize, to: usize, link: bool) -> [u16; 2] {
+    let wide = |v: usize| i64::try_from(v).expect("fits");
+    let off = wide(to) - wide(from) - 4;
+    let bit = |n: u32| u16::try_from((off >> n) & 1).expect("one bit");
+    let s = bit(24);
+    let j1 = (bit(23) ^ s) ^ 1;
+    let j2 = (bit(22) ^ s) ^ 1;
+    let imm10 = u16::try_from((off >> 12) & 0x3ff).expect("ten bits");
+    let imm11 = u16::try_from((off >> 1) & 0x7ff).expect("eleven bits");
+    let base = if link { 0xd000 } else { 0x9000 };
+    [
+        0xf000 | (s << 10) | imm10,
+        base | (j1 << 13) | (j2 << 11) | imm11,
+    ]
+}
+
+/// A walk dense in jump tables does not look each table up by scanning
+/// them all.
+///
+/// Eighty-seven thousand bounded `tbb` dispatches fill one walk to its cap
+/// behind a jump that a `pop` gives back the frame for; reading the
+/// walk's stack depth and edges scanned every table at every instruction,
+/// some twenty billion steps.
+#[test]
+fn a_walk_dense_in_jump_tables_stays_bounded() {
+    let _serial = serial();
+    /// Dispatch blocks behind the jump.
+    const BLOCKS: usize = 87_000;
+    let mut halves: Vec<u16> = vec![0x4770]; // ASM: bx lr
+    for _ in 0..BLOCKS {
+        halves.extend([
+            0x2801, // ASM: cmp r0, #1
+            0xd802, // ASM: bhi.n (the next block)
+            0xe8df, 0xf000, // ASM: tbb [pc, r0]
+            0x0101, // ASM: .byte 1, 1
+        ]);
+    }
+    halves.push(0x4770);
+    let entry = 2 * halves.len();
+    halves.extend([
+        0xb410, // ASM: push {r4}
+        0xbc10, // ASM: pop {r4}
+    ]);
+    halves.extend(branch(entry + 4, 2, false));
+    let (found, _) = analyze_bounded("tables.elf", &halves, entry);
+    assert!(found, "the entry is a function");
 }
