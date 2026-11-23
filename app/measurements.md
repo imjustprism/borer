@@ -164,6 +164,28 @@ The bars are `BARS` in `borer-app/src/measure/actions.rs`:
 | back | 16 ms | reported | reported |
 | graph pan, zoom: frame draw p99 | 8.3 ms | | |
 
+Hover peeks, 2026-11-23, release build of add/app-peek at a141d295..0a03b49e (on
+d6da5963), parked window (`--park --measure --phase actions`), started after a minute
+with no cargo or rustc process and none seen in a sample every 3 s until it ended. Ack
+p95/p99 and settle p95/p99 in ms; `unqualified` targets make no call the peek times,
+`memo` cold runs found the callee's view built already, neither timed:
+
+| Bench | Action | Timed / unqualified / memo | Ack p95/p99 | Settle p95/p99 |
+| --- | --- | --- | --- | --- |
+| notepad | peek_cold | 60 / 60 / 0 | 6.7/6.9 | 22.2/30.0 |
+| notepad | peek_import | 42 / 78 / 0 | not measured (42 timed of 120) | not measured |
+| notepad | peek_warm | 104 / 16 / 0 | 5.6/6.1 | 7.9/9.7 |
+| large | peek_cold | 1 / 119 / 0 | not measured (1 timed of 120) | not measured |
+| large | peek_import | 0 / 120 / 0 | not measured (0 timed of 120) | not measured |
+| large | peek_warm | 120 / 0 / 0 | 5.8/6.1 | 9.0/9.5 |
+
+Every judged bar held (`misses=0 unmeasured=3`), UI thread engine calls 0. On 60 and 104
+timed runs the ack p99 is the slowest run. Of the import peeks, 42 notepad runs timed
+6.2/6.7 ack and 10.7/15.0 settle, too few to judge. The large DLL's first functions by
+address call no import and, after the first, only callees an earlier run built, so its
+cold and import peeks are not measured. The warm settle that missed at 16.7 ms on a busy
+machine with an import token as its target holds at 7.9 ms.
+
 First run, 2026-11-18, release build of add/app-check-gutter (the tip that adds this
 line), Ryzen 7 9800X3D, another agent's cargo build running on the machine throughout, so
 the times are upper bounds. Ack and settle p95/p99 in ms:
