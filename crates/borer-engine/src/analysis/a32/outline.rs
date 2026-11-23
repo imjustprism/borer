@@ -17,6 +17,8 @@ use crate::program::Program;
 /// Most targets [`shared_tails`] weighs in one round of [`outlines`]; the
 /// rest wait for the next round.
 const SHARED_MAX: usize = 1 << 10;
+/// Most walks holding one target that [`shared_tails`] weighs it for.
+const HOLDERS_MAX: usize = 64;
 /// Most instructions of a target's code [`tail_jump`] follows.
 const BODY_MAX: usize = 1 << 14;
 
@@ -124,7 +126,9 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
 /// function jumps to must lie away from it, as [`tail_jump`] says.
 ///
 /// A walk whose entry another holder runs through is that holder's own
-/// code, not another function reaching `t`, and is not counted.
+/// code, not another function reaching `t`, and is not counted. A target
+/// more than [`HOLDERS_MAX`] walks hold is not weighed: it stays a block,
+/// the safe answer, rather than cost every holder against every other.
 ///
 /// Each walk's [`Shape`] is built once, and the work is charged to the
 /// walks' fuel: when it runs out, or the cancel flag in force is raised,
@@ -143,22 +147,32 @@ fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<
         .filter(|&t| super::guess::ends_before(program, walks, t))
         .collect();
     let mut holders: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+    let mut spent = 0u64;
     for (&entry, w) in &walks.walked {
+        if spent >= walks.fuel || crate::cancel::Cancel::raised() {
+            walks.incomplete = true;
+            return Vec::new();
+        }
         if let (Some((&lo, _)), Some((&hi, _))) =
             (w.seen.first_key_value(), w.seen.last_key_value())
         {
-            for &t in cands.range(lo..=hi).filter(|t| w.seen.contains_key(t)) {
-                holders.entry(t).or_default().push(entry);
+            for &t in cands.range(lo..=hi) {
+                spent = spent.saturating_add(1);
+                if w.seen.contains_key(&t) {
+                    holders.entry(t).or_default().push(entry);
+                }
             }
         }
     }
     let mut shapes: BTreeMap<u64, Shape> = BTreeMap::new();
-    let mut spent = 0u64;
     let mut found = Vec::new();
     for (t, mut held) in holders {
         if spent >= walks.fuel || crate::cancel::Cancel::raised() {
             walks.incomplete = true;
             break;
+        }
+        if held.len() > HOLDERS_MAX {
+            continue;
         }
         let pairs =
             crate::num::from_usize(held.len()).saturating_mul(crate::num::from_usize(held.len()));

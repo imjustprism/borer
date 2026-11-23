@@ -162,6 +162,39 @@ fn branch(from: usize, to: usize, link: bool) -> [u16; 2] {
     ]
 }
 
+/// A hundred thousand functions that each tail-call one body do not make
+/// weighing that body quadratic.
+///
+/// The body is held by every caller's walk, and telling which of them run
+/// through another's entry compared every holder with every other: ten
+/// billion lookups for one target, between two checks of the fuel. A body
+/// held by more walks than a cap allows is not weighed at all.
+#[test]
+fn many_walks_holding_one_tail_stay_bounded() {
+    let _serial = serial();
+    /// Functions tail-calling the body.
+    const CALLERS: usize = 100_000;
+    let mut halves: Vec<u16> = vec![
+        0x4770, // ASM: bx lr
+        0xb000, // ASM: add sp, #0
+        0x4770, // ASM: bx lr
+        0xb508, // ASM: push {r3, lr}
+    ];
+    let entry = 6;
+    let first = entry + 2 + 4 * (CALLERS + 1) + 2;
+    halves.extend(branch(entry + 2, 0, true));
+    for k in 0..CALLERS {
+        halves.extend(branch(entry + 6 + 4 * k, first + 4 * k, true));
+    }
+    halves.push(0xbd08);
+    for k in 0..CALLERS {
+        halves.extend(branch(first + 4 * k, 2, false));
+    }
+    let (found, count) = analyze_bounded("holders.elf", &halves, entry);
+    assert!(found, "the entry is a function");
+    assert!(count >= CALLERS, "{count} functions");
+}
+
 /// A walk dense in jump tables does not look each table up by scanning
 /// them all.
 ///
