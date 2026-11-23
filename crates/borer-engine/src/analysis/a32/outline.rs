@@ -62,11 +62,21 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
         let size = crate::num::from_usize(w.seen.len());
         let mut pred = None;
         let mut shape = None;
+        let mut apart: Option<Apart> = None;
         for &t in &w.followed {
             if t == entry || walks.starts.contains(&t) {
                 continue;
             }
-            let stepped = t > entry && steps_over(&walks.starts, w, entry, t);
+            if t > entry && apart.is_none() {
+                let Some(built) = Apart::of(&walks.starts, w, walks.fuel.saturating_sub(spent))
+                else {
+                    stopped = true;
+                    break;
+                };
+                spent = spent.saturating_add(built.cost);
+                apart = Some(built);
+            }
+            let stepped = t > entry && apart.as_ref().is_some_and(|a| a.steps_over(entry, t));
             if !stepped && t > entry {
                 continue;
             }
@@ -78,7 +88,7 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
                 if shape.is_none() {
                     *spent = spent.saturating_add(size);
                 }
-                let shape = shape.get_or_insert_with(|| Shape::of(w, entry));
+                let shape = shape.get_or_insert_with(|| Shape::of(w, entry, Apart::default()));
                 pred.get(&t)
                     .copied()
                     .flatten()
@@ -96,6 +106,9 @@ pub(super) fn outlines(program: &Program, walks: &mut Walks<'_>) -> bool {
             } else {
                 shared.insert(t);
             }
+        }
+        if stopped {
+            break;
         }
     }
     walks.fuel = walks.fuel.saturating_sub(spent);
@@ -186,16 +199,31 @@ fn shared_tails(program: &Program, walks: &mut Walks<'_>, cands: &[u64]) -> Vec<
             })
             .collect();
         held.retain(|e| !inner.contains(e));
+        for &entry in &held {
+            let Some(w) = walks
+                .walked
+                .get(&entry)
+                .filter(|_| !shapes.contains_key(&entry))
+            else {
+                continue;
+            };
+            let budget = walks.fuel.saturating_sub(spent);
+            let Some(apart) = Apart::of(&walks.starts, w, budget) else {
+                walks.incomplete = true;
+                walks.fuel = 0;
+                return found;
+            };
+            spent = spent
+                .saturating_add(apart.cost)
+                .saturating_add(crate::num::from_usize(w.seen.len()));
+            shapes.insert(entry, Shape::of(w, entry, apart));
+        }
         let alone = held.len() == 1;
         let tail = held.iter().all(|entry| {
-            let Some(w) = walks.walked.get(entry) else {
+            let (Some(w), Some(shape)) = (walks.walked.get(entry), shapes.get(entry)) else {
                 return false;
             };
-            let shape = shapes.entry(*entry).or_insert_with(|| {
-                spent = spent.saturating_add(crate::num::from_usize(w.seen.len()));
-                Shape::of(w, *entry)
-            });
-            tail_jump(&walks.starts, *entry, w, shape, t, alone, &mut spent)
+            tail_jump(*entry, w, shape, t, alone, &mut spent)
         });
         if tail {
             found.push(t);
@@ -217,6 +245,8 @@ struct Shape {
     /// only on the path that leaves, so the path past it keeps the depth;
     /// any other conditional move of `sp` leaves the depth unknown.
     depth: BTreeMap<u64, Option<i64>>,
+    /// The starts the walk does not run through ([`Apart`]).
+    apart: Apart,
 }
 
 impl Shape {
@@ -226,7 +256,8 @@ impl Shape {
     ///
     /// * `w` - The walk.
     /// * `entry` - Its entry.
-    fn of(w: &Walked, entry: u64) -> Self {
+    /// * `apart` - The starts it does not run through.
+    fn of(w: &Walked, entry: u64, apart: Apart) -> Self {
         let preds = all_preds(w);
         let mut depth: BTreeMap<u64, Option<i64>> = BTreeMap::from([(entry, Some(0))]);
         let mut pending = vec![entry];
@@ -254,7 +285,11 @@ impl Shape {
             };
             successors(w, i, &mut next);
         }
-        Self { preds, depth }
+        Self {
+            preds,
+            depth,
+            apart,
+        }
     }
 }
 
@@ -346,23 +381,14 @@ fn sp_step(i: &Insn) -> Option<i64> {
 ///
 /// # Arguments
 ///
-/// * `starts` - The known function starts.
 /// * `entry` - The walk's entry.
 /// * `w` - The walk.
 /// * `shape` - Its shape.
 /// * `t` - The jump target.
 /// * `alone` - Whether no other walk holds `t`.
 /// * `spent` - The work done, increased by the instructions followed.
-fn tail_jump(
-    starts: &BTreeSet<u64>,
-    entry: u64,
-    w: &Walked,
-    shape: &Shape,
-    t: u64,
-    alone: bool,
-    spent: &mut u64,
-) -> bool {
-    let apart = t < entry || (t > entry && steps_over(starts, w, entry, t));
+fn tail_jump(entry: u64, w: &Walked, shape: &Shape, t: u64, alone: bool, spent: &mut u64) -> bool {
+    let apart = t < entry || (t > entry && shape.apart.steps_over(entry, t));
     if t == entry || (alone && !apart) {
         return false;
     }
@@ -394,20 +420,64 @@ fn tail_jump(
         })
 }
 
-/// Tells whether a function start the walk does not run through lies
-/// between its entry and `t`, a target past the entry: a start the
-/// jumper's own code falls into is no other function stepped over.
-///
-/// # Arguments
-///
-/// * `starts` - The known function starts.
-/// * `w` - The walk.
-/// * `entry` - Its entry.
-/// * `t` - The target, past `entry`.
-fn steps_over(starts: &BTreeSet<u64>, w: &Walked, entry: u64, t: u64) -> bool {
-    starts
-        .range(entry.saturating_add(1)..t)
-        .any(|s| !w.seen.contains_key(s))
+/// The function starts within a walk's span the walk does not run
+/// through: a start the jumper's own code falls into is no other function
+/// it steps over.
+#[derive(Default)]
+struct Apart {
+    /// Those starts, from the walk's lowest address to its highest.
+    starts: BTreeSet<u64>,
+    /// The first start past the walk's highest address: apart too.
+    past: Option<u64>,
+    /// The starts read to find them: what building this cost the fuel.
+    cost: u64,
+}
+
+impl Apart {
+    /// Finds the starts within a walk's span it does not run through.
+    ///
+    /// # Arguments
+    ///
+    /// * `starts` - The known function starts.
+    /// * `w` - The walk.
+    /// * `budget` - Most starts read.
+    ///
+    /// # Returns
+    ///
+    /// The starts, or `None` when the span holds more than `budget`.
+    fn of(starts: &BTreeSet<u64>, w: &Walked, budget: u64) -> Option<Self> {
+        let (Some((&lo, _)), Some((&hi, _))) = (w.seen.first_key_value(), w.seen.last_key_value())
+        else {
+            return Some(Self::default());
+        };
+        let mut apart = Self {
+            starts: BTreeSet::new(),
+            past: starts.range(hi.saturating_add(1)..).next().copied(),
+            cost: 0,
+        };
+        for &s in starts.range(lo..=hi) {
+            apart.cost = apart.cost.saturating_add(1);
+            if apart.cost > budget {
+                return None;
+            }
+            if !w.seen.contains_key(&s) {
+                apart.starts.insert(s);
+            }
+        }
+        Some(apart)
+    }
+
+    /// Tells whether a start the walk does not run through lies between
+    /// its entry and `t`, a target past the entry.
+    ///
+    /// # Arguments
+    ///
+    /// * `entry` - The walk's entry.
+    /// * `t` - The target, past `entry`.
+    fn steps_over(&self, entry: u64, t: u64) -> bool {
+        let from = entry.saturating_add(1);
+        self.starts.range(from..t).next().is_some() || self.past.is_some_and(|p| p < t)
+    }
 }
 
 /// Returns the addresses of a walk reached from `from`, `from` included,

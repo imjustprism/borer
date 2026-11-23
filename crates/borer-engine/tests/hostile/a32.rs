@@ -226,3 +226,31 @@ fn a_walk_dense_in_jump_tables_stays_bounded() {
     let (found, _) = analyze_bounded("tables.elf", &halves, entry);
     assert!(found, "the entry is a function");
 }
+
+/// A sled of calls into the jumper's own code does not make telling
+/// whether a jump steps over a start quadratic.
+///
+/// Fifty thousand units each call the `pop {pc}` the walk then falls into
+/// and branch on to the next unit: every call target is a start the walk
+/// runs through, and every branch target a candidate tail call past them.
+/// Each candidate asked about every start between the entry and itself,
+/// over a billion steps before the fuel was charged.
+#[test]
+fn a_sled_of_calls_into_the_jumper_stays_bounded() {
+    let _serial = serial();
+    /// Units in the sled.
+    const UNITS: usize = 50_000;
+    let mut halves: Vec<u16> = Vec::with_capacity(5 * UNITS + 1);
+    for k in 0..UNITS {
+        let at = 10 * k;
+        halves.extend(branch(at, at + 6, true));
+        halves.extend([
+            0xbf08, // ASM: it eq
+            0xbd00, // ASM: popeq {pc}
+            0xd0ff, // ASM: beq (the next unit)
+        ]);
+    }
+    halves.push(0x4770);
+    let (found, _) = analyze_bounded("sled.elf", &halves, 0);
+    assert!(found, "the entry is a function");
+}
