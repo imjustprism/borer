@@ -38,6 +38,8 @@ mod a32;
 mod asserts;
 #[path = "hostile/classes.rs"]
 mod classes;
+#[path = "hostile/discover.rs"]
+mod discover;
 #[path = "hostile/heap.rs"]
 mod heap;
 #[path = "hostile/indirect.rs"]

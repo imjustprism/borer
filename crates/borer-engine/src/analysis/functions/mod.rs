@@ -623,17 +623,15 @@ pub(crate) fn discover(program: &Program, bitness: u32, lanes: usize) -> Analysi
     incomplete |= st.run_code_seeds();
     phases.mark("discover reloc+code seeds");
 
-    let declared: u64 = program
+    let declared = program
         .function_ranges
         .iter()
-        .map(|r| r.1.saturating_sub(r.0))
-        .sum();
-    let code: u64 = program
+        .fold(0u64, |n, r| n.saturating_add(r.1.saturating_sub(r.0)));
+    let code = program
         .sections
         .iter()
         .filter(|s| s.executable)
-        .map(|s| s.file_size)
-        .sum();
+        .fold(0u64, |n, s| n.saturating_add(s.file_size));
     let guess_gaps = declared.saturating_mul(4) < code;
     for round in 0..GAP_ROUNDS_MAX {
         let (pad_seeds, gap_seeds) = st.gap_seeds(guess_gaps);
