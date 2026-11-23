@@ -1,7 +1,7 @@
 //! Tests of the tree, its printer, its builder and its checks.
 
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A structured body with every statement form the structurer writes.
 const BODY: &str = "rax = 0;
@@ -410,4 +410,77 @@ return x;
     );
     assert_eq!(body.stmts[2].prov, body.stmts[0].prov, "{:?}", body.stmts);
     assert_ne!(body.stmts[2].prov, body.stmts[3].prov);
+}
+
+/// A value tail several paths share is written once where that leaves
+/// no jump, and copied where writing it once would leave one.
+///
+/// With [`Tails::Once`], a test nested in an arm that jumps past
+/// `a2 = h();` to `if (a3 == -1) a3 = k(a2); return a2;` reads as an
+/// `else` before one tail; copied, the tail stands in the arm too. Where
+/// jumps leave a loop and a nested arm for the tail, writing it once
+/// would keep a `goto`, so the copies stay; a `return;` tail is no
+/// value tail and is copied.
+#[test]
+fn a_value_tail_is_written_once_where_no_jump_is_left() {
+    let run = |text: &str, tails| fold(text, &[], Some(&BTreeSet::new()), tails);
+    let shared = "if (a1 != 0) {
+  a2 = f();
+  if (a2 != 0) {
+    if (g(a2) != 0) goto L_10;
+  }
+}
+a2 = h();
+L_10:
+if (a3 == -1) {
+  a3 = k(a2);
+}
+return a2;
+";
+    let once = run(shared, Tails::Once);
+    assert_eq!(once.matches("a3 = k(a2);").count(), 1, "{once}");
+    assert_eq!(once.matches("return a2;").count(), 1, "{once}");
+    assert!(
+        once.contains("} else {") && !once.contains("goto"),
+        "{once}"
+    );
+    let copied = run(shared, Tails::Copied);
+    assert_eq!(copied.matches("return a2;").count(), 2, "{copied}");
+    let looped = "while (a1 != 0) {
+  if (f(a1) == 0) goto L_10;
+  a1 = g(a1);
+}
+if (a3 != 0) {
+  a2 = 2;
+  if (a5 != 0) goto L_10;
+  h();
+}
+a2 = 3;
+L_10:
+free(a4);
+return a2;
+";
+    let kept = run(looped, Tails::Once);
+    assert_eq!(kept, run(looped, Tails::Copied));
+    assert_eq!(kept.matches("free(a4);").count(), 3, "{kept}");
+    let void = shared.replace("return a2;", "return;");
+    let kept = run(&void, Tails::Once);
+    assert_eq!(kept, run(&void, Tails::Copied));
+    assert_eq!(kept.matches("a3 = k(a2);").count(), 2, "{kept}");
+}
+
+/// An `else` arm left running nothing goes, an `else if`'s included.
+///
+/// The arm's one jump goes where falling out of the `if` goes anyway, so
+/// once the jump is dropped the arm is empty and is dropped with it.
+#[test]
+fn an_arm_left_empty_goes() {
+    let run = |text: &str| fold(text, &[], Some(&BTreeSet::new()), Tails::Copied);
+    let lone = "if (a1 != 0) {\n  f();\n} else {\n  goto L_10;\n}\nL_10:\nreturn a2;\n";
+    assert_eq!(run(lone), "if (a1 != 0) {\n  f();\n}\nreturn a2;\n");
+    let chain = "if (a1 != 0) {\n  f();\n} else if (a2 != 0) {\n  g();\n} else {\n  goto L_10;\n}\nL_10:\nreturn a2;\n";
+    assert_eq!(
+        run(chain),
+        "if (a1 != 0) {\n  f();\n} else if (a2 != 0) {\n  g();\n}\nreturn a2;\n"
+    );
 }

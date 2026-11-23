@@ -1715,15 +1715,9 @@ fn decompile_in<L: Lifter>(
     let ends = st.ends(&ctx, cleanup, skip);
     let spelled = ctx.spelled.take();
     let body = Traced::seeded(body, spelled.as_ref());
-    let body = body.map(|b| cir::fold(b, &plan.regions, ends.as_ref()));
-    let body = body.map_if(
-        skip.runs(Pass::DropReturnedValues)
-            && f.returns_value == Some(false)
-            && f.signature.is_none()
-            && ctx.stated.is_none()
-            && !ctx.ret_sse,
-        drop_returned_values,
-    );
+    let (drops, tails) = value_tails(f, &ctx, skip, stated_returns);
+    let body = body.map(|b| cir::fold(b, &plan.regions, ends.as_ref(), tails));
+    let body = body.map_if(drops, drop_returned_values);
     let returns_nothing = match stated_returns {
         Some(r) => r == lift::Returns::Nothing,
         None => f.signature.as_ref().map_or_else(

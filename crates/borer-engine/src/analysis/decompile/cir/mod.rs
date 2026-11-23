@@ -50,6 +50,14 @@ pub(super) use check::{Holds, Violation, check};
 /// * `regions` - The guarded regions to wrap.
 /// * `ends` - The blocks that end in a call that never returns
 ///   ([`gotos::fold_jumps`]), or `None` to leave the jumps as written.
+/// * `tails` - What becomes of a short tail ending in `return <expr>`:
+///   [`Tails::Copied`] copies it to every jump that reaches it;
+///   [`Tails::Once`] writes it once wherever that leaves no more jumps
+///   than copying it: where the first fold copied one, a second folds
+///   with the tail written once, then copies it to the jumps the
+///   structure could not absorb, and is kept unless it holds more `goto`
+///   statements.
+///   Both spellings run the same statements on the same paths.
 ///
 /// # Returns
 ///
@@ -58,13 +66,23 @@ pub(super) fn fold(
     text: &str,
     regions: &[Region],
     ends: Option<&std::collections::BTreeSet<u64>>,
+    tails: Tails,
 ) -> String {
     let (mut tree, _) = wrap(build(text), regions);
-    if let Some(ends) = ends {
-        gotos::fold_jumps(&mut tree, ends);
+    if let Some(ends) = ends
+        && gotos::fold_jumps(&mut tree, ends, Tails::Copied)
+        && tails == Tails::Once
+    {
+        let (mut once, _) = wrap(build(text), regions);
+        gotos::fold_jumps(&mut once, ends, Tails::Once);
+        gotos::fold_jumps(&mut once, ends, Tails::Copied);
+        if gotos::goto_count(&once) <= gotos::goto_count(&tree) {
+            tree = once;
+        }
     }
     print(&tree)
 }
+pub(super) use gotos::Tails;
 pub(super) use print::{print, print_decls, print_items};
 pub(super) use wrap::{Region, RegionHandler, wrap};
 

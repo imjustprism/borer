@@ -120,6 +120,63 @@ pub fn effects_line(body: &str) -> Option<String> {
     (!parts.is_empty()).then(|| parts.join("; "))
 }
 
+/// Tells whether a function's returned values drop
+/// ([`drop_returned_values`]), and what the fold does with a short tail
+/// ending in `return <expr>` ([`cir::Tails`]).
+///
+/// A function that hands back a value writes such a tail once where that
+/// leaves no more jumps than copying it: its value tail is the source's
+/// shared exit. A function that hands back nothing keeps today's copies,
+/// whose `return x;` only drops later.
+///
+/// # Arguments
+///
+/// * `f` - The function.
+/// * `ctx` - The decompilation's context: its stated prototype and
+///   whether it returns in an SSE register.
+/// * `skip` - The passes left out.
+/// * `stated` - What the stated prototype returns, if one is stated.
+///
+/// # Returns
+///
+/// Whether the returned values drop, and the fold's choice for value
+/// tails.
+pub(super) fn value_tails(
+    f: &Function,
+    ctx: &Ctx<'_>,
+    skip: Passes,
+    stated: Option<lift::Returns>,
+) -> (bool, cir::Tails) {
+    let drops = skip.runs(Pass::DropReturnedValues)
+        && f.returns_value == Some(false)
+        && f.signature.is_none()
+        && ctx.stated.is_none()
+        && !ctx.ret_sse;
+    let ret = f.signature.as_ref().map(|s| s.ret.as_str());
+    (drops, tails_for(drops, stated, ret))
+}
+
+/// Returns what the fold does with a value tail ([`value_tails`]):
+/// written once only when the function hands back a value.
+///
+/// # Arguments
+///
+/// * `drops` - Whether the function's returned values drop.
+/// * `stated` - What the stated prototype returns, if one is stated.
+/// * `ret` - The return type its recovered signature spells, if any.
+fn tails_for(drops: bool, stated: Option<lift::Returns>, ret: Option<&str>) -> cir::Tails {
+    let valued = !drops
+        && stated.map_or_else(
+            || ret.is_none_or(|r| r != "void"),
+            |r| r != lift::Returns::Nothing,
+        );
+    if valued {
+        cir::Tails::Once
+    } else {
+        cir::Tails::Copied
+    }
+}
+
 /// Drops the value from a function's returns when no caller reads it.
 ///
 /// Discovery records a verdict per function: whether any call site uses the
@@ -659,7 +716,10 @@ pub(super) fn flatten_early_exits(lines: &mut Vec<String>) -> bool {
 ///
 /// The cleaned text.
 pub fn cleanup(body: &str) -> String {
-    cleanup_text(&cir::fold(body, &[], Some(&BTreeSet::new())), None)
+    cleanup_text(
+        &cir::fold(body, &[], Some(&BTreeSet::new()), cir::Tails::Copied),
+        None,
+    )
 }
 
 /// The passes behind [`cleanup`], run to a fixpoint or to the pass budget
@@ -772,7 +832,12 @@ fn cleanup_settled(lines: &mut impl Lines, live_out: Option<&str>, skip: Passes)
     let mut settle = cleanup_passes(lines, fuel, live_out, skip);
     let left = fuel.saturating_sub(settle.passes);
     if skip.runs(Pass::FoldJumps) && left > 0 && jumps_back(lines.lines()) {
-        let folded = cir::fold(&rejoin(lines.lines(), "\n"), &[], Some(&BTreeSet::new()));
+        let folded = cir::fold(
+            &rejoin(lines.lines(), "\n"),
+            &[],
+            Some(&BTreeSet::new()),
+            cir::Tails::Copied,
+        );
         *lines.lines() = folded.lines().map(str::to_owned).collect();
         lines.rewrote();
         let again = cleanup_passes(lines, left, live_out, skip);
@@ -1512,5 +1577,33 @@ mod refold_tests {
         assert!(out.contains("\"goto L_1;\""), "{out}");
         assert!(!out.contains("L_1:"), "{out}");
         assert!(!out.trim_end().ends_with("return;"), "{out}");
+    }
+}
+
+#[cfg(test)]
+mod tails_tests {
+    use super::{cir::Tails, lift::Returns, tails_for};
+
+    /// Only a function that hands back a value writes its value tail once;
+    /// one whose values drop, whose signature says `void` or whose stated
+    /// prototype returns nothing keeps today's copies.
+    #[test]
+    #[expect(
+        clippy::missing_panics_doc,
+        reason = "assertions are the point of a test"
+    )]
+    fn only_a_function_that_hands_back_a_value_writes_its_value_tail_once() {
+        assert_eq!(tails_for(false, None, None), Tails::Once);
+        assert_eq!(tails_for(false, None, Some("int")), Tails::Once);
+        assert_eq!(
+            tails_for(false, Some(Returns::Int(32)), Some("void")),
+            Tails::Once
+        );
+        assert_eq!(tails_for(true, None, None), Tails::Copied);
+        assert_eq!(tails_for(false, None, Some("void")), Tails::Copied);
+        assert_eq!(
+            tails_for(false, Some(Returns::Nothing), Some("int")),
+            Tails::Copied
+        );
     }
 }

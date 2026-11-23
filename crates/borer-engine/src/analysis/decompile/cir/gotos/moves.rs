@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use super::super::wrap::{each, jumps, lists, weighs};
 use super::super::{ArmBody, Label, Stmt, StmtKind};
 use super::{
-    Facts, Kind, TAIL_MAX, ends, idle, labelled, larger, loose, stops, target, walk, word,
+    Facts, Kind, TAIL_MAX, Tails, ends, idle, labelled, larger, loose, stops, target, walk, word,
 };
 
 /// The frames around a place: each one's id and kind, innermost last.
@@ -127,7 +127,8 @@ fn same_guards(a: &[(usize, Kind)], b: &[(usize, Kind)]) -> bool {
 /// its end, moves to that jump: `goto L;` becomes the block, `if (c) goto
 /// L;` an `if` around it. A block that returns (or ends in a call that
 /// never does) and holds at most [`TAIL_MAX`] statements is copied to every
-/// jump; the original stays for whatever falls into it. Neither crosses the edge of a guarded region, and a block
+/// jump, unless it ends in `return <expr>` and `copy` says such a tail is
+/// written once; the original stays for whatever falls into it. Neither crosses the edge of a guarded region, and a block
 /// that breaks or continues at its own level moves only within its loop.
 ///
 /// The blocks that may move all move in one call, the hundreds of arms of
@@ -140,12 +141,19 @@ fn same_guards(a: &[(usize, Kind)], b: &[(usize, Kind)]) -> bool {
 ///
 /// * `list` - The statements, rewritten in place.
 /// * `f` - The facts.
-/// * `copy` - Whether tails are copied; else blocks only move.
+/// * `copy` - Whether tails are copied, and a tail ending in `return
+///   <expr>` among them ([`Tails`]); with `None` blocks only move.
+/// * `valued` - Set when a tail ending in `return <expr>` was copied.
 ///
 /// # Returns
 ///
 /// Whether a block moved or was copied.
-pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool {
+pub(super) fn relocate(
+    list: &mut Vec<Stmt>,
+    f: &Facts<'_>,
+    copy: Option<Tails>,
+    valued: &mut bool,
+) -> bool {
     let (spots, sites) = survey(list, f);
     let mut moved = BTreeSet::new();
     let mut held = BTreeSet::new();
@@ -160,7 +168,7 @@ pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool 
         if moves && spot.loose && at.iter().any(|s| s != &spot.frames) {
             continue;
         }
-        if !(moves || copy && spot.tail) {
+        if !(moves || copy.is_some() && spot.tail) {
             continue;
         }
         let tangled = || held.contains(l) || !spot.jumps.is_disjoint(&moved);
@@ -182,11 +190,19 @@ pub(super) fn relocate(list: &mut Vec<Stmt>, f: &Facts<'_>, copy: bool) -> bool 
             held.extend(spot.jumps.iter().copied());
             continue;
         }
+        let value = block
+            .iter()
+            .rfind(|x| !idle(x))
+            .is_some_and(|x| matches!(x.kind, StmtKind::Return(Some(_))));
+        if value && copy == Some(Tails::Once) {
+            continue;
+        }
         let mut copied = false;
         while place(list, *l, &block) {
             copied = true;
         }
         if copied {
+            *valued |= value;
             return true;
         }
     }

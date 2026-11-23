@@ -66,7 +66,18 @@ const RUN_MAX: usize = 400;
 /// * `body` - The structured body, rewritten in place.
 /// * `ends` - The start addresses of the blocks that end in a call the
 ///   binary never returns from.
-pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSet<u64>) {
+/// * `tails` - Whether a tail ending in `return <expr>` is copied to every
+///   jump that reaches it or written once.
+///
+/// # Returns
+///
+/// Whether such a tail was copied.
+pub(in crate::analysis::decompile) fn fold_jumps(
+    body: &mut Body,
+    ends: &BTreeSet<u64>,
+    tails: Tails,
+) -> bool {
+    let mut valued = false;
     for _ in 0..ROUNDS {
         let mut refs = BTreeMap::new();
         let mut notes = Vec::new();
@@ -98,9 +109,9 @@ pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSe
         let changed = walk(stmts, &mut |list, cx| local(list, cx, &facts))
             || walk(stmts, &mut |list, _| drop_labels(list, &facts.refs))
             || thread(stmts)
-            || relocate(stmts, &facts, false)
+            || relocate(stmts, &facts, None, &mut valued)
             || walk(stmts, &mut |list, cx| sinks(list, cx, &facts, false))
-            || relocate(stmts, &facts, true)
+            || relocate(stmts, &facts, Some(tails), &mut valued)
             || walk(stmts, &mut |list, cx| sinks(list, cx, &facts, true))
             || walk(stmts, &mut |list, cx| lifts(list, cx, &facts))
             || walk(stmts, &mut |list, _| leaves(list))
@@ -111,6 +122,26 @@ pub(in crate::analysis::decompile) fn fold_jumps(body: &mut Body, ends: &BTreeSe
             break;
         }
     }
+    valued
+}
+
+/// What the fold does with a short tail that ends in `return <expr>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::analysis::decompile) enum Tails {
+    /// Copies it to every jump that reaches it, as any short tail that
+    /// returns.
+    Copied,
+    /// Leaves it written once, reached by the jumps.
+    Once,
+}
+
+/// Returns how many `goto` statements a body holds, guarded ones included.
+///
+/// # Arguments
+///
+/// * `body` - The body.
+pub(in crate::analysis::decompile) fn goto_count(body: &Body) -> usize {
+    count(&body.stmts, &|s| matches!(s.kind, StmtKind::Goto(_)))
 }
 
 /// What the rules read besides the statements.
@@ -684,8 +715,40 @@ fn has_effect(e: &Expr) -> bool {
 fn local(list: &mut Vec<Stmt>, cx: &Cx, f: &Facts<'_>) -> bool {
     let mut changed = guards(list) | ladders(list) | rejoins(list) | exits(list, cx);
     changed |= falls(list, cx);
-    changed |= dead(list, f) | returns(list);
+    changed |= dead(list, f) | returns(list) | bare_elses(list);
     changed || skips(list, cx, f) || flattens(list, f)
+}
+
+/// Drops each `else` arm that runs nothing, an `else if`'s included.
+///
+/// Falling out of an empty arm goes on after the `if` as the missing arm
+/// does, so the arm only adds lines. A jump the arm held, dropped once
+/// where it went was where control goes anyway, leaves one.
+///
+/// # Arguments
+///
+/// * `list` - The statements, rewritten in place.
+///
+/// # Returns
+///
+/// Whether an arm went.
+fn bare_elses(list: &mut [Stmt]) -> bool {
+    let mut changed = false;
+    for s in list {
+        let mut cur = s;
+        while let StmtKind::If { other, .. } = &mut cur.kind {
+            match other {
+                Some(Else::Block(b)) if b.iter().all(idle) => {
+                    *other = None;
+                    changed = true;
+                    break;
+                }
+                Some(Else::If(next)) => cur = next,
+                Some(Else::Block(_)) | None => break,
+            }
+        }
+    }
+    changed
 }
 
 /// Writes the `break`s of a loop that a lone `return` follows as that
@@ -1831,8 +1894,19 @@ mod tests {
     ///
     /// * `text` - The structurer's text.
     fn folded(text: &str) -> String {
+        folded_past(text, &BTreeSet::new())
+    }
+
+    /// Folds a body's text, knowing which blocks end in a call that never
+    /// returns, and prints it back.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The structurer's text.
+    /// * `ends` - The start addresses of those blocks.
+    fn folded_past(text: &str, ends: &BTreeSet<u64>) -> String {
         let mut body = build(text);
-        super::fold_jumps(&mut body, &BTreeSet::new());
+        super::fold_jumps(&mut body, ends, super::Tails::Copied);
         print(&body)
     }
 
@@ -2055,11 +2129,7 @@ g();
 "
             )
         };
-        let run = |text: &str, ends: &BTreeSet<u64>| {
-            let mut body = build(text);
-            super::fold_jumps(&mut body, ends);
-            print(&body)
-        };
+        let run = folded_past;
         let ends: BTreeSet<u64> = [0x10].into_iter().collect();
         assert!(!run(&shape("abort"), &ends).contains("goto"));
         assert!(run(&shape("abort"), &BTreeSet::new()).contains("goto"));
@@ -2090,11 +2160,7 @@ L_10:
 {tail}"
             )
         };
-        let run = |text: &str, ends: &BTreeSet<u64>| {
-            let mut body = build(text);
-            super::fold_jumps(&mut body, ends);
-            print(&body)
-        };
+        let run = folded_past;
         let ends: BTreeSet<u64> = [0x10].into_iter().collect();
         assert_eq!(
             run(&shape("h();\nabort();\n"), &ends),
