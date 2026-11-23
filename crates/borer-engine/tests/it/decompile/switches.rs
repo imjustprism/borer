@@ -214,6 +214,59 @@ fn a_compare_ladder_is_a_switch() {
     }
 }
 
+/// A case label or a compared constant is named by a recovered table only
+/// when the member is a C identifier.
+///
+/// The ladder returns `".STRUCT"` for 1, `".ENUM"` for 2 and `"Undefined"`
+/// for 3, the shape of cc65's `GetScopeType`, so the function's own table
+/// pairs each value with its literal. `case .STRUCT:` is no C; those labels
+/// stay numbers, while `Undefined` still names its value. A caller passing
+/// the constants to the table's parameter keeps the same rule.
+#[test]
+fn a_table_member_that_is_no_identifier_stays_a_number() {
+    let code: &[u8] = &[
+        0x83, 0xf9, 0x01, // ASM: cmp ecx,1
+        0x74, 0x12, // ASM: je struct
+        0x83, 0xf9, 0x02, // ASM: cmp ecx,2
+        0x74, 0x15, // ASM: je enum
+        0x83, 0xf9, 0x03, // ASM: cmp ecx,3
+        0x74, 0x18, // ASM: je undefined
+        0x48, 0x8d, 0x05, 0xea, 0x0f, 0x00, 0x00, // ASM: lea rax,[rip+unknown]
+        0xc3, // ASM: ret
+        0x48, 0x8d, 0x05, 0x02, 0x10, 0x00, 0x00, // ASM: lea rax,[rip+struct_text]
+        0xc3, // ASM: ret
+        0x48, 0x8d, 0x05, 0x0a, 0x10, 0x00, 0x00, // ASM: lea rax,[rip+enum_text]
+        0xc3, // ASM: ret
+        0x48, 0x8d, 0x05, 0x12, 0x10, 0x00, 0x00, // ASM: lea rax,[rip+undefined_text]
+        0xc3, // ASM: ret
+    ];
+    let mut data = vec![0u8; 0x50];
+    for (at, text) in [
+        (0x00, "Unknown scope type"),
+        (0x20, ".STRUCT"),
+        (0x30, ".ENUM"),
+        (0x40, "Undefined"),
+    ] {
+        data[at..at + text.len()].copy_from_slice(text.as_bytes());
+    }
+    let text = decompiled(&program64_with_data(code, &data), 0x1_4000_1000);
+    assert!(text.contains("switch (a1)"), "{text}");
+    assert!(!text.contains("case ."), "{text}");
+    for label in ["case 1:", "case 2:", "case Undefined:"] {
+        assert!(text.contains(label), "{label}\n{text}");
+    }
+    let table = borer_engine::analysis::decompile::EnumTable {
+        name: "values of a1".to_owned(),
+        members: vec![(1, ".STRUCT".to_owned()), (3, "Undefined".to_owned())],
+        param: Some(0),
+    };
+    let tables = std::collections::BTreeMap::from([("name_of".to_owned(), table)]);
+    let body = "rax = name_of(1);\nrbx = name_of(3);\n";
+    let out = borer_engine::analysis::decompile::apply_enums(body, &tables);
+    assert!(out.contains("name_of(1)"), "{out}");
+    assert!(out.contains("name_of(Undefined)"), "{out}");
+}
+
 /// A compare tree whose misses land in two different blocks (a range
 /// split to one, the last compare's miss to another) is no `switch`, which
 /// has one default: it stays an `if` chain.

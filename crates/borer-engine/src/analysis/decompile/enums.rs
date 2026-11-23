@@ -20,7 +20,11 @@ pub struct EnumTable {
 }
 
 impl EnumTable {
-    /// The member named for `value`, if the table has one.
+    /// The member named for `value`, if the table has one that C can spell.
+    ///
+    /// A member is the literal the code pairs the value with, and a literal
+    /// such as `.STRUCT` or `a-b` is no identifier: written in place of the
+    /// value it would not be C, so the value stays the number.
     ///
     /// # Arguments
     ///
@@ -30,6 +34,7 @@ impl EnumTable {
             .iter()
             .find(|(k, _)| *k == value)
             .map(|(_, lit)| lit.as_str())
+            .filter(|lit| cir::Ident::new(lit).is_some())
     }
 }
 
