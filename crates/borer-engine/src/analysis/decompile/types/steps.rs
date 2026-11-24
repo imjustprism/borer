@@ -63,9 +63,11 @@ pub(in crate::analysis::decompile) fn steps_bytes(ty: &str, dialect: Dialect) ->
 ///   difference GNU C gives, and so does a chain holding such a
 ///   difference, without the `void *` cast;
 /// - `s - p`, a `void *` subtracted from a declared byte pointer, becomes
-///   `s - (char *)p`;
+///   `s - (char *)p` for a `char *`, `(char *)s - (char *)p` for any other
+///   byte pointer;
 /// - `p += n` and `p -= n` become `p = (void *)((char *)p + (n))`,
-///   parenthesized when they stand inside an expression;
+///   parenthesized when they stand inside an expression; a step that is
+///   itself a `void *` (`p -= q`, no valid C either) stays as written;
 /// - `p++;`, `++p;`, `p--;` and `--p;` as statements become `p = (void
 ///   *)((char *)p + 1);` or `- 1`;
 /// - `&p[i]` becomes `(void *)((char *)p + i)`.
@@ -92,6 +94,7 @@ pub(in crate::analysis::decompile) fn steps_bytes(ty: &str, dialect: Dialect) ->
 pub(in crate::analysis::decompile) fn iso_arithmetic(text: &str) -> String {
     let differs = |ty: &str| steps_bytes(ty, Dialect::Gnu) && !steps_bytes(ty, Dialect::Iso);
     let (mut voids, mut ints, mut bytes) = (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+    let mut chars = BTreeSet::new();
     let mut note = |name: &str, ty: &str| {
         if differs(ty) {
             voids.insert(name.to_owned());
@@ -99,6 +102,9 @@ pub(in crate::analysis::decompile) fn iso_arithmetic(text: &str) -> String {
             ints.insert(name.to_owned());
         } else if steps_bytes(ty, Dialect::Iso) {
             bytes.insert(name.to_owned());
+            if pointee_of(ty.trim()) == Some("char") {
+                chars.insert(name.to_owned());
+            }
         }
     };
     for (name, ty) in signature_params(text) {
@@ -122,6 +128,7 @@ pub(in crate::analysis::decompile) fn iso_arithmetic(text: &str) -> String {
                     voids: &voids,
                     ints: &ints,
                     bytes: &bytes,
+                    chars: &chars,
                 }
                 .rewrite(l)
             }
@@ -146,6 +153,9 @@ struct Iso<'v> {
     ints: &'v BTreeSet<String>,
     /// The names declared as pointers to a byte.
     bytes: &'v BTreeSet<String>,
+    /// Those of them declared `char *`, which need no cast to subtract a
+    /// `char *` from.
+    chars: &'v BTreeSet<String>,
 }
 
 /// What an operand of `+` or `-` is, as far as the text tells.
@@ -328,7 +338,13 @@ impl Iso<'_> {
             return self.at_name(code, k);
         }
         if code.is(k, Lex::Name) && self.bytes.contains(code.word(k)) && code.free(k) {
-            return self.chain(code, k + 1, code.word(k), true);
+            let s = code.word(k);
+            let base = if self.chars.contains(s) {
+                s.to_owned()
+            } else {
+                format!("(char *){s}")
+            };
+            return self.chain(code, k + 1, &base, true);
         }
         let callee = k
             .checked_sub(1)
@@ -380,6 +396,9 @@ impl Iso<'_> {
         if code.punct(k + 1, "+=") || code.punct(k + 1, "-=") {
             let sign = if code.punct(k + 1, "+=") { '+' } else { '-' };
             let end = assignment_end(&code.toks, code.s, k + 2);
+            if self.kind(code.span(k + 2, end)) == Kind::Pointer {
+                return Found::Keep(end);
+            }
             let step = self.rewrite(code.span(k + 2, end));
             let set = format!("{p} = (void *)((char *){p} {sign} {})", whole(&step));
             let alone = statement && (end == code.toks.len() || code.punct(end, ";"));
@@ -834,13 +853,14 @@ mod tests {
     /// # Arguments
     ///
     /// * `line` - The line, under a header declaring `a1` and `var1`
-    ///   `void *`, `a2` and `c` integers, `a3` a `void **` and `s` a
-    ///   `char *`.
+    ///   `void *`, `a2` and `c` integers, `a3` a `void **`, `s` a `char *`
+    ///   and `u` a `uint8_t *`.
     fn iso(line: &str) -> String {
         let text = format!(
             "// signature: uint64_t f(void *a1, uint64_t a2, void **a3, uint64_t c)
 void *var1;
 char *s;
+uint8_t *u;
 
 {line}
 "
@@ -860,6 +880,16 @@ char *s;
             ("return var1 - a1;", "return (char *)var1 - (char *)a1;"),
             ("return s - a1;", "return s - (char *)a1;"),
             ("return s + a1;", "return s + a1;"),
+        ] {
+            assert_eq!(iso(line), want, "{line}");
+        }
+    }
+
+    /// A chain is rewritten only when the declarations type every operand,
+    /// and then whole; one they do not type keeps every token.
+    #[test]
+    fn void_pointer_arithmetic_is_typed_from_the_declarations() {
+        for (line, want) in [
             ("x = a2 + a1;", "x = a2 + a1;"),
             (
                 "x = *(uint32_t*)(a1 - (var1 - a1));",
@@ -904,6 +934,12 @@ char *s;
                 "else (char *)((void *)((char *)a1 + 4)) - (char *)var1;",
             ),
             ("x = s - a1 + g;", "x = s - a1 + g;"),
+            ("var1 -= a1;", "var1 -= a1;"),
+            (
+                "var1 += var1 - a1;",
+                "var1 = (void *)((char *)var1 + ((char *)var1 - (char *)a1));",
+            ),
+            ("x = u - a1;", "x = (char *)u - (char *)a1;"),
             ("x = s + 4;", "x = s + 4;"),
             ("*(uint64_t*)a1 += a2;", "*(uint64_t*)a1 += a2;"),
             ("(uint8_t*)a1++;", "(uint8_t*)a1++;"),
