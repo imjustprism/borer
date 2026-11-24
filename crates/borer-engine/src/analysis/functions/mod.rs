@@ -56,7 +56,7 @@ use helpers::{
 };
 use seeds::{got_base, mapped_range, pointer_seeds, record_table_refs, reloc_seeds};
 use sets::{AddrSet, Covered};
-use sites::{call_arg_consts, class_registration, straight_line_before};
+use sites::{ArgExt, call_arg_consts, class_registration, straight_line_before, widened_args};
 use tables::ResolvedTable;
 use walk::{Known, SplitWatch, WalkState, Walked, Worker, agreed_values, walk_capped};
 
@@ -706,7 +706,7 @@ pub(crate) fn discover(program: &Program, bitness: u32, lanes: usize) -> Analysi
     analysis.indexed_tables = st.indexed_tables;
     analysis.throw_sites = throw_sites;
     analysis.classes.ids = st.class_ids;
-    analysis.param_values = agreed_values(program, &analysis.xrefs, st.calls);
+    (analysis.param_values, analysis.wide_args) = agreed_values(program, &analysis.xrefs, st.calls);
     analysis.incomplete = incomplete;
     phases.mark("discover collect");
 

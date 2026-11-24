@@ -1233,6 +1233,10 @@ pub struct Analysis {
     /// a function only when those sites are all its callers: an export, the
     /// entry point and a function whose address the program takes have none.
     pub param_values: BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>>,
+    /// Per function entry, the argument slots (indices among the argument
+    /// registers) some direct call or tail jump sign-extends a value into
+    /// and none fills with a 32-bit one: the formal is 64 bits wide.
+    pub wide_args: BTreeMap<u64, BTreeSet<u8>>,
     /// The packs the analysis ran with ([`crate::pack`]), in load order.
     pub packs: Arc<crate::pack::Packs>,
     /// What the packs' `[names]` lines found: the functions they named, and

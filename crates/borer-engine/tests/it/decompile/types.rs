@@ -5,7 +5,7 @@ use super::{
     Analysis, Overlay, decompile, decompile_scenario, polish, program64, replays_clean, runs_agree,
 };
 use borer_engine::pack::Packs;
-use borer_engine::program::{Arch, BinaryFormat, Program};
+use borer_engine::program::{Arch, BinaryFormat, Program, Symbol, SymbolKind};
 
 /// The entry every x64 image here is decompiled at.
 const ENTRY: u64 = 0x1_4000_1000;
@@ -496,4 +496,64 @@ fn a_backward_step_lands_on_its_read() {
     );
     let out = polish(raw, 64, &Packs::default());
     assert!(out.contains("uint8_t *a1"), "{out}");
+}
+
+/// The callee at `ENTRY + 0x20` of [`call_site_image`]: it stores the low
+/// half of its second parameter to a field of its first and returns.
+const CALLEE: u64 = ENTRY + 0x20;
+
+/// Returns an image of one or two callers of [`CALLEE`].
+///
+/// The callers at [`ENTRY`] and `ENTRY + 0x10` run their setup, then call
+/// [`CALLEE`], which stores `esi` to `[rdi+4]`.
+///
+/// # Arguments
+///
+/// * `first` - The setup of the first caller, 3 bytes.
+/// * `second` - The setup of the second caller, 3 bytes, or `None` for
+///   one caller only.
+fn call_site_image(first: [u8; 3], second: Option<[u8; 3]>) -> Program {
+    let mut code = first.to_vec();
+    code.extend_from_slice(&[0xe8, 0x18, 0x00, 0x00, 0x00, 0xc3]); // ASM: call CALLEE; ret
+    code.resize(0x10, 0xcc);
+    if let Some(s) = second {
+        code.extend_from_slice(&s);
+        code.extend_from_slice(&[0xe8, 0x08, 0x00, 0x00, 0x00, 0xc3]); // ASM: call CALLEE; ret
+    }
+    code.resize(0x20, 0xcc);
+    code.extend_from_slice(&[
+        0x89, 0x77, 0x04, // ASM: mov [rdi+0x4], esi
+        0xc3, // ASM: ret
+    ]);
+    let mut p = sysv(&code);
+    p.symbols = [
+        ("first", ENTRY),
+        ("second", ENTRY + 0x10),
+        ("callee", CALLEE),
+    ]
+    .map(|(name, addr)| Symbol {
+        name: name.to_owned(),
+        addr,
+        kind: SymbolKind::Local,
+    })
+    .to_vec();
+    p
+}
+
+/// A caller's sign extension keeps the callee's parameter 64 bits wide.
+///
+/// The callee reads only the low half; a caller passing a 32-bit value says
+/// nothing, and one such caller vetoes another's extension.
+#[test]
+fn a_callers_sign_extension_keeps_the_parameter_wide() {
+    let movsxd = [0x48, 0x63, 0xf0]; // ASM: movsxd rsi, eax
+    let narrow = [0x89, 0xc6, 0x90]; // ASM: mov esi, eax; nop
+    let wide = checked_at(&call_site_image(movsxd, None), CALLEE);
+    assert!(wide.contains("uint64_t a2"), "{wide}");
+    assert!(wide.contains("*(uint32_t*)(a1 + 4) = a2;"), "{wide}");
+    runs_agree(&call_site_image(movsxd, None), CALLEE);
+    let plain = checked_at(&call_site_image(narrow, None), CALLEE);
+    assert!(plain.contains("uint32_t a2"), "{plain}");
+    let mixed = checked_at(&call_site_image(movsxd, Some(narrow)), CALLEE);
+    assert!(mixed.contains("uint32_t a2"), "{mixed}");
 }

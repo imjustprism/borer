@@ -18,11 +18,12 @@ use super::seeds::{DataRef, record_data_refs};
 use super::sets::{AddrSet, Covered};
 use super::tables::{ResolvedTable, resolve_jump_table};
 use super::{
-    ArgConst, Cursors, FINALLY_CALL_REACH, FINALLY_REACH, GAP_INSTRS_MIN, GUESS_WALK_MAX,
+    ArgConst, ArgExt, Cursors, FINALLY_CALL_REACH, FINALLY_REACH, GAP_INSTRS_MIN, GUESS_WALK_MAX,
     HANDLER_REACH, InstrRec, Lanes, PARAM_VALUES_MAX, Recorded, Registration, SEEDS_MAX,
     SPLIT_ROUNDS_MAX, Seed, Shared, WAVE_BATCH, WAVE_MIN, XREF_SITES_PER_TARGET, add_site,
     build_blocks, call_arg_consts, class_registration, decode_at, fingerprint, handler_lands_near,
     mix, near_target, padding_end, seh_scope_roots, tears_frame_down, trace_seeds, unwind_nop,
+    widened_args,
 };
 use crate::analysis::{BlockTerm, Function, NameSource, RefKind, RefSite, dedup_sorted, is_imm};
 use crate::fxmap::{FxHashMap, FxHashSet};
@@ -134,6 +135,8 @@ pub(super) struct Called {
     sites: Vec<u64>,
     /// The constants the sites put in argument registers.
     consts: Vec<ArgConst>,
+    /// How the sites last wrote their argument registers ([`ArgExt`]).
+    pub(super) exts: Vec<ArgExt>,
     /// Class names the sites registered with their four-character code.
     registrations: Vec<Registration>,
 }
@@ -1500,9 +1503,9 @@ impl Recorded {
             ..Called::default()
         };
         for &(at, callee) in &self.calls {
-            called
-                .consts
-                .extend(call_arg_consts(program, bitness, at, callee, self));
+            let (consts, exts) = call_arg_consts(program, bitness, at, callee, self);
+            called.consts.extend(consts);
+            called.exts.extend(exts);
             called
                 .registrations
                 .extend(class_registration(program, bitness, at, self));
@@ -1510,6 +1513,10 @@ impl Recorded {
         called
     }
 }
+
+/// Function to parameter index to the constants its callers pass there
+/// ([`agreed_values`]).
+pub(super) type ParamValues = BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>>;
 
 /// Keeps, for each function its calls and tail jumps are all the ways to,
 /// the parameters every one of them sets to a constant, with the constants.
@@ -1532,12 +1539,15 @@ impl Recorded {
 ///
 /// # Returns
 ///
-/// Function to parameter index to the constants its callers pass there.
+/// Function to parameter index to the constants its callers pass there,
+/// and per function the argument slots its callers widen a value into
+/// ([`widened_args`]), which any caller shows, whatever the others are.
 pub(super) fn agreed_values(
     program: &Program,
     xrefs: &BTreeMap<u64, Vec<RefSite>>,
     calls: BTreeMap<u64, Called>,
-) -> BTreeMap<u64, BTreeMap<u8, BTreeSet<u64>>> {
+) -> (ParamValues, BTreeMap<u64, BTreeSet<u8>>) {
+    let wide = widened_args(&calls);
     let mut passed: BTreeMap<u64, Passed> = BTreeMap::new();
     for called in calls.into_values() {
         for callee in called.sites {
@@ -1570,7 +1580,7 @@ pub(super) fn agreed_values(
                 sites.len() < XREF_SITES_PER_TARGET && sites.iter().all(RefSite::is_branch)
             })
     };
-    passed
+    let agreed = passed
         .into_iter()
         .filter(|(callee, _)| only_called(callee))
         .map(|(callee, p)| {
@@ -1585,7 +1595,8 @@ pub(super) fn agreed_values(
             (callee, agreed)
         })
         .filter(|(_, agreed)| !agreed.is_empty())
-        .collect()
+        .collect();
+    (agreed, wide)
 }
 
 /// A recorded instruction that falls through and is not a call.

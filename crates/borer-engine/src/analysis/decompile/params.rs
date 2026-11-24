@@ -258,6 +258,23 @@ fn finish_param_types(
         };
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
+    let at = code.get(entry).and_then(|c| c.first()).map(Instruction::ip);
+    let widened = at
+        .and_then(|a| ctx.analysis.wide_args.get(&a))
+        .filter(|_| ctx.bitness == 64);
+    for &r in widened
+        .into_iter()
+        .flatten()
+        .filter_map(|&s| ctx.conv.args.get(usize::from(s)))
+    {
+        if let Some(p) = ctx
+            .conv
+            .param_pos(r, &ctx.params)
+            .filter(|_| ctx.params.contains(&r))
+        {
+            types.entry(p).or_insert_with(|| word_type(64).to_owned());
+        }
+    }
     for (p, witness) in home_spills(ctx, code, entry) {
         let ty = match witness {
             Witness::WideSpill => word_type(64),
