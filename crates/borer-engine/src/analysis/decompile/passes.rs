@@ -82,6 +82,9 @@ pub enum Pass {
     /// Writes a `do` whose first test the values set before it decide as a
     /// `while` or a `for`.
     DecidedLoops,
+    /// Writes a guarded `do` whose guard is its own test after the first
+    /// values as a `while` or a `for`.
+    GuardedLoops,
     /// Applies the layouts of the pointers the text indexes.
     ApplyLayouts,
     /// Types a float register by the lanes it is read as.
@@ -154,7 +157,7 @@ pub enum Pass {
 
 impl Pass {
     /// Every pass, in the order the pipeline first runs it.
-    pub const ALL: [Self; 65] = [
+    pub const ALL: [Self; 66] = [
         Self::FoldJumps,
         Self::DropReturnedValues,
         Self::MergeChains,
@@ -188,6 +191,7 @@ impl Pass {
         Self::WireFormat,
         Self::SplitWebs,
         Self::DecidedLoops,
+        Self::GuardedLoops,
         Self::ApplyLayouts,
         Self::FloatLanes,
         Self::LaneLocals,
@@ -259,6 +263,7 @@ impl Pass {
             Self::WireFormat => "wire_format",
             Self::SplitWebs => "split_webs",
             Self::DecidedLoops => "decided_loops",
+            Self::GuardedLoops => "guarded_loops",
             Self::ApplyLayouts => "apply_layouts",
             Self::FloatLanes => "float_lanes",
             Self::LaneLocals => "lane_locals",

@@ -152,6 +152,9 @@ pub(super) fn polish_skipping(
     let text = skip.apply(Pass::DecidedLoops, text, |t| {
         loops::decided_loops(t.to_owned(), word_bits)
     });
+    let text = skip.apply(Pass::GuardedLoops, text, |t| {
+        loops::guarded_loops(t.to_owned(), word_bits)
+    });
     let text = skip.apply(Pass::ApplyLayouts, text, apply_layouts);
     let text = skip.apply(Pass::FloatLanes, text, float_lanes);
     let text = skip.apply(Pass::LaneLocals, text, lane_locals);

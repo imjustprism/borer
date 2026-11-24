@@ -592,7 +592,7 @@ pub(super) fn pure(e: &Ast) -> bool {
 ///
 /// * `e` - The expression.
 /// * `out` - Collects the names.
-fn names_in<'e>(e: &'e Ast, out: &mut Vec<&'e str>) {
+pub(super) fn names_in<'e>(e: &'e Ast, out: &mut Vec<&'e str>) {
     match e {
         Ast::Name(n) => out.push(n),
         Ast::Int(..) | Ast::Float(..) | Ast::Str(_) => {}

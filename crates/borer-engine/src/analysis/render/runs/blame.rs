@@ -364,7 +364,7 @@ mod tests {
         };
         let spun = ran(0, 8, false);
         assert_eq!(found(0, 10, &spun), unplaced(0));
-        assert_eq!(found(4, 40, &spun), unplaced(32));
+        assert_eq!(found(4, 40, &spun), unplaced(Pass::ALL.len() / 2));
         assert_eq!(found(0, 0, &spun), Bisected::Unbisected(at()));
         for alone in [spun, ran(8, 0, false), ran(2, 0, true)] {
             let broke = Bisected::Broke {
@@ -477,7 +477,7 @@ mod tests {
         );
         let unplaced = Bisected::Unplaced {
             at: at(),
-            ran: 32,
+            ran: Pass::ALL.len() / 2,
             agreed: 1,
             unchecked: vec![("it spins".to_owned(), 63)],
             later: None,
@@ -485,7 +485,7 @@ mod tests {
         assert_eq!(placed, unplaced);
         let text = blame_report("f", 0x1000, 64, 100, &placed);
         assert!(
-            text.contains("\nunplaced\tthe text differs, and with only its first 32 cleanup passes run it left the input it differs on (agreeing on 1 of 64) unchecked, "),
+            text.contains(&format!("\nunplaced\tthe text differs, and with only its first {} cleanup passes run it left the input it differs on (agreeing on 1 of 64) unchecked, ", Pass::ALL.len() / 2)),
             "{text}"
         );
         assert!(!text.contains("\npass\t"), "{text}");

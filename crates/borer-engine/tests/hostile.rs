@@ -56,6 +56,8 @@ mod projects;
 mod records;
 #[path = "hostile/search.rs"]
 mod search;
+#[path = "hostile/text.rs"]
+mod text;
 
 /// Where the headers end and the first section's bytes begin.
 const HEADERS: usize = 0x400;

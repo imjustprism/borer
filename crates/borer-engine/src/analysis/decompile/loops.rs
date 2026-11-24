@@ -12,7 +12,10 @@ use super::ctext::{Ast, Bin, expression, named_type, tokens as c_tokens};
 use super::*;
 
 mod entry;
+mod guard;
+mod linear;
 pub(super) use entry::decided_loops;
+pub(super) use guard::guarded_loops;
 mod spin;
 
 /// Lines the scan for a later write of a moved variable reads before it
@@ -65,6 +68,72 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
     changed
 }
 
+/// The parts of an `if (G) { inits; do { B } while (C); }`.
+pub(super) struct Guarded {
+    /// The indentation of the `if`.
+    pub(super) pad: usize,
+    /// The guard `G`.
+    pub(super) guard: String,
+    /// The line of the `if`'s closing brace.
+    pub(super) close: usize,
+    /// The line of the `} while (C);`.
+    pub(super) latch: usize,
+    /// The loop's test `C`.
+    pub(super) cond: String,
+    /// The line of the `do {`.
+    pub(super) d: usize,
+}
+
+/// Reads the `if (G) { inits; do { B } while (C); }` at line `k`, whose
+/// `do` is the last statement of the `if` and which holds no label.
+///
+/// # Arguments
+///
+/// * `lines` - The body lines.
+/// * `k` - The line of the `if`.
+///
+/// # Returns
+///
+/// Its parts, `None` for any other line.
+pub(super) fn guarded_parts(lines: &[String], k: usize) -> Option<Guarded> {
+    let open = lines.get(k)?;
+    let pad = indent_of(open);
+    let guard = if_opener(open.trim())?.to_owned();
+    let inner = pad + 2;
+    let close =
+        closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))?;
+    let latch = close.checked_sub(1).filter(|&l| l > k)?;
+    let cond = lines
+        .get(latch)
+        .filter(|l| indent_of(l) == inner)
+        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))?
+        .to_owned();
+    let d = (k + 1..latch)
+        .rev()
+        .find(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| indent_of(l) <= inner && !l.trim().is_empty())
+        })
+        .filter(|&j| {
+            lines
+                .get(j)
+                .is_some_and(|l| l.trim() == "do {" && indent_of(l) == inner)
+        })?;
+    let region = lines.get(k + 1..close).unwrap_or(&[]);
+    if region.iter().any(|l| is_label(l)) {
+        return None;
+    }
+    Some(Guarded {
+        pad,
+        guard,
+        close,
+        latch,
+        cond,
+        d,
+    })
+}
+
 /// Rewrites the `if (G) { inits; do { B } while (C); }` at line `k`.
 ///
 /// # Arguments
@@ -76,118 +145,199 @@ pub(super) fn recover_loops(lines: &mut Vec<String>) -> bool {
 ///
 /// Whether the `if` was a guarded loop and became a `while` or a `for`.
 fn guarded_loop(lines: &mut Vec<String>, k: usize) -> bool {
-    let Some(open) = lines.get(k) else {
+    let Some(parts) = guarded_parts(lines, k) else {
         return false;
     };
-    let pad = indent_of(open);
-    let Some(guard) = if_opener(open.trim()).map(str::to_owned) else {
+    let (pad, close) = (parts.pad, parts.close);
+    let inits = lines.get(k + 1..parts.d).unwrap_or(&[]);
+    let body = lines.get(parts.d + 1..parts.latch).unwrap_or(&[]);
+    let Some(parsed) = guarded_inits(inits, pad + 2) else {
         return false;
     };
-    let inner = pad + 2;
-    let Some(close) =
-        closing(lines, k, pad).filter(|&c| lines.get(c).is_some_and(|l| l.trim() == "}"))
-    else {
-        return false;
-    };
-    let Some(latch) = close.checked_sub(1).filter(|&l| l > k) else {
-        return false;
-    };
-    let Some(cond) = lines
-        .get(latch)
-        .filter(|l| indent_of(l) == inner)
-        .and_then(|l| l.trim().strip_prefix("} while (")?.strip_suffix(");"))
-        .map(str::to_owned)
-    else {
-        return false;
-    };
-    let Some(d) = (k + 1..latch)
-        .rev()
-        .find(|&j| {
-            lines
-                .get(j)
-                .is_some_and(|l| indent_of(l) <= inner && !l.trim().is_empty())
-        })
-        .filter(|&j| {
-            lines
-                .get(j)
-                .is_some_and(|l| l.trim() == "do {" && indent_of(l) == inner)
-        })
-    else {
-        return false;
-    };
-    let region = lines.get(k + 1..close).unwrap_or(&[]);
-    if region.iter().any(|l| is_label(l)) {
-        return false;
-    }
-    let inits = lines.get(k + 1..d).unwrap_or(&[]);
-    let body = lines.get(d + 1..latch).unwrap_or(&[]);
-    let pad_s = " ".repeat(pad);
-    let dedent = |l: &String| l.strip_prefix("  ").unwrap_or(l).to_owned();
-    let rewritten: Vec<String> = match inits {
-        [] if same_condition(&guard, &cond) => std::iter::once(format!("{pad_s}while ({cond}) {{"))
-            .chain(body.iter().map(dedent))
-            .chain(std::iter::once(format!("{pad_s}}}")))
-            .collect(),
-        [] => return false,
-        inits => {
-            let Some(parsed) = inits
-                .iter()
-                .map(|l| plain_assignment(l).filter(|(_, r)| indent_of(l) == inner && !impure(r)))
-                .collect::<Option<Vec<(&str, &str)>>>()
-            else {
-                return false;
-            };
-            let Some(at) = parsed.iter().rposition(|(v, _)| mentions_ident(&cond, v)) else {
-                return false;
-            };
+    let cond = &parts.cond;
+    let last = parsed.iter().rposition(|(v, _)| mentions_ident(cond, v));
+    let counted = match last {
+        None if parsed.is_empty() && same_condition(&parts.guard, cond) => None,
+        None => return false,
+        Some(at) => {
             let Some(&(v, value)) = parsed.get(at) else {
                 return false;
             };
-            let others: Vec<(&str, &str)> = parsed
-                .iter()
-                .enumerate()
-                .filter(|(i, _)| *i != at)
-                .map(|(_, p)| *p)
-                .collect();
-            let apart = others.iter().all(|(o, r)| {
-                *o != v
-                    && !mentions_ident(&cond, o)
-                    && !mentions_ident(value, o)
-                    && !mentions_ident(r, v)
-                    && dead_after(lines, close + 1, pad, o)
+            let others = parsed.iter().enumerate().filter(|(i, _)| *i != at);
+            let kept = others.clone().all(|(_, (o, _))| {
+                *o != v && !mentions_ident(cond, o) && dead_after(lines, close + 1, pad, o)
             });
-            if !apart
-                || !same_condition(&guard, &rename_word(&cond, v, &format!("({value})")))
+            let same = same_condition(&parts.guard, &rename_word(cond, v, &format!("({value})")));
+            if !kept
+                || !same
+                || !apart(&parsed, at)
                 || !dead_after(lines, close + 1, pad, v)
+                || !hoistable(lines, &parsed, &parts.guard)
             {
                 return false;
             }
-            let front: Vec<String> = others
-                .iter()
-                .map(|(o, r)| format!("{pad_s}{o} = {r};"))
-                .collect();
-            let looped: Vec<String> = match step_of(body, inner + 2, v) {
-                Some(step) => {
-                    let head = format!("{pad_s}for ({v} = {value}; {cond}; {step}) {{");
-                    std::iter::once(head)
-                        .chain(body.get(..body.len() - 1).unwrap_or(&[]).iter().map(dedent))
-                        .chain(std::iter::once(format!("{pad_s}}}")))
-                        .collect()
-                }
-                None => [
-                    format!("{pad_s}{v} = {value};"),
-                    format!("{pad_s}while ({cond}) {{"),
-                ]
-                .into_iter()
-                .chain(body.iter().map(dedent))
-                .chain(std::iter::once(format!("{pad_s}}}")))
-                .collect(),
-            };
-            front.into_iter().chain(looped).collect()
+            step_of(body, pad + 4, v).map(|s| Counted {
+                at,
+                idx: body.len() - 1,
+                step: s.to_owned(),
+            })
         }
     };
-    lines.splice(k..=close, rewritten);
+    let out = guarded_lines(&parts, inits, body, (&parsed, counted, last), cond);
+    lines.splice(k..=close, out);
     true
+}
+
+/// Reads the inits of a guarded loop: plain assignments of pure values at
+/// the `if`'s inner level.
+///
+/// # Arguments
+///
+/// * `inits` - The lines between the `if` and the `do`.
+/// * `inner` - The indentation inside the `if`.
+///
+/// # Returns
+///
+/// Each init's variable and value, `None` when a line is anything else.
+pub(super) fn guarded_inits(inits: &[String], inner: usize) -> Option<Vec<(&str, &str)>> {
+    inits
+        .iter()
+        .map(|l| plain_assignment(l).filter(|(_, r)| indent_of(l) == inner && !impure(r)))
+        .collect()
+}
+
+/// Tells whether the init at `at` can move past the others into a `for`
+/// header: no other init reads its variable, and its value reads none of
+/// theirs.
+///
+/// # Arguments
+///
+/// * `parsed` - Each init's variable and value.
+/// * `at` - The init to move.
+pub(super) fn apart(parsed: &[(&str, &str)], at: usize) -> bool {
+    let Some(&(v, value)) = parsed.get(at) else {
+        return false;
+    };
+    parsed
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != at)
+        .all(|(_, (o, r))| !mentions_ident(r, v) && !mentions_ident(value, o))
+}
+
+/// Tells whether the inits may run on the path that skipped the loop,
+/// where the guard was false: each must be proved unobservable there and
+/// unable to trap.
+///
+/// An init's variable must be a local of this function no address reaches:
+/// a numbered variable, a register, a frame slot or a parameter whose
+/// address no line takes; a global or a name of unknown kind stays under
+/// the `if`, since a callee or a caller sees the store. Its value may not
+/// divide (a zero divisor traps), and every read of memory in it must be
+/// one the guard makes on every path ([`linear::always_reads`]), through
+/// names no earlier init sets: under `if (a1 != 0)`, an init `v =
+/// *(uint64_t*)(a1 + 8);` moved out reads through `a1` when it is 0.
+///
+/// # Arguments
+///
+/// * `lines` - The function's lines, for the addresses taken.
+/// * `parsed` - Each init's variable and value.
+/// * `guard` - The guard.
+pub(super) fn hoistable(lines: &[String], parsed: &[(&str, &str)], guard: &str) -> bool {
+    let Some(g) = linear::read(guard, 64) else {
+        return false;
+    };
+    let mut made = Vec::new();
+    linear::always_reads(&g, &mut made);
+    parsed.iter().enumerate().all(|(i, (t, value))| {
+        let local = vars::is_var_name(t)
+            || linear::is_gpr(t)
+            || is_param_name(t)
+            || crate::analysis::protos::local_depth(t).is_some();
+        let amp = format!("&{t}");
+        let Some(v) = linear::read(value, 64).filter(|v| {
+            local
+                && !lines
+                    .iter()
+                    .any(|l| l.contains(&amp) && takes_address(l, t))
+                && !linear::divides(v)
+        }) else {
+            return false;
+        };
+        let mut reads = Vec::new();
+        linear::memory_reads(&v, &mut reads);
+        let earlier = parsed.get(..i).unwrap_or(&[]);
+        reads.iter().all(|r| {
+            let mut names = Vec::new();
+            interp::names_in(r, &mut names);
+            made.contains(r) && earlier.iter().all(|(e, _)| !names.contains(e))
+        })
+    })
+}
+
+/// The init a `for` header counts on.
+pub(super) struct Counted {
+    /// The init's index among the inits.
+    pub(super) at: usize,
+    /// The step's line in the loop body.
+    pub(super) idx: usize,
+    /// The step's text.
+    pub(super) step: String,
+}
+
+/// Returns the lines that replace a guarded loop.
+///
+/// They are every init but the counted one in front of `for (v = e; head;
+/// step)`, the step's line left out of the body, or every init in front of
+/// `while (head)`, the test's own variable's last.
+///
+/// # Arguments
+///
+/// * `parts` - The guarded loop ([`guarded_parts`]).
+/// * `inits` - The init lines.
+/// * `body` - The loop body's lines.
+/// * `(parsed, counted, last)` - Each init's variable and value; for a
+///   `for` the counted init ([`Counted`]); for a `while` the init that
+///   goes last, one that may move past the others ([`apart`]).
+/// * `head` - The loop's test.
+pub(super) fn guarded_lines(
+    parts: &Guarded,
+    inits: &[String],
+    body: &[String],
+    (parsed, counted, last): (&[(&str, &str)], Option<Counted>, Option<usize>),
+    head: &str,
+) -> Vec<String> {
+    let pad_s = " ".repeat(parts.pad);
+    let dedent = |l: &String| l.strip_prefix("  ").unwrap_or(l).to_owned();
+    let close = std::iter::once(format!("{pad_s}}}"));
+    let skip = |skipped: usize| move |(i, l): (usize, &String)| (i != skipped).then(|| dedent(l));
+    match counted.and_then(|Counted { at, idx, step }| Some((at, idx, step, parsed.get(at)?))) {
+        Some((at, idx, step, &(v, value))) => {
+            let step = step
+                .strip_prefix(&format!("{v} = {v} + "))
+                .filter(|inc| parse_const(inc).is_some())
+                .map_or(step.clone(), |inc| format!("{v} += {inc}"));
+            inits
+                .iter()
+                .enumerate()
+                .filter_map(skip(at))
+                .chain(std::iter::once(format!(
+                    "{pad_s}for ({v} = {value}; {head}; {step}) {{"
+                )))
+                .chain(body.iter().enumerate().filter_map(skip(idx)))
+                .chain(close)
+                .collect()
+        }
+        None => inits
+            .iter()
+            .enumerate()
+            .filter_map(skip(last.unwrap_or(usize::MAX)))
+            .chain(last.and_then(|at| inits.get(at)).map(dedent))
+            .chain(std::iter::once(format!("{pad_s}while ({head}) {{")))
+            .chain(body.iter().map(dedent))
+            .chain(close)
+            .collect(),
+    }
 }
 
 /// Rewrites `if ((int32_t)n > 0) { v = 0; do { B; v += 1; } while ((uint32_t)n != v); }`
@@ -819,7 +969,7 @@ mod tests {
     //! The loop rewrites on hand-written text, each beside the case that
     //! must keep its form.
 
-    use super::{decided_loops, recover_loops};
+    use super::{decided_loops, guarded_loops, recover_loops};
 
     /// Runs the rewrites over a body.
     ///
@@ -1076,5 +1226,195 @@ mod tests {
                 format!("{head}{counted}")
             );
         }
+    }
+
+    /// Runs the guarded-loop proof over a function's text, at a 64-bit
+    /// word.
+    ///
+    /// # Arguments
+    ///
+    /// * `text` - The text, one statement per line.
+    ///
+    /// # Returns
+    ///
+    /// The text after the rewrite.
+    fn prove(text: &str) -> String {
+        guarded_loops(text.to_owned(), 64)
+    }
+
+    /// A guard that is the loop's test after every first value is put in,
+    /// as an expression rather than a spelling, makes a `for`.
+    #[test]
+    fn a_guard_equal_to_the_test_after_the_first_values_is_a_for() {
+        let unsigned = "void f(uint64_t a1)\n{\n  uint64_t var1;\n  if (a1 != 0) {\n    var1 = 0;\n    do {\n      sub_1(var1);\n      var1 += 1;\n    } while (a1 > var1);\n  }\n  return;\n}\n";
+        assert_eq!(
+            prove(unsigned),
+            "void f(uint64_t a1)\n{\n  uint64_t var1;\n  for (var1 = 0; a1 > var1; var1 += 1) {\n    sub_1(var1);\n  }\n  return;\n}\n"
+        );
+        let turned = "void f(uint64_t a1)
+{
+  if (a1 != 0) {
+    do {
+      a1 = sub_1(a1);
+    } while (0 != a1);
+  }
+  return;
+}
+";
+        assert_eq!(
+            prove(turned),
+            "void f(uint64_t a1)
+{
+  while (0 != a1) {
+    a1 = sub_1(a1);
+  }
+  return;
+}
+"
+        );
+        let two = "void f(uint64_t a1)\n{\n  uint64_t var1;\n  uint64_t var2;\n  if (a1 != 0) {\n    var1 = 0;\n    var2 = a1;\n    do {\n      sub_1(var1);\n      var1 += 1;\n    } while (var1 != var2);\n  }\n  return;\n}\n";
+        assert_eq!(
+            prove(two),
+            "void f(uint64_t a1)\n{\n  uint64_t var1;\n  uint64_t var2;\n  var2 = a1;\n  for (var1 = 0; var1 != var2; var1 += 1) {\n    sub_1(var1);\n  }\n  return;\n}\n"
+        );
+        let scaled = "void f(uint64_t a1, uint32_t a2)\n{\n  uint64_t var1;\n  uint64_t var2;\n  if (a2 != 0) {\n    var1 = a1;\n    var2 = a1 + (uint64_t)a2 * 16;\n    do {\n      sub_1(var1);\n      var1 += 16;\n    } while (var1 != var2);\n  }\n  return;\n}\n";
+        assert_eq!(
+            prove(scaled),
+            "void f(uint64_t a1, uint32_t a2)\n{\n  uint64_t var1;\n  uint64_t var2;\n  var2 = a1 + (uint64_t)a2 * 16;\n  for (var1 = a1; var1 != var2; var1 += 16) {\n    sub_1(var1);\n  }\n  return;\n}\n"
+        );
+    }
+
+    /// A first value the path past the loop already holds moves out of the
+    /// `if`; the walk from `a` to `b` by one under `a < b` tests `v < b`.
+    #[test]
+    fn a_held_value_moves_out_and_a_walk_to_its_bound_tests_below_it() {
+        let held = "uint64_t f(uint64_t a1)\n{\n  uint64_t var1;\n  uint64_t var2;\n  var1 = 0;\n  if (a1 != 0) {\n    var2 = a1;\n    var1 = 0;\n    do {\n      var1 += 1;\n      var2 = *(uint64_t*)var2;\n    } while (var2 != 0);\n  }\n  return var1;\n}\n";
+        assert_eq!(
+            prove(held),
+            "uint64_t f(uint64_t a1)\n{\n  uint64_t var1;\n  uint64_t var2;\n  var1 = 0;\n  var1 = 0;\n  for (var2 = a1; var2 != 0; var2 = *(uint64_t*)var2) {\n    var1 += 1;\n  }\n  return var1;\n}\n"
+        );
+        let walk = "void f(uint64_t a1, uint64_t a2)\n{\n  uint64_t var1;\n  if (a1 < a2) {\n    var1 = a1;\n    do {\n      sub_1(var1);\n      var1 += 1;\n    } while (var1 != a2);\n  }\n  return;\n}\n";
+        assert_eq!(
+            prove(walk),
+            "void f(uint64_t a1, uint64_t a2)\n{\n  uint64_t var1;\n  for (var1 = a1; var1 < a2; var1 += 1) {\n    sub_1(var1);\n  }\n  return;\n}\n"
+        );
+    }
+
+    /// A signed guard against an unsigned test, a multiple that can wrap, a
+    /// walk by two and a first value the skipping path holds otherwise keep
+    /// the guarded `do`.
+    #[test]
+    fn an_unproven_guard_keeps_the_guarded_do() {
+        let kept = [
+            "void f(uint64_t a1)\n{\n  uint32_t var1;\n  if ((int32_t)a1 > 0) {\n    var1 = 0;\n    do {\n      sub_1(var1);\n      var1 += 1;\n    } while (var1 != a1);\n  }\n  return;\n}\n",
+            "void f(uint64_t a1, uint64_t a2)\n{\n  uint64_t var1;\n  uint64_t var2;\n  if (a2 != 0) {\n    var1 = a1;\n    var2 = a1 + a2 * 256;\n    do {\n      sub_1(var1);\n      var1 += 256;\n    } while (var1 != var2);\n  }\n  return;\n}\n",
+            "void f(uint64_t a1, uint64_t a2)\n{\n  uint64_t var1;\n  if (a1 < a2) {\n    var1 = a1;\n    do {\n      sub_1(var1);\n      var1 += 2;\n    } while (var1 != a2);\n  }\n  return;\n}\n",
+            "void f(uint64_t a1)
+{
+  if ((int32_t)a1 > 0) {
+    do {
+      sub_1();
+    } while ((uint32_t)a1 != 0);
+  }
+  return;
+}
+",
+            "uint64_t f(uint64_t a1)\n{\n  uint64_t var1;\n  var1 = 0;\n  if (a1 != 0) {\n    var1 = 1;\n    do {\n      sub_1();\n    } while (a1 != 0);\n  }\n  return var1;\n}\n",
+            "void f(uint64_t a1, uint64_t a2)
+{
+  uint32_t *var1;
+  if (a1 < a2) {
+    var1 = a1;
+    do {
+      sub_1(var1);
+      var1 += 1;
+    } while (var1 != a2);
+  }
+  return;
+}
+",
+            "void f(uint64_t a1)
+{
+  uint64_t var1;
+  if (a1 != 0) {
+    var1 = *(uint64_t*)(a1 + 8);
+    do {
+      var1 = sub_1(var1);
+    } while (a1 != 0);
+  }
+  return;
+}
+",
+        ];
+        for text in kept {
+            assert_eq!(prove(text), text);
+        }
+    }
+
+    /// A chain of inits each squaring the one before is refused at the
+    /// run's cap, fast, with no tree that doubles at every line.
+    #[test]
+    fn a_long_chain_of_inits_decides_nothing() {
+        let chain: String = (2..=40)
+            .map(|n| format!("    var{n} = var{} * var{};\n", n - 1, n - 1))
+            .collect();
+        let text = format!(
+            "void f(uint64_t a1)\n{{\n  if (a1 != 0) {{\n    var1 = a1;\n{chain}    do {{\n      sub_1();\n    }} while (var40 != 0);\n  }}\n  return;\n}}\n"
+        );
+        assert_eq!(prove(&text), text);
+        let widened: String = (2..=15)
+            .map(|n| {
+                let w = format!("(uint64_t)(uint32_t)(var{} + 1)", n - 1);
+                format!("    var{n} = {w} + {w};\n")
+            })
+            .collect();
+        let text = format!(
+            "void f(uint64_t a1)\n{{\n  if (a1 != 0) {{\n    var1 = a1;\n{widened}    do {{\n      sub_1();\n    }} while (var15 != 0);\n  }}\n  return;\n}}\n"
+        );
+        assert_eq!(prove(&text), text);
+    }
+
+    /// An init that divides, or stores to a global, stays under its guard:
+    /// moved out it would trap, or a reader outside would see the store.
+    #[test]
+    fn an_init_that_traps_or_is_seen_stays_under_its_guard() {
+        let kept = [
+            "void f(uint64_t a1, uint64_t a2)\n{\n  uint64_t var1;\n  uint64_t var2;\n  if (a2 != 0) {\n    var2 = a1 / a2;\n    var1 = 0;\n    do {\n      sub_1(var2);\n      var1 += 1;\n    } while (var1 < a2);\n  }\n  return;\n}\n",
+            "void f(uint32_t *a1)\n{\n  if (*(uint32_t*)a1 != 0) {\n    counter = 0;\n    do {\n      sub_1();\n    } while (*(uint32_t*)a1 != 0);\n  }\n  return;\n}\n",
+        ];
+        for text in kept {
+            assert_eq!(prove(text), text);
+        }
+    }
+
+    /// The syntactic rule moves no init out of the `if` that reads memory
+    /// the guard does not make on every path.
+    ///
+    /// The skipping path would read it too, and a read in the right side of
+    /// `&&` is one the guard may skip. An arm32 register is a local all the
+    /// same.
+    #[test]
+    fn an_init_reading_other_memory_stays_under_its_guard() {
+        let text = "if (*(uint64_t*)rcx != 0) {\n  rsi = *(uint64_t*)(rdx + 8);\n  rax = *(uint64_t*)rcx;\n  do {\n    sub_1(rax, rsi);\n    rax = *(uint64_t*)rax;\n  } while (rax != 0);\n}\nreturn 0;\n";
+        assert_eq!(run(text), text);
+        let arm = "if (a2 != 0) {
+  r4 = 0;
+  do {
+    sub_1(r4);
+    r4 += 1;
+  } while (a2 != r4);
+}
+return 0;
+";
+        assert_eq!(
+            run(arm),
+            "for (r4 = 0; a2 != r4; r4 += 1) {
+  sub_1(r4);
+}
+return 0;
+"
+        );
+        let short = "if (rcx != 0 && *(uint64_t*)rcx != 0) {\n  rsi = *(uint64_t*)rcx;\n  rax = rcx;\n  do {\n    sub_1(rax, rsi);\n    rax = *(uint64_t*)(rax + 8);\n  } while (rax != 0 && *(uint64_t*)rax != 0);\n}\nreturn 0;\n";
+        assert_eq!(run(short), short);
     }
 }

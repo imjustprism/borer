@@ -1952,3 +1952,89 @@ fn a_decided_loop_needs_no_copy_for_a_path_past_it() {
         "{text}"
     );
 }
+
+/// A guarded loop whose guard is its test with the counter's first value
+/// put in is one loop that tests first.
+///
+/// `test rsi,rsi; je O; xor eax,eax; L: mov dword [rdi+rax*4],0; inc rax;
+/// cmp rax,rsi; jne L; O: ret` guards `rax != a2` with `a2 != 0` for
+/// `rax = 0`: the text is a `for` with no `if` around a `do`, and the lift
+/// agrees with the machine.
+#[test]
+fn a_guard_that_is_the_first_test_needs_no_if() {
+    use borer_engine::analysis::decompile::verify::{verify, verify_tsv};
+    let code = [
+        0x48, 0x85, 0xf6, // ASM: test rsi,rsi
+        0x74, 0x11, // ASM: je 0x140001016
+        0x31, 0xc0, // ASM: xor eax,eax
+        0xc7, 0x04, 0x87, 0x00, 0x00, 0x00, 0x00, // ASM: mov dword [rdi+rax*4],0
+        0x48, 0xff, 0xc0, // ASM: inc rax
+        0x48, 0x39, 0xf0, // ASM: cmp rax,rsi
+        0x75, 0xf1, // ASM: jne 0x140001007
+        0xc3, // ASM: ret
+    ];
+    let p = program64(&code);
+    let a = Analysis::compute(&p);
+    let v = verify(&p, &a, &[0x1_4000_1000], 1);
+    assert!(v.mismatches.is_empty(), "{}", verify_tsv(&v));
+    let text = decompiled(&p, 0x1_4000_1000);
+    assert!(!text.contains("do {") && !text.contains("if ("), "{text}");
+    assert!(text.contains("for ("), "{text}");
+}
+
+/// A division stays under the guard that keeps it from running.
+///
+/// `test rsi,rsi; je O; mov r13,rsi; mov rax,rdi; xor edx,edx; div r13;
+/// mov rbx,rax; xor r12d,r12d; L: inc rbx; mov [rbx],r12; inc r12; cmp
+/// r12,r13; jb L; O: ret` divides only when `a2` is not zero; moved out of
+/// the `if`, the `/` would trap.
+#[test]
+fn a_dividing_init_stays_under_its_guard() {
+    let divided = [
+        0x48, 0x85, 0xf6, // ASM: test rsi,rsi
+        0x74, 0x21, // ASM: je 0x140001026
+        0x49, 0x89, 0xf5, // ASM: mov r13,rsi
+        0x48, 0x89, 0xf8, // ASM: mov rax,rdi
+        0x31, 0xd2, // ASM: xor edx,edx
+        0x49, 0xf7, 0xf5, // ASM: div r13
+        0x48, 0x89, 0xc3, // ASM: mov rbx,rax
+        0x45, 0x31, 0xe4, // ASM: xor r12d,r12d
+        0x48, 0xff, 0xc3, // ASM: inc rbx
+        0x4c, 0x89, 0x23, // ASM: mov [rbx],r12
+        0x90, 0x90, // ASM: nop x2
+        0x49, 0xff, 0xc4, // ASM: inc r12
+        0x4d, 0x39, 0xec, // ASM: cmp r12,r13
+        0x72, 0xf0, // ASM: jb 0x140001016
+        0xc3, // ASM: ret
+    ];
+    let text = decompiled(&program64(&divided), 0x1_4000_1000);
+    let guard = text.find("if (").unwrap_or(usize::MAX);
+    let quotient = text.find(" / ").unwrap_or(0);
+    assert!(guard < quotient, "{text}");
+}
+
+/// A store to a global stays under the guard that keeps it from running.
+///
+/// `mov rbx,rdi; cmp dword [rbx],0; je O; mov dword [rip+counter],0; L:
+/// add dword [rbx+4],1; cmp dword [rbx],0; jne L; O: ret` stores `counter`
+/// only when the guard holds, which a caller sees.
+#[test]
+fn a_store_to_a_global_stays_under_its_guard() {
+    let stored = [
+        0x48, 0x89, 0xfb, // ASM: mov rbx,rdi
+        0x83, 0x3b, 0x00, // ASM: cmp dword [rbx],0
+        0x74, 0x14, // ASM: je 0x14000101c
+        0xc7, 0x05, 0xee, 0x1f, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, // ASM: mov dword [rip+0x1fee],0
+        0x83, 0x43, 0x04, 0x01, // ASM: add dword [rbx+4],1
+        0x90, // ASM: nop
+        0x83, 0x3b, 0x00, // ASM: cmp dword [rbx],0
+        0x75, 0xf6, // ASM: jne 0x140001012
+        0xc3, // ASM: ret
+    ];
+    let p = program64_with_globals(&stored, false, &[("counter", 0x1_4000_3000)]);
+    let text = decompiled(&p, 0x1_4000_1000);
+    let guard = text.find("if (").unwrap_or(usize::MAX);
+    let store = text.find("counter = 0;").unwrap_or(0);
+    assert!(guard < store, "{text}");
+}
