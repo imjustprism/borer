@@ -27,7 +27,10 @@ mod words;
 /// take ([`evidence::name_vars`]).
 ///
 /// For callers that assemble the text themselves; [`decompile`] and
-/// [`decompile_named`] already apply it.
+/// [`decompile_named`] already apply it. A text with no decompilation
+/// behind it carries no machine facts, so no parameter is held at the
+/// word; inside the engine a [`Decompiled`] is polished with
+/// [`polish_decompiled`], which keeps them.
 ///
 /// # Arguments
 ///
@@ -45,6 +48,27 @@ mod words;
 pub fn polish(text: &str, bitness: u32, packs: &crate::pack::Packs) -> String {
     let text = Traced::new(text.to_owned(), None);
     polish_skipping(text, bitness, packs, Passes::NONE, None, &BTreeSet::new()).into_text()
+}
+
+/// [`polish`] of a decompilation's own text, with the parameters its code
+/// shows to be a whole word ([`Decompiled::wide`]).
+///
+/// # Arguments
+///
+/// * `d` - The decompilation.
+/// * `bitness` - The image's word in bits (32 or 64).
+/// * `packs` - The packs in force.
+///
+/// # Returns
+///
+/// The polished text.
+pub(super) fn polish_decompiled(
+    d: &Decompiled,
+    bitness: u32,
+    packs: &crate::pack::Packs,
+) -> String {
+    let text = Traced::new(d.text.clone(), None);
+    polish_skipping(text, bitness, packs, Passes::NONE, None, &d.wide).into_text()
 }
 
 /// [`polish_skipping`] with the caller literals and the callees of `entry`

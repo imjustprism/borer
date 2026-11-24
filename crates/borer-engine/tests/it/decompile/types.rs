@@ -1,7 +1,9 @@
 //! Parameter and local types that need a witness: a narrow type is printed
 //! only when the code shows that width, and a wide fact vetoes it.
 
-use super::{Analysis, Overlay, decompile, polish, program64, replays_clean, runs_agree};
+use super::{
+    Analysis, Overlay, decompile, decompile_scenario, polish, program64, replays_clean, runs_agree,
+};
 use borer_engine::pack::Packs;
 use borer_engine::program::{Arch, BinaryFormat, Program};
 
@@ -346,4 +348,17 @@ fn a_copy_of_a_char_pointer_global_types_the_slot() {
     assert!(!out.contains("char* local_10"), "{out}");
     let untyped = polish(&raw("uint64_t "), 64, &Packs::default());
     assert!(!untyped.contains("char* local_8"), "{untyped}");
+}
+
+/// A scenario's text keeps the wide parameter the plain decompile keeps:
+/// it is polished from the same decompilation, machine facts included.
+#[test]
+fn a_scenario_keeps_the_wide_parameter() {
+    let p = sysv(&spilled_store(&[
+        0x48, 0x89, 0x75, 0xf0, // ASM: mov [rbp-0x10], rsi
+        0x48, 0x8b, 0x45, 0xf0, // ASM: mov rax, [rbp-0x10]
+    ]));
+    let a = Analysis::compute(&p);
+    let text = decompile_scenario(&p, &a, &Overlay::default(), ENTRY, &[]).unwrap_or_default();
+    assert!(text.contains("uint64_t a2"), "{text}");
 }

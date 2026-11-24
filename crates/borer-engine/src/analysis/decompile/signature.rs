@@ -10,7 +10,7 @@ use crate::isa::x86::Register;
 
 use super::abi;
 use super::ctext::{Base, CTy, Tok, closing, leading_type, split_top, tokens};
-use super::line::{is_param_name, word_positions};
+use super::line::{is_ident, is_ident_char, is_param_name, word_positions};
 use crate::analysis::{Analysis, Overlay};
 use crate::emulate::Emulator;
 use crate::num::from_usize;
@@ -448,4 +448,76 @@ pub(super) fn drop_high_halves(lines: &mut [String], sig: usize) {
             lines[sig] = lines[sig].replace(&format!(", uint32_t {next}{end}"), end);
         }
     }
+}
+
+/// The parameters the signature declares, by name, with their declared
+/// types.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+///
+/// # Returns
+///
+/// `(name, type)` per parameter, in order; empty without a signature.
+pub(super) fn signature_params(text: &str) -> Vec<(String, String)> {
+    signature_places(text).into_iter().flatten().collect()
+}
+
+/// The signature's parameter places, in order, nesting in the function's
+/// name (`Pair<int, int>::f`) and in the types (`int (*)(int, int)`)
+/// tracked.
+///
+/// # Arguments
+///
+/// * `text` - A decompiled function, header lines first.
+///
+/// # Returns
+///
+/// `(name, type)` per place, `None` for one with no plain name (`...`, a
+/// function pointer spelled around its name); empty without a signature.
+pub(super) fn signature_places(text: &str) -> Vec<Option<(String, String)>> {
+    let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
+        return Vec::new();
+    };
+    let sig = sig.strip_suffix(" const").unwrap_or(sig);
+    let Some(body) = sig.strip_suffix(')') else {
+        return Vec::new();
+    };
+    let mut depth = 0usize;
+    let open = body.char_indices().rev().find_map(|(i, c)| {
+        match c {
+            ')' | '>' => depth += 1,
+            '(' if depth == 0 => return Some(i),
+            '(' | '<' => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        None
+    });
+    let Some(params) = open.and_then(|i| body.get(i + 1..)) else {
+        return Vec::new();
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    let (mut depth, mut start) = (0usize, 0);
+    for (i, c) in params.char_indices() {
+        match c {
+            '(' | '<' => depth += 1,
+            ')' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                parts.push(&params[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&params[start..]);
+    parts
+        .into_iter()
+        .map(|p| {
+            let p = p.trim();
+            let name_at = p.rfind(|c: char| !is_ident_char(c))? + 1;
+            let (ty, name) = (p.get(..name_at)?.trim(), p.get(name_at..)?);
+            is_ident(name).then(|| (name.to_owned(), ty.to_owned()))
+        })
+        .collect()
 }

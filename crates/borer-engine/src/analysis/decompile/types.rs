@@ -7,6 +7,7 @@ use crate::analysis::protos::{local_depth, local_name};
 mod infer;
 mod regions;
 
+pub(super) use super::signature::{signature_params, signature_places};
 pub(super) use infer::{Casts, inferred_type_on, scalar_width, signature_result, type_parameters};
 pub(super) use regions::filled_regions;
 
@@ -420,62 +421,6 @@ fn typed_pointers(text: &str) -> Vec<(String, String)> {
     signature_params(text)
         .into_iter()
         .filter(|(_, ty)| pointee_of(ty).is_some_and(|p| !BYTE_POINTEES.contains(&p)))
-        .collect()
-}
-
-/// The parameters the signature declares, by name, with their declared
-/// types.
-///
-/// # Arguments
-///
-/// * `text` - A decompiled function, header lines first.
-///
-/// # Returns
-///
-/// `(name, type)` per parameter, in order; empty without a signature.
-pub(super) fn signature_params(text: &str) -> Vec<(String, String)> {
-    let Some(sig) = text.lines().find_map(|l| l.strip_prefix("// signature: ")) else {
-        return Vec::new();
-    };
-    let sig = sig.strip_suffix(" const").unwrap_or(sig);
-    let Some(body) = sig.strip_suffix(')') else {
-        return Vec::new();
-    };
-    let mut depth = 0usize;
-    let open = body.char_indices().rev().find_map(|(i, c)| {
-        match c {
-            ')' | '>' => depth += 1,
-            '(' if depth == 0 => return Some(i),
-            '(' | '<' => depth = depth.saturating_sub(1),
-            _ => {}
-        }
-        None
-    });
-    let Some(params) = open.and_then(|i| body.get(i + 1..)) else {
-        return Vec::new();
-    };
-    let mut parts: Vec<&str> = Vec::new();
-    let (mut depth, mut start) = (0usize, 0);
-    for (i, c) in params.char_indices() {
-        match c {
-            '(' | '<' => depth += 1,
-            ')' | '>' => depth = depth.saturating_sub(1),
-            ',' if depth == 0 => {
-                parts.push(&params[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&params[start..]);
-    parts
-        .into_iter()
-        .filter_map(|p| {
-            let p = p.trim();
-            let name_at = p.rfind(|c: char| !is_ident_char(c))? + 1;
-            let (ty, name) = (p.get(..name_at)?.trim(), p.get(name_at..)?);
-            is_ident(name).then(|| (name.to_owned(), ty.to_owned()))
-        })
         .collect()
 }
 

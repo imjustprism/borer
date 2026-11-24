@@ -67,11 +67,18 @@ pub(in crate::analysis::decompile) fn type_parameters(
     if word == "uint32_t" {
         drop_high_halves(&mut lines, sig);
     }
+    let places = signature_places(&lines[sig]);
+    let shown_wide = |name: &str| {
+        wide.iter().any(|&k| {
+            places
+                .get(k)
+                .and_then(Option::as_ref)
+                .is_some_and(|(n, _)| n == name)
+        })
+    };
     let params: Vec<(String, String, bool)> = lines[sig]
         .split(['(', ',', ')'])
-        .skip(1)
-        .enumerate()
-        .filter_map(|(k, p)| {
+        .filter_map(|p| {
             let (ty, name) = p.trim().rsplit_once(' ')?;
             let (ty, name) = match name.strip_prefix('*') {
                 Some(n) => (format!("{} *", ty.trim()), n),
@@ -79,7 +86,7 @@ pub(in crate::analysis::decompile) fn type_parameters(
             };
             let named_signed =
                 is_ident(name) && narrow_type(&ty).is_some_and(|(_, mask)| mask.is_none());
-            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned(), wide.contains(&k)))
+            (is_param_name(name) || named_signed).then(|| (ty, name.to_owned(), shown_wide(name)))
         })
         .collect();
     for (declared, param, shown_wide) in params {
@@ -1833,5 +1840,19 @@ return (uint32_t)a1;
             &std::collections::BTreeSet::new(),
         );
         assert!(!typed.contains("char **a2"), "{typed}");
+    }
+
+    /// The wide place is counted over the signature's own parameters, so a
+    /// template name's commas do not move the veto onto another one.
+    #[test]
+    fn a_wide_place_is_counted_past_a_template_name() {
+        let text = concat!(
+            "// signature: void Pair<int, int>::f(uint64_t a1, uint64_t a2)\n",
+            "*(uint32_t*)0x1000 = a1;\n",
+            "*(uint32_t*)0x1004 = a2;\n",
+        );
+        let typed =
+            super::type_parameters(text, "uint64_t", &std::collections::BTreeSet::from([1]));
+        assert!(typed.contains("f(uint32_t a1, uint64_t a2)"), "{typed}");
     }
 }

@@ -44,7 +44,7 @@ pub fn decompile_scenario(
         Kept::NOTHING,
     )?;
     let word = if program.is_64 { 64 } else { 32 };
-    let text = polish(&d.text, word, &analysis.packs);
+    let text = polish_decompiled(&d, word, &analysis.packs);
     let said: Vec<String> = assume
         .iter()
         .map(|&(slot, v)| {
@@ -129,7 +129,7 @@ pub fn explode(
         ) else {
             continue;
         };
-        let text = polish(&d.text, word, &analysis.packs);
+        let text = polish_decompiled(&d, word, &analysis.packs);
         let mut calls: Vec<String> = Vec::new();
         for c in crate::analysis::schema::calls_in_order(&blank_strings(&text)) {
             if !calls.contains(&c.callee) {
