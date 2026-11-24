@@ -3,7 +3,7 @@
 
 use super::super::ctext::{Ast, Base, Bin, CTy, Tok, Un, expression, leading_type, named_type};
 use super::super::expr::{mask_bits, sext};
-use super::super::finish::decl_type;
+use super::super::finish::{decl_type, declares};
 use super::super::interp::pure;
 use super::*;
 use crate::analysis::protos::local_depth;
@@ -281,6 +281,11 @@ struct Declared {
     /// Each frame slot the text names and the bytes below the frame base
     /// it starts at, gathered at the first slot looked up.
     slots: Option<Vec<(String, i64)>>,
+    /// The lines that declare: the function's own header or signature
+    /// line and its local declarations, gathered at the first name looked
+    /// up. A call, a test or a prototype names other things in
+    /// parentheses.
+    decls: Option<Vec<String>>,
 }
 
 /// The values the assignments in front of a loop leave.
@@ -358,7 +363,7 @@ impl<'a> Entry<'a, '_> {
     }
 
     /// Returns the integer or pointer type one declaration of a name gives
-    /// ([`decl_type`]).
+    /// ([`decl_type`] over the lines that declare).
     ///
     /// # Arguments
     ///
@@ -371,7 +376,24 @@ impl<'a> Entry<'a, '_> {
         if let Some((_, ty)) = self.declared.types.iter().find(|(n, _)| n == name) {
             return *ty;
         }
-        let ty = decl_type(self.lines, name).and_then(|text| {
+        let lines = self.lines;
+        let decls = self.declared.decls.get_or_insert_with(|| {
+            lines
+                .iter()
+                .enumerate()
+                .filter(|(i, l)| {
+                    let t = l.trim();
+                    let header = indent_of(l) == 0
+                        && !t.ends_with(';')
+                        && lines.get(i + 1).is_some_and(|n| n.trim() == "{");
+                    header
+                        || t.starts_with("// signature:")
+                        || declares(t) && !t.starts_with("extern ")
+                })
+                .map(|(_, l)| l.clone())
+                .collect()
+        });
+        let ty = decl_type(decls, name).and_then(|text| {
             let toks = c_tokens(&text).ok()?;
             let (base, at) = leading_type(&toks, self.word)?;
             let ty = toks

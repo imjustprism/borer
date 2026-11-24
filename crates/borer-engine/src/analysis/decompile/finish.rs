@@ -14,7 +14,7 @@ mod callee;
 pub(super) use callee::{CALLEE_INSTRUCTIONS_MAX, agreed_params};
 mod callfmt;
 mod selects;
-pub(super) use selects::decl_type;
+pub(super) use selects::{decl_type, declares};
 mod signs;
 mod truths;
 mod words;

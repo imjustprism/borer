@@ -1776,7 +1776,7 @@ fn plain_value(expr: &str) -> bool {
 /// # Arguments
 ///
 /// * `line` - One line.
-fn declares(line: &str) -> bool {
+pub(in crate::analysis::decompile) fn declares(line: &str) -> bool {
     let t = line.trim();
     t.ends_with(';')
         && t.contains(' ')

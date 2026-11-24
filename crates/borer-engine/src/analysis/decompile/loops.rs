@@ -1059,4 +1059,22 @@ mod tests {
         let slot_step = "uint32_t local_10;\nuint32_t local_c;\nrsi = &local_10 + 1;\ndo {\n  sub_1(rsi);\n  rsi += 4;\n} while (rsi != &local_c);\nreturn 0;\n";
         assert_eq!(decide(slot_step), slot_step);
     }
+
+    /// A parameter a call's argument ends with is still typed by the
+    /// function's header or its signature line: only the lines that
+    /// declare give types.
+    #[test]
+    fn a_parameter_a_call_reads_keeps_its_header_type() {
+        let loop_lines = "  uint64_t var1;\n  sub_2(var1 + a2);\n  var1 = a2;\n  do {\n    sub_1(var1);\n    var1 += 4;\n  } while (var1 != a2 + 120);\n  return;\n}\n";
+        let counted = "  uint64_t var1;\n  sub_2(var1 + a2);\n  for (var1 = a2; var1 != a2 + 120; var1 += 4) {\n    sub_1(var1);\n  }\n  return;\n}\n";
+        for head in [
+            "void f(uint64_t a2)\n{\n",
+            "// signature: void f(uint64_t a2)\nvoid f()\n{\n",
+        ] {
+            assert_eq!(
+                decide(&format!("{head}{loop_lines}")),
+                format!("{head}{counted}")
+            );
+        }
+    }
 }
