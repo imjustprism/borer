@@ -557,3 +557,118 @@ fn a_callers_sign_extension_keeps_the_parameter_wide() {
     let mixed = checked_at(&call_site_image(movsxd, Some(narrow)), CALLEE);
     assert!(mixed.contains("uint32_t a2"), "{mixed}");
 }
+
+/// Returns an x64 image with each part's bytes at its offset from
+/// [`ENTRY`], every part named as a function.
+///
+/// # Arguments
+///
+/// * `parts` - Each part's offset and bytes, in order.
+/// * `format` - The convention's format: System V for ELF, Windows for PE.
+fn layout(parts: &[(u64, &[u8])], format: BinaryFormat) -> Program {
+    let mut code = Vec::new();
+    for &(at, bytes) in parts {
+        code.resize(usize::try_from(at).unwrap_or(0), 0xcc);
+        code.extend_from_slice(bytes);
+    }
+    let mut p = program64(&code);
+    p.format = format;
+    p.symbols = parts
+        .iter()
+        .enumerate()
+        .map(|(k, &(at, _))| Symbol {
+            name: format!("part{k}"),
+            addr: ENTRY + at,
+            kind: SymbolKind::Local,
+        })
+        .collect();
+    p
+}
+
+/// The callee's own four-byte home spill outweighs a caller's sign
+/// extension: the callee is the one that says what it keeps.
+#[test]
+fn the_callees_narrow_spill_outweighs_a_callers_widening() {
+    let p = layout(
+        &[
+            (0, &[0x48, 0x63, 0xf0, 0xe8, 0x18, 0x00, 0x00, 0x00, 0xc3]), // ASM: movsxd rsi, eax; call +0x20; ret
+            (
+                0x20,
+                &[
+                    0x55, // ASM: push rbp
+                    0x48, 0x89, 0xe5, // ASM: mov rbp, rsp
+                    0x48, 0x89, 0x7d, 0xf8, // ASM: mov [rbp-0x8], rdi
+                    0x89, 0x75, 0xe4, // ASM: mov [rbp-0x1c], esi
+                    0xe8, 0x10, 0x00, 0x00, 0x00, // ASM: call +0x40
+                    0x8b, 0x45, 0xe4, // ASM: mov eax, [rbp-0x1c]
+                    0x48, 0x8b, 0x55, 0xf8, // ASM: mov rdx, [rbp-0x8]
+                    0x89, 0x42, 0x04, // ASM: mov [rdx+0x4], eax
+                    0x5d, // ASM: pop rbp
+                    0xc3, // ASM: ret
+                ],
+            ),
+            (0x40, &[0xc3]), // ASM: ret
+        ],
+        BinaryFormat::Elf,
+    );
+    let text = checked_at(&p, CALLEE);
+    assert!(text.contains("uint32_t a2"), "{text}");
+}
+
+/// A call that writes the argument register any way but a constant, here
+/// as the second operand of `xchg`, vetoes another call's widening.
+#[test]
+fn an_xchg_into_the_argument_register_vetoes_a_widening() {
+    let xchg = [0x87, 0xf0, 0x90]; // ASM: xchg eax, esi; nop
+    let text = checked_at(&call_site_image([0x48, 0x63, 0xf0], Some(xchg)), CALLEE); // ASM: movsxd rsi, eax
+    assert!(text.contains("uint32_t a2"), "{text}");
+}
+
+/// Near misses: a 32-bit sign extension widens nothing; a call or a branch
+/// target between the extension and the call hides it; the Windows
+/// convention's `rdx` is read the same way.
+#[test]
+fn a_callers_widening_needs_the_whole_register_right_before_the_call() {
+    let movsx32 = checked_at(&call_site_image([0x0f, 0xbe, 0xf0], None), CALLEE); // ASM: movsx esi, al
+    assert!(movsx32.contains("uint32_t a2"), "{movsx32}");
+    let store = [0x89, 0x77, 0x04, 0xc3]; // ASM: mov [rdi+0x4], esi; ret
+    let call_between = layout(
+        &[
+            (
+                0,
+                &[
+                    0x48, 0x63, 0xf0, 0xe8, 0x28, 0x00, 0x00, 0x00, 0xe8, 0x13, 0x00, 0x00, 0x00,
+                    0xc3,
+                ],
+            ), // ASM: movsxd rsi, eax; call +0x30; call +0x20; ret
+            (0x20, &store),
+            (0x30, &[0xc3]), // ASM: ret
+        ],
+        BinaryFormat::Elf,
+    );
+    let between = checked_at(&call_between, CALLEE);
+    assert!(between.contains("uint32_t a2"), "{between}");
+    let branch_target = layout(
+        &[
+            (
+                0,
+                &[
+                    0x48, 0x63, 0xf0, 0x85, 0xc9, 0x74, 0x00, 0xe8, 0x14, 0x00, 0x00, 0x00, 0xc3,
+                ],
+            ), // ASM: movsxd rsi, eax; test ecx, ecx; je +0; call +0x20; ret
+            (0x20, &store),
+        ],
+        BinaryFormat::Elf,
+    );
+    let target = checked_at(&branch_target, CALLEE);
+    assert!(target.contains("uint32_t a2"), "{target}");
+    let windows = layout(
+        &[
+            (0, &[0x48, 0x63, 0xd0, 0xe8, 0x18, 0x00, 0x00, 0x00, 0xc3]), // ASM: movsxd rdx, eax; call +0x20; ret
+            (0x20, &[0x89, 0x51, 0x04, 0xc3]), // ASM: mov [rcx+0x4], edx; ret
+        ],
+        BinaryFormat::Pe,
+    );
+    let win = checked_at(&windows, CALLEE);
+    assert!(win.contains("uint64_t a2"), "{win}");
+}

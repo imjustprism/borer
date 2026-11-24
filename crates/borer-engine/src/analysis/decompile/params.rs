@@ -258,6 +258,14 @@ fn finish_param_types(
         };
         types.entry(p).or_insert_with(|| ty.to_owned());
     }
+    for (p, witness) in home_spills(ctx, code, entry) {
+        let ty = match witness {
+            Witness::WideSpill => word_type(64),
+            Witness::NarrowSpill => "uint32_t",
+            Witness::Walk | Witness::SteppedCopy => continue,
+        };
+        types.entry(p).or_insert_with(|| ty.to_owned());
+    }
     let at = code.get(entry).and_then(|c| c.first()).map(Instruction::ip);
     let widened = at
         .and_then(|a| ctx.analysis.wide_args.get(&a))
@@ -274,14 +282,6 @@ fn finish_param_types(
         {
             types.entry(p).or_insert_with(|| word_type(64).to_owned());
         }
-    }
-    for (p, witness) in home_spills(ctx, code, entry) {
-        let ty = match witness {
-            Witness::WideSpill => word_type(64),
-            Witness::NarrowSpill => "uint32_t",
-            Witness::Walk | Witness::SteppedCopy => continue,
-        };
-        types.entry(p).or_insert_with(|| ty.to_owned());
     }
     types
 }

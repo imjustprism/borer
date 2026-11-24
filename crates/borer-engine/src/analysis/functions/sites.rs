@@ -69,33 +69,55 @@ pub(super) fn straight_line_before(
 /// # Returns
 ///
 /// One constant per argument register holding one the call did not
-/// overwrite, and the extension or narrowing of each register whose last
-/// write was one.
+/// overwrite, and how the call last wrote its argument registers, `None`
+/// when the window shows no such write but constants.
 pub(super) fn call_arg_consts(
     program: &Program,
     bitness: u32,
     call_va: u64,
     callee: u64,
     recorded: &Recorded,
-) -> (Vec<ArgConst>, Vec<ArgExt>) {
+) -> (Vec<ArgConst>, Option<ArgExt>) {
     let args = crate::analysis::decompile::abi::conv(program, bitness).args;
     let window = straight_line_before(program, bitness, call_va, recorded);
     let mut held: BTreeMap<Register, Option<u64>> = BTreeMap::new();
-    let mut exts: BTreeMap<Register, Option<Ext>> = BTreeMap::new();
-    let mut factory = InstructionInfoFactory::new();
+    let mut exts: [Option<Ext>; ARG_SLOTS] = [None; ARG_SLOTS];
+    let mut note = |r: Register, e: Option<Ext>| {
+        if let Some(at) = args
+            .iter()
+            .position(|a| *a == r)
+            .and_then(|k| exts.get_mut(k))
+        {
+            *at = e;
+        }
+    };
+    let mut factory: Option<InstructionInfoFactory> = None;
     for i in &window {
-        for ur in factory.info(i).used_registers() {
-            let r = ur.register().full_register();
-            if args.contains(&r)
-                && matches!(
-                    ur.access(),
-                    OpAccess::Write
-                        | OpAccess::ReadWrite
-                        | OpAccess::CondWrite
-                        | OpAccess::ReadCondWrite
-                )
-            {
-                exts.insert(r, arg_ext(i, r));
+        match writes_only_op0(i) {
+            Some(writes) => {
+                let r = i.op0_register().full_register();
+                if writes && i.op0_kind() == OpKind::Register && args.contains(&r) {
+                    note(r, arg_ext(i, r));
+                }
+            }
+            None => {
+                let info = factory
+                    .get_or_insert_with(InstructionInfoFactory::new)
+                    .info(i);
+                for ur in info.used_registers() {
+                    let r = ur.register().full_register();
+                    if args.contains(&r)
+                        && matches!(
+                            ur.access(),
+                            OpAccess::Write
+                                | OpAccess::ReadWrite
+                                | OpAccess::CondWrite
+                                | OpAccess::ReadCondWrite
+                        )
+                    {
+                        note(r, arg_ext(i, r));
+                    }
+                }
             }
         }
         if i.op0_kind() != OpKind::Register {
@@ -129,18 +151,24 @@ pub(super) fn call_arg_consts(
             })
         })
         .collect();
-    let exts = exts
-        .into_iter()
-        .filter_map(|(r, e)| {
-            Some(ArgExt {
-                callee,
-                slot: slot(r)?,
-                ext: e?,
-            })
-        })
-        .collect();
-    (consts, exts)
+    let mask = |want: Ext| {
+        exts.iter()
+            .enumerate()
+            .filter(|(_, e)| **e == Some(want))
+            .fold(0u8, |m, (k, _)| m | 1 << k)
+    };
+    let (widened, other) = (mask(Ext::Widened), mask(Ext::Other));
+    let ext = (widened | other != 0).then_some(ArgExt {
+        callee,
+        widened,
+        other,
+    });
+    (consts, ext)
 }
+
+/// Most argument registers a convention passes in, a bit per slot in an
+/// [`ArgExt`] mask.
+const ARG_SLOTS: usize = 8;
 
 /// How a call site's setup last wrote an argument register.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -149,27 +177,75 @@ pub(super) enum Ext {
     /// (`movsxd rsi, eax`, `movsx rsi, al`): the callee's formal is wider
     /// than the value, since a 32-bit formal needs no extension.
     Widened,
-    /// Wrote 32 bits or fewer of a value that is no constant (`mov esi, eax`).
-    Narrow,
+    /// Any other write but a constant: a narrower value (`mov esi, eax`,
+    /// `movsx esi, al`), one an instruction writes without naming the
+    /// register as its destination (`xchg eax, esi`, `cdq` into `rdx`), or
+    /// a whole register whose width says nothing (`mov rsi, rax`).
+    Other,
 }
 
-/// How one call sets one argument register ([`Ext`]).
+/// How one call sets its argument registers ([`Ext`]), a bit per slot
+/// (the parameter's index among the argument registers).
 pub(super) struct ArgExt {
     /// The callee.
     pub(super) callee: u64,
-    /// The parameter's index among the argument registers.
-    pub(super) slot: u8,
-    /// How the register was last written.
-    pub(super) ext: Ext,
+    /// The slots the call last wrote by a sign extension ([`Ext::Widened`]).
+    pub(super) widened: u8,
+    /// The slots it last wrote any other way but a constant ([`Ext::Other`]).
+    pub(super) other: u8,
+}
+
+/// Tells whether `i` is a common instruction that writes no general
+/// register but its first operand, and whether it writes that one.
+///
+/// `mov`, `lea`, the arithmetic and logic of two operands, the extensions,
+/// the shifts, `inc`, `dec`, `neg`, `not`, `pop` and a two- or
+/// three-operand `imul` write their first operand and no other general
+/// register (`pop` also moves `rsp`, which is no argument register); `cmp`,
+/// `test`, `push` and `nop` write none. Any other instruction may write a
+/// register it does not name first (`xchg eax, esi`, `cdq` into `rdx`),
+/// so the call site asks the decoder's register facts of it instead.
+///
+/// # Arguments
+///
+/// * `i` - The instruction.
+///
+/// # Returns
+///
+/// `Some(true)` when it writes only its first operand, `Some(false)` when
+/// it writes no register, `None` for any other instruction.
+fn writes_only_op0(i: &Instruction) -> Option<bool> {
+    match i.mnemonic() {
+        Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Push | Mnemonic::Nop => Some(false),
+        Mnemonic::Mov
+        | Mnemonic::Lea
+        | Mnemonic::Add
+        | Mnemonic::Sub
+        | Mnemonic::And
+        | Mnemonic::Or
+        | Mnemonic::Xor
+        | Mnemonic::Movzx
+        | Mnemonic::Movsx
+        | Mnemonic::Movsxd
+        | Mnemonic::Shl
+        | Mnemonic::Shr
+        | Mnemonic::Sar
+        | Mnemonic::Inc
+        | Mnemonic::Dec
+        | Mnemonic::Neg
+        | Mnemonic::Not
+        | Mnemonic::Pop => Some(true),
+        Mnemonic::Imul if i.op_count() >= 2 => Some(true),
+        _ => None,
+    }
 }
 
 /// Returns how `i`, which writes argument register `r`, sets it.
 ///
-/// A sign extension into the whole register widens; any other explicit
-/// write of 32 bits or fewer narrows, except a constant (`mov esi, 5`) or
-/// a zeroing `xor`, which compilers write at 32 bits for a 64-bit formal
-/// too. A write `i` makes without naming `r` as its destination (`cdq`
-/// into `rdx`) or of the whole register says nothing.
+/// A sign extension into the whole register as the destination widens.
+/// A constant (`mov esi, 5`) or a zeroing `xor` says nothing, since
+/// compilers write those at 32 bits for a 64-bit formal too. Every other
+/// write is [`Ext::Other`], which vetoes a widening at another call.
 ///
 /// # Arguments
 ///
@@ -177,45 +253,45 @@ pub(super) struct ArgExt {
 /// * `r` - The argument register, as its full register.
 fn arg_ext(i: &Instruction, r: Register) -> Option<Ext> {
     if i.op0_kind() != OpKind::Register || i.op0_register().full_register() != r {
-        return None;
+        return Some(Ext::Other);
     }
-    let size = i.op0_register().size();
     match i.mnemonic() {
-        Mnemonic::Movsxd | Mnemonic::Movsx if size == 8 => Some(Ext::Widened),
+        Mnemonic::Movsxd | Mnemonic::Movsx if i.op0_register().size() == 8 => Some(Ext::Widened),
         Mnemonic::Mov if !matches!(i.op1_kind(), OpKind::Register | OpKind::Memory) => None,
         Mnemonic::Xor
             if i.op1_kind() == OpKind::Register && i.op1_register().full_register() == r =>
         {
             None
         }
-        _ => (size <= 4).then_some(Ext::Narrow),
+        _ => Some(Ext::Other),
     }
 }
 
 /// Returns, per callee, the argument slots some call sign-extends a value
-/// into and no call fills with a narrower value ([`Ext`]).
+/// into and no call writes any other way but a constant ([`Ext`]).
 ///
 /// A caller widening an `int` into the register shows the formal is 64
-/// bits; a caller passing a 32-bit value into the same slot contradicts
-/// it, and the slot is left out.
+/// bits; a caller writing the slot any other way leaves it undecided, and
+/// the slot is left out. A call whose setup the window does not show
+/// writing the register says nothing.
 ///
 /// # Arguments
 ///
 /// * `calls` - Per function, what its last walk read off its calls.
 pub(super) fn widened_args(calls: &BTreeMap<u64, Called>) -> BTreeMap<u64, BTreeSet<u8>> {
-    let mut seen: BTreeMap<(u64, u8), (bool, bool)> = BTreeMap::new();
+    let mut seen: BTreeMap<u64, (u8, u8)> = BTreeMap::new();
     for a in calls.values().flat_map(|c| &c.exts) {
-        let (widened, narrow) = seen.entry((a.callee, a.slot)).or_default();
-        match a.ext {
-            Ext::Widened => *widened = true,
-            Ext::Narrow => *narrow = true,
-        }
+        let (widened, other) = seen.entry(a.callee).or_default();
+        *widened |= a.widened;
+        *other |= a.other;
     }
-    let mut out: BTreeMap<u64, BTreeSet<u8>> = BTreeMap::new();
-    for ((callee, slot), _) in seen.into_iter().filter(|(_, (w, n))| *w && !*n) {
-        out.entry(callee).or_default().insert(slot);
-    }
-    out
+    seen.into_iter()
+        .map(|(callee, (widened, other))| {
+            let wide = widened & !other;
+            (callee, (0..8u8).filter(|k| wide >> k & 1 == 1).collect())
+        })
+        .filter(|(_, slots): &(u64, BTreeSet<u8>)| !slots.is_empty())
+        .collect()
 }
 
 /// Reads a class registration from a call site.
