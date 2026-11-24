@@ -51,6 +51,7 @@ mod format;
 mod frame;
 mod globals;
 mod guarded;
+mod header;
 mod helper;
 pub(crate) mod interp;
 mod ladder;
@@ -1792,148 +1793,13 @@ fn decompile_in<L: Lifter>(
     let value_return = body
         .lines()
         .any(|l| matches!(l.trim().strip_prefix("return "), Some(v) if v != ";"));
-    let inferred = match (value_return, ctx.ret_bits) {
-        (false, _) => "void",
-        (true, _) if f.ret_float == Some(32) || ctx.x87_ret == 32 => "float",
-        (true, _) if f.ret_float.is_some() => "double",
-        (true, 32) if ctx.ret_sse => "float",
-        (true, _) if ctx.ret_sse => "double",
-        (true, 8) => "uint8_t",
-        (true, 16) => "uint16_t",
-        (true, 32) => "uint32_t",
-        (true, _) => word_type(ctx.bitness),
-    };
-    let ret_ty = ctx.debug_ret.as_deref().unwrap_or(inferred);
     let typed = L::param_types(&ctx, &code, &succs, entry_block);
-    let name = name_of(analysis, overlay, f.entry);
-    let library = (ctx.stated.is_none()
-        && f.signature.is_none()
-        && ctx.debug_ret.is_none()
-        && ctx.debug_params.is_empty())
-    .then(|| {
-        signature::library_prototype(
-            crate::analysis::bare_name(&name),
-            program.format,
-            shape.count,
-            ctx.variadic,
-            value_return,
-        )
-    })
-    .flatten();
-    let declared: Vec<String> = match ctx.stated {
-        Some(_) => ctx
-            .debug_params
-            .iter()
-            .map(|p| p.type_name.clone().unwrap_or_default())
-            .collect(),
-        None => f.signature.as_ref().map_or_else(
-            || {
-                library.as_ref().map_or_else(Vec::new, |(_, params)| {
-                    params.iter().map(|p| (*p).to_owned()).collect()
-                })
-            },
-            |s| s.params.clone(),
-        ),
-    };
-    let var_typed: BTreeSet<usize> = overlay
-        .vars
-        .get(&f.entry)
-        .into_iter()
-        .flatten()
-        .filter_map(|(k, v)| match (k, &v.ty) {
-            (VarKey::Param(i), Some(_)) => Some(usize::from(*i)),
-            (VarKey::Param(_), None) | (VarKey::Slot(_), _) => None,
-        })
-        .collect();
-    let class = classes::class_of(crate::analysis::bare_name(&name)).unwrap_or("");
-    let ret_ty = f.signature.as_ref().map_or_else(
-        || match &library {
-            Some((ret, _)) => (*ret).to_owned(),
-            None => f
-                .ret_hint
-                .as_ref()
-                .filter(|_| f.ret_float.is_none())
-                .map_or(ret_ty.to_owned(), |c| format!("{c} *")),
-        },
-        |s| s.ret.clone(),
-    );
-    let ret_ty = match ctx.stated {
-        Some(_) => ctx.debug_ret.clone().unwrap_or_else(|| "void".to_owned()),
-        None => ret_ty,
-    };
-    let result_at = ctx.result_param.map(usize::from);
-    let lead = usize::from(ctx.this_param)
-        + usize::from(result_at.is_some_and(|r| r <= usize::from(ctx.this_param)));
-    let floats = shape.floats();
-    let mut params: Vec<String> = (0..shape.count)
-        .map(|i| {
-            let unread = || {
-                ctx.debug_params
-                    .get(i)
-                    .map(|p| p.name.clone())
-                    .filter(|n| !n.is_empty())
-                    .unwrap_or_else(|| format!("a{}", i + 1))
-            };
-            let key = u8::try_from(i)
-                .ok()
-                .filter(|_| {
-                    ctx.conv
-                        .arg_reg(i, floats)
-                        .is_some_and(|r| ctx.params.contains(&r))
-                })
-                .map_or_else(unread, |p| names.key(Key::Param(p)));
-            if ctx.this_param && i == 0 {
-                let this_class = if class.is_empty() {
-                    f.param_hints.get(&0).map_or("void", String::as_str)
-                } else {
-                    class
-                };
-                return format!("{this_class} *this");
-            }
-            if result_at == Some(i) {
-                return format!("{ret_ty} *result");
-            }
-            let hint = u8::try_from(i).ok().and_then(|p| f.param_hints.get(&p));
-            let float_only = floats & (1u8 << i.min(7)) != 0;
-            let plain = if float_only {
-                "float"
-            } else {
-                word_type(ctx.bitness)
-            };
-            let hint = hint.filter(|_| !float_only);
-            let recorded = ctx
-                .debug_params
-                .get(i)
-                .and_then(|p| p.type_name.clone())
-                .or_else(|| typed.get(&i).cloned());
-            let stated_ty = recorded.clone().filter(|_| var_typed.contains(&i));
-            match (
-                stated_ty
-                    .as_ref()
-                    .or_else(|| i.checked_sub(lead).and_then(|j| declared.get(j))),
-                hint,
-                recorded,
-            ) {
-                (Some(ty), _, _) if ty.ends_with('*') || ty.ends_with('&') => {
-                    format!("{ty}{key}")
-                }
-                (Some(ty), _, _) => format!("{ty} {key}"),
-                (None, Some(c), _) => format!("{c} *{key}"),
-                (None, None, Some(ty)) if ty.ends_with(['*', '&']) => format!("{ty}{key}"),
-                (None, None, Some(ty)) => format!("{ty} {key}"),
-                (None, None, None) => format!("{plain} {key}"),
-            }
-        })
-        .collect();
-    let wide = wide_params(&typed, &params, ctx.bitness);
-    if let Some(r) = result_at.filter(|r| *r < params.len()) {
-        let at = abi::indirect_result_position(ctx.this_param);
-        let result = params.remove(r);
-        params.insert(at.min(params.len()), result);
-    }
-    if ctx.variadic {
-        params.push("...".to_owned());
-    }
+    let header::Head {
+        name,
+        ret_ty,
+        params,
+        wide,
+    } = header::head(&ctx, f, &shape, &names, &typed, value_return);
     let suffix = f
         .signature
         .as_ref()
