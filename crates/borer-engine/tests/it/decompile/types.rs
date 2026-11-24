@@ -405,3 +405,46 @@ fn a_stepped_copy_names_its_element_only_when_the_step_fits() {
     let away = walk("*(uint8_t*)(local_10 + 5)", "1");
     assert!(away.contains("void *a1"), "{away}");
 }
+
+/// A string walk that reads the next byte and then steps onto it reads
+/// where its step lands: the parameter is a byte pointer.
+#[test]
+fn a_copy_read_where_its_step_lands_walks_bytes() {
+    let raw = concat!(
+        "// signature: uint32_t f(uint64_t a1)\n",
+        "uint64_t var3;\n",
+        "uint8_t var1;\n",
+        "\n",
+        "var1 = *(uint8_t*)a1;\n",
+        "var3 = a1;\n",
+        "while (var1 != 0) {\n",
+        "  var1 = *(uint8_t*)(var3 + 1);\n",
+        "  var3 += 1;\n",
+        "}\n",
+        "return var1;\n",
+    );
+    let out = polish(raw, 64, &Packs::default());
+    assert!(out.contains("uint8_t *a1"), "{out}");
+}
+
+/// Byte stores through a copy stepped by 2 on one path and by 1 on
+/// another walk bytes: every step is a whole number of them.
+#[test]
+fn byte_stores_through_unequal_steps_walk_bytes() {
+    let raw = concat!(
+        "// signature: void f(uint64_t a1, uint32_t a2)\n",
+        "uint64_t local_8;\n",
+        "\n",
+        "local_8 = a1;\n",
+        "if (a2 != 0) {\n",
+        "  *(uint8_t*)local_8 = 77;\n",
+        "  *(uint8_t*)(local_8 + 1) = 45;\n",
+        "  local_8 += 2;\n",
+        "}\n",
+        "*(uint8_t*)local_8 = 94;\n",
+        "local_8 += 1;\n",
+        "*(uint8_t*)local_8 = 0;\n",
+    );
+    let out = polish(raw, 64, &Packs::default());
+    assert!(out.contains("uint8_t *a1"), "{out}");
+}

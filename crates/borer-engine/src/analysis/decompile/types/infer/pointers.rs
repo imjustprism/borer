@@ -42,10 +42,11 @@ const LOAD_TYPES: [(&str, usize); 11] = [
 /// The loads through a variable the parameter is copied into ([`copies`])
 /// count too: at their own offsets when the copy only holds the
 /// parameter, and as a walk ([`Witness::SteppedCopy`]) when the copy is
-/// indexed, or stepped ([`steps`]) by the width it reads and read where it
-/// points, so bytes read through it make a byte pointer. A copy stepped
-/// by another amount, or read only away from where it points, walks
-/// something whose element the text does not show: `void *`.
+/// indexed, or stepped ([`steps`]) by the width it reads (any step, for
+/// bytes) and read where it points or where a step lands (`c = p[1];
+/// p += 1;`), so bytes read through it make a byte pointer. A wider copy
+/// stepped by another amount, or one read only elsewhere, walks something
+/// whose element the text does not show: `void *`.
 ///
 /// # Arguments
 ///
@@ -74,11 +75,17 @@ pub(super) fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> 
         }
         let steps = steps(lines, &copy);
         let width = own.iter().copied().next().filter(|_| own.len() == 1);
-        let by_width = steps.iter().all(|s| match s {
-            Some(k) => width.is_some_and(|w| u64::try_from(w).is_ok_and(|w| w == *k)),
-            None => width == Some(1),
-        });
-        if indexed || (!steps.is_empty() && by_width && moved.contains(&0)) {
+        let by_width = width == Some(1)
+            || steps.iter().all(|s| {
+                s.zip(width)
+                    .is_some_and(|(k, w)| u64::try_from(w).is_ok_and(|w| w == k))
+            });
+        let lands = moved.contains(&0)
+            || steps
+                .iter()
+                .flatten()
+                .any(|&k| i64::try_from(k).is_ok_and(|k| moved.contains(&k)));
+        if indexed || (!steps.is_empty() && by_width && lands) {
             walk = walk.or(Some(Witness::SteppedCopy));
             offsets.insert(0);
         } else if !steps.is_empty() {
