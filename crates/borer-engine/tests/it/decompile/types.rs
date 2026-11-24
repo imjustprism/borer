@@ -362,3 +362,46 @@ fn a_scenario_keeps_the_wide_parameter() {
     let text = decompile_scenario(&p, &a, &Overlay::default(), ENTRY, &[]).unwrap_or_default();
     assert!(text.contains("uint64_t a2"), "{text}");
 }
+
+/// A declared `void *` read through an unstepped copy at two byte offsets
+/// points at fields: it stays `void *`.
+#[test]
+fn a_void_pointer_read_through_an_unstepped_copy_stays_void() {
+    let raw = concat!(
+        "// signature: uint32_t f(void *a1)\n",
+        "uint64_t local_10;\n",
+        "\n",
+        "local_10 = a1;\n",
+        "return *(uint8_t*)(local_10 + 4) + *(uint8_t*)(local_10 + 8);\n",
+    );
+    let out = polish(raw, 64, &Packs::default());
+    assert!(out.contains("void *a1"), "{out}");
+    assert!(!out.contains("uint8_t *a1"), "{out}");
+}
+
+/// A copy stepped by its load's width walks elements of that width; one
+/// stepped by another amount, or read only away from where it points,
+/// shows no element: `void *`.
+#[test]
+fn a_stepped_copy_names_its_element_only_when_the_step_fits() {
+    let walk = |load: &str, step: &str| {
+        let raw = [
+            "// signature: uint64_t f(uint64_t a1)",
+            "uint64_t local_10;",
+            "",
+            "local_10 = a1;",
+            &format!("while ({load} != 0) {{"),
+            &format!("  local_10 += {step};"),
+            "}",
+            "return local_10;",
+        ]
+        .join("\n");
+        polish(&raw, 64, &Packs::default())
+    };
+    let fits = walk("*(uint16_t*)local_10", "2");
+    assert!(fits.contains("uint16_t *a1"), "{fits}");
+    let wider = walk("*(uint16_t*)local_10", "4");
+    assert!(wider.contains("void *a1"), "{wider}");
+    let away = walk("*(uint8_t*)(local_10 + 5)", "1");
+    assert!(away.contains("void *a1"), "{away}");
+}

@@ -42,8 +42,10 @@ const LOAD_TYPES: [(&str, usize); 11] = [
 /// The loads through a variable the parameter is copied into ([`copies`])
 /// count too: at their own offsets when the copy only holds the
 /// parameter, and as a walk ([`Witness::SteppedCopy`]) when the copy is
-/// stepped or indexed ([`stepped`]), so bytes read through it make a byte
-/// pointer.
+/// indexed, or stepped ([`steps`]) by the width it reads and read where it
+/// points, so bytes read through it make a byte pointer. A copy stepped
+/// by another amount, or read only away from where it points, walks
+/// something whose element the text does not show: `void *`.
 ///
 /// # Arguments
 ///
@@ -62,20 +64,33 @@ pub(super) fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> 
     let mut types: BTreeSet<&'static str> = BTreeSet::new();
     let mut walk =
         accesses(lines, param, &mut widths, &mut offsets, &mut types)?.then_some(Witness::Walk);
+    let mut unshown = false;
     for copy in copies(lines, param) {
-        let mut moved: BTreeSet<i64> = BTreeSet::new();
-        let indexed = accesses(lines, &copy, &mut widths, &mut moved, &mut types)?;
+        let (mut own, mut moved) = (BTreeSet::new(), BTreeSet::new());
+        let indexed = accesses(lines, &copy, &mut own, &mut moved, &mut types)?;
+        widths.extend(own.iter().copied());
         if moved.is_empty() {
             continue;
         }
-        if indexed || stepped(lines, &copy) {
+        let steps = steps(lines, &copy);
+        let width = own.iter().copied().next().filter(|_| own.len() == 1);
+        let by_width = steps.iter().all(|s| match s {
+            Some(k) => width.is_some_and(|w| u64::try_from(w).is_ok_and(|w| w == *k)),
+            None => width == Some(1),
+        });
+        if indexed || (!steps.is_empty() && by_width && moved.contains(&0)) {
             walk = walk.or(Some(Witness::SteppedCopy));
             offsets.insert(0);
+        } else if !steps.is_empty() {
+            unshown = true;
         }
         offsets.extend(moved);
     }
     if offsets.is_empty() {
         return None;
+    }
+    if unshown {
+        return Some("void *");
     }
     let has_copy = !copies(lines, param).is_empty();
     let ty = if has_copy
@@ -112,7 +127,7 @@ pub(super) fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> 
 /// Whether some access indexes from the name rather than reading at a
 /// constant offset ([`pointee_type`]), or `None` when a use casts the
 /// name to a narrow signed integer, which no pointer is.
-pub(super) fn accesses(
+fn accesses(
     lines: &[String],
     name: &str,
     widths: &mut BTreeSet<usize>,
@@ -323,22 +338,39 @@ pub(super) fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
     out
 }
 
-/// Tells whether a copy of a pointer moves: a line steps it by itself
-/// (`p += 1`, `p -= k`, `p++`, `--p`).
+/// Returns the amounts each line steps a copy of a pointer by.
+///
+/// `p += 4` and `p -= 4` step it by 4, `p++` and `--p` by 1; a step by a
+/// value the text does not spell as a constant (`p += n`) is `None`.
 ///
 /// # Arguments
 ///
 /// * `lines` - The function, header lines included.
 /// * `copy` - The copy's name.
-fn stepped(lines: &[String], copy: &str) -> bool {
-    lines.iter().filter(|l| !l.starts_with("//")).any(|l| {
-        let t = l.trim();
-        [" += ", " -= ", "++", "--"]
-            .iter()
-            .any(|op| t.strip_prefix(copy).is_some_and(|r| r.starts_with(op)))
-            || ["++", "--"].iter().any(|op| {
-                t.strip_prefix(op)
-                    .is_some_and(|r| r.strip_prefix(copy) == Some(";"))
-            })
-    })
+///
+/// # Returns
+///
+/// One entry per stepping line, empty when nothing steps the copy.
+fn steps(lines: &[String], copy: &str) -> Vec<Option<u64>> {
+    let mut out = Vec::new();
+    for t in lines
+        .iter()
+        .filter(|l| !l.starts_with("//"))
+        .map(|l| l.trim())
+    {
+        let after = t.strip_prefix(copy).unwrap_or("");
+        if let Some(k) = after
+            .strip_prefix(" += ")
+            .or_else(|| after.strip_prefix(" -= "))
+        {
+            out.push(k.strip_suffix(';').and_then(parse_const));
+        } else if matches!(after, "++;" | "--;")
+            || ["++", "--"]
+                .iter()
+                .any(|op| t.strip_prefix(op).and_then(|r| r.strip_prefix(copy)) == Some(";"))
+        {
+            out.push(Some(1));
+        }
+    }
+    out
 }

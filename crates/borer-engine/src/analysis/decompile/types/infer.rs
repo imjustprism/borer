@@ -12,7 +12,7 @@ mod locals;
 mod pointers;
 
 use super::super::signature::drop_high_halves;
-use pointers::{accesses, copies, for_init_copies, pointed_at};
+use pointers::{copies, for_init_copies, pointed_at};
 
 pub(in crate::analysis::decompile) use locals::refine_locals;
 
@@ -193,15 +193,7 @@ fn retype_pointer_param(
             return Some(ty);
         }
     }
-    if declared == "void *"
-        && (pointed_at(lines, param) == Some("uint8_t *")
-            || copies(lines, param).iter().any(|c| {
-                let mut w = BTreeSet::new();
-                let mut o = BTreeSet::new();
-                let mut t = BTreeSet::new();
-                accesses(lines, c, &mut w, &mut o, &mut t).is_some() && w == BTreeSet::from([1])
-            }))
-    {
+    if declared == "void *" && pointed_at(lines, param) == Some("uint8_t *") {
         return Some("uint8_t *");
     }
     if stack_copy_ptr {
