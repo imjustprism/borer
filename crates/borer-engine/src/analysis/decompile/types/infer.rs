@@ -50,7 +50,8 @@ pub(in crate::analysis::decompile) use locals::refine_locals;
 ///   machine word (`uint32_t` on a 32-bit target): the one type that means
 ///   "unknown" rather than "declared this wide".
 /// * `wide` - The places, from zero, of the signature's parameters the code
-///   showed to be a whole word.
+///   showed to be a whole word, as the header lists them before any high
+///   half of a 32-bit `double` is dropped from it.
 ///
 /// # Returns
 ///
@@ -64,10 +65,10 @@ pub(in crate::analysis::decompile) fn type_parameters(
     let Some(sig) = lines.iter().position(|l| l.starts_with("// signature: ")) else {
         return text.to_owned();
     };
+    let places = signature_places(&lines[sig]);
     if word == "uint32_t" {
         drop_high_halves(&mut lines, sig);
     }
-    let places = signature_places(&lines[sig]);
     let shown_wide = |name: &str| {
         wide.iter().any(|&k| {
             places
@@ -78,6 +79,7 @@ pub(in crate::analysis::decompile) fn type_parameters(
     };
     let params: Vec<(String, String, bool)> = lines[sig]
         .split(['(', ',', ')'])
+        .skip(1)
         .filter_map(|p| {
             let (ty, name) = p.trim().rsplit_once(' ')?;
             let (ty, name) = match name.strip_prefix('*') {
@@ -1846,5 +1848,22 @@ return (uint32_t)a1;
         let typed =
             super::type_parameters(text, "uint64_t", &std::collections::BTreeSet::from([1]));
         assert!(typed.contains("f(uint32_t a1, uint64_t a2)"), "{typed}");
+    }
+
+    /// The wide places are read before a 32-bit double's high half leaves
+    /// the signature, so dropping it moves no veto onto the next parameter.
+    #[test]
+    fn a_wide_place_survives_a_dropped_high_half() {
+        let text = concat!(
+            "// signature: void f(double a1, uint32_t a2, uint32_t a3, uint32_t a4)\n",
+            "*(uint8_t*)0x1000 = a3;\n",
+            "*(uint8_t*)0x1004 = a4;\n",
+        );
+        let typed =
+            super::type_parameters(text, "uint32_t", &std::collections::BTreeSet::from([2]));
+        assert!(
+            typed.contains("f(double a1, uint32_t a3, uint8_t a4)"),
+            "{typed}"
+        );
     }
 }
