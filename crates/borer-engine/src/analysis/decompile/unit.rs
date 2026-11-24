@@ -118,6 +118,9 @@ pub(super) struct Index {
     pub(super) data: BTreeMap<String, u64>,
     /// The imports' names, as the text spells them.
     imports: BTreeSet<String>,
+    /// The C names ([`c_name`]) the file shows never return
+    /// ([`noreturn_names`]).
+    noreturn: BTreeSet<String>,
 }
 
 /// Returns the [`Index`] of a program under the names in force, built once
@@ -173,6 +176,7 @@ pub(super) fn index(program: &Program, analysis: &Analysis, overlay: &Overlay) -
                         SymbolKind::Forwarder => {}
                     }
                 }
+                ix.noreturn = noreturn_names(program, analysis, overlay);
                 ix
             })
     })
@@ -1068,6 +1072,128 @@ pub(super) fn platform_declarations(
             Some(out.trim_end().to_owned())
         })
         .collect()
+}
+
+/// Returns a text with each `void` function it declares that the file
+/// shows never returns declared `_Noreturn`, for the C export.
+///
+/// Only the names [`noreturn_names`] holds qualify, a fact of the file alone. Each
+/// line stays a line.
+///
+/// # Arguments
+///
+/// * `text` - A function's finished text.
+/// * `program`, `analysis`, `overlay` - The binary, its functions and the
+///   names in force.
+pub(super) fn noreturn_declarations(
+    text: &str,
+    program: &Program,
+    analysis: &Analysis,
+    overlay: &Overlay,
+) -> String {
+    let ix = index(program, analysis, overlay);
+    let lines: Vec<String> = text
+        .lines()
+        .map(|l| {
+            let named = l
+                .strip_prefix("extern void ")
+                .and_then(|r| r.split_once('('));
+            match named.and_then(|(name, _)| c_name(program.format, name)) {
+                Some(c) if ix.noreturn.contains(c) => {
+                    format!("extern _Noreturn void {}", &l["extern void ".len()..])
+                }
+                _ => l.to_owned(),
+            }
+        })
+        .collect();
+    rejoin(&lines, text)
+}
+
+/// Returns the C names the file shows never return, each unambiguous in
+/// the whole file.
+///
+/// Every bearer of a name is keyed by the spelling the text gives it: an
+/// import's [`expr_render::import_spelling`], a function's [`name_of`], a
+/// data symbol's [`expr_render::data_name`], a user's name as it is. A
+/// name qualifies when it is in the engine's table of such functions
+/// exactly and everything that bears it is an import slot of a C runtime
+/// ([`crate::analysis::prototypes::is_c_runtime`]; an ELF or Mach-O import
+/// names no module) whose raw name, past the module and the format's C
+/// decoration ([`c_name`]), is that name with no demangling, or an import
+/// thunk onto such a slot: no function of the program's own, no other
+/// module's import, no C++ name that reads as it, no data symbol and no
+/// name the user gave bears it.
+///
+/// # Arguments
+///
+/// * `program`, `analysis`, `overlay` - The binary, its functions and the
+///   names in force.
+fn noreturn_names(program: &Program, analysis: &Analysis, overlay: &Overlay) -> BTreeSet<String> {
+    let c = |n: &str| c_name(program.format, n).map(str::to_owned);
+    let mut bearers: BTreeMap<String, bool> = BTreeMap::new();
+    let mut bear = |name: Option<String>, ok: bool| {
+        if let Some(name) = name {
+            *bearers.entry(name).or_insert(true) &= ok;
+        }
+    };
+    let mut slots: BTreeMap<u64, String> = BTreeMap::new();
+    let (imports, others): (Vec<_>, Vec<_>) = program
+        .symbols
+        .iter()
+        .partition(|s| s.kind == SymbolKind::Import);
+    for s in imports {
+        let name = c(&expr_render::import_spelling(&s.name));
+        let module = s.name.split_once('!').map(|(m, _)| m);
+        let safe = module.is_none_or(crate::analysis::prototypes::is_c_runtime)
+            && name.is_some()
+            && c(crate::analysis::bare_name(&s.name)) == name;
+        if let Some(n) = name.as_ref().filter(|_| safe) {
+            slots.insert(s.addr, n.clone());
+        }
+        bear(name, safe);
+    }
+    let thunk_onto = |entry: u64, name: &Option<String>| {
+        let slot = analysis.function(entry).and_then(|f| f.thunk);
+        slot.and_then(|t| slots.get(&t)) == name.as_ref() && name.is_some()
+    };
+    for s in others {
+        let name = c(&expr_render::data_name(&s.name));
+        let ok = thunk_onto(s.addr, &name);
+        bear(name, ok);
+    }
+    for f in &analysis.functions {
+        let name = c(&expr::bare(&name_of(analysis, overlay, f.entry)));
+        let ok = thunk_onto(f.entry, &name);
+        bear(name, ok);
+    }
+    for n in overlay.names.values() {
+        bear(c(n), false);
+    }
+    bearers
+        .into_iter()
+        .filter(|(name, ok)| *ok && crate::analysis::functions::helpers::listed_noreturn(name))
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Returns the C name a symbol of the file spells: a Mach-O symbol's
+/// without the `_` the platform puts before every C name, any other's as
+/// it is.
+///
+/// # Arguments
+///
+/// * `format` - The binary's format.
+/// * `name` - The symbol's name, as the text spells it.
+///
+/// # Returns
+///
+/// `None` for a Mach-O name without the leading `_`, which is no C name.
+fn c_name(format: crate::program::BinaryFormat, name: &str) -> Option<&str> {
+    if format == crate::program::BinaryFormat::MachO {
+        name.strip_prefix('_')
+    } else {
+        Some(name)
+    }
 }
 
 /// Tells whether the caller's text can spell every type a callee names.

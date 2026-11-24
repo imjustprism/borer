@@ -156,11 +156,21 @@ const NORETURN_NAMES: &[&str] = &[
 ///
 /// * `name` - The name as [`crate::search::demangled_name`] renders it, without a `dll!` prefix.
 pub(crate) fn is_noreturn_name(name: &str) -> bool {
-    NORETURN_NAMES.contains(&name)
+    listed_noreturn(name)
         || name.starts_with("core::panicking::")
         || name.starts_with("std::panicking::begin_panic")
         || name.starts_with("std::__throw_")
         || name.ends_with("::unwrap_failed")
+}
+
+/// Tells whether a bare name is one of [`NORETURN_NAMES`] exactly, never by
+/// a prefix: the names a declaration may state never return.
+///
+/// # Arguments
+///
+/// * `name` - The name, without a `dll!` prefix.
+pub(crate) fn listed_noreturn(name: &str) -> bool {
+    NORETURN_NAMES.contains(&name)
 }
 
 /// Bare names of functions that never return when their first argument is

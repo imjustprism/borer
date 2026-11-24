@@ -17,7 +17,10 @@
 //! that pass leaves as written stays GNU C: a `void *` added to a number
 //! from the right, a step inside a larger expression, a global `void *`,
 //! and a chain whose operands the declarations do not type. Both keep every
-//! line where it was, so a record's line numbers point where they did.
+//! line where it was, so a record's line numbers point where they did. A
+//! callee the file shows never returns is declared `_Noreturn` here alone
+//! ([`super::unit::noreturn_declarations`]); the `decompile` view does not
+//! say so.
 //!
 //! The functions come leaves first ([`order`]): each after every function
 //! it calls, a call cycle in entry order. Library code (a library or pack
@@ -1009,6 +1012,7 @@ fn export_with(
             overlay,
             entry,
         );
+        let out = super::unit::noreturn_declarations(&out, program, analysis, overlay);
         let origins = origins.map(|o| o.carried(&text, &out));
         Some(Rendered {
             text: out,

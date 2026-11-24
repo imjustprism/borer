@@ -723,3 +723,422 @@ fn the_export_takes_no_sum_on_a_void_pointer() {
         }
     }
 }
+
+/// Microsoft x64 code at [`TEXT`] that calls the import at [`RDATA`] with
+/// 1 when its argument is zero, and else returns 0.
+const CALLS_ON_ZERO: [&[u8]; 7] = [
+    &[0x48, 0x83, 0xec, 0x28],             // ASM: sub rsp, 0x28
+    &[0x85, 0xc9],                         // ASM: test ecx, ecx
+    &[0x75, 0x0b],                         // ASM: jnz +0xb
+    &[0xb9, 0x01, 0x00, 0x00, 0x00],       // ASM: mov ecx, 1
+    &[0xff, 0x15, 0xed, 0x0f, 0x00, 0x00], // ASM: call [rip+0xfed]
+    &[0x31, 0xc0],                         // ASM: xor eax, eax
+    &[0x48, 0x83, 0xc4, 0x28, 0xc3],       // ASM: add rsp, 0x28; ret
+];
+
+/// Returns a PE image of `code` at [`TEXT`], `f` exported there, with the
+/// symbols given beside it.
+///
+/// # Arguments
+///
+/// * `code` - The code.
+/// * `symbols` - Each further symbol's name, address and kind.
+fn image_with(code: &[u8], symbols: &[(&str, u64, SymbolKind)]) -> Program {
+    let mut p = crate::raw::image(Arch::X86_64, code, &[0u8; 16]);
+    p.format = BinaryFormat::Pe;
+    p.symbols = std::iter::once(("f", TEXT, SymbolKind::Export))
+        .chain(symbols.iter().copied())
+        .map(|(name, addr, kind)| Symbol {
+            name: name.to_owned(),
+            addr,
+            kind,
+        })
+        .collect();
+    p
+}
+
+/// Exports `f` of an image under an overlay.
+///
+/// # Arguments
+///
+/// * `p` - The image.
+/// * `o` - The overlay.
+fn exported_f(p: &Program, o: &Overlay) -> String {
+    let only = std::collections::BTreeSet::from([TEXT]);
+    exported_file(p, &Analysis::compute(p), o, Some(&only))
+}
+
+/// Returns `code` with the `mov ecx, 1` at `at` made `mov edi, 1`, the
+/// System V call of the same argument.
+///
+/// # Arguments
+///
+/// * `code` - Microsoft x64 code.
+/// * `at` - The offset of its `mov ecx, 1`.
+fn sysv(mut code: Vec<u8>, at: usize) -> Vec<u8> {
+    code[at..at + 5].copy_from_slice(&[0xbf, 0x01, 0x00, 0x00, 0x00]); // ASM: mov edi, 1
+    code
+}
+
+/// Returns an image of [`image_with`] in another format.
+///
+/// # Arguments
+///
+/// * `format` - The format.
+/// * `code`, `symbols` - As [`image_with`] takes them.
+fn image_as(format: BinaryFormat, code: &[u8], symbols: &[(&str, u64, SymbolKind)]) -> Program {
+    let mut p = image_with(code, symbols);
+    p.format = format;
+    p
+}
+
+/// The export declares the C runtime's `exit`, which never returns,
+/// `_Noreturn`; the `decompile` view, GNU C as it stands, declares it as
+/// the library states it.
+#[test]
+fn an_import_that_never_returns_is_declared_so_in_the_export_alone() {
+    let p = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[("msvcrt.dll!exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(
+        file.contains("  extern _Noreturn void exit(int status);"),
+        "{file}"
+    );
+    let a = Analysis::compute(&p);
+    let text = decompile(&p, &a, &Overlay::default(), TEXT).expect("decompiles");
+    assert!(text.contains("\nextern void exit(int status);\n"), "{text}");
+}
+
+/// An `exit` another module exports is no C runtime's `exit`: no
+/// `_Noreturn`, where the C runtime's is declared so.
+#[test]
+fn an_exit_of_another_module_is_declared_as_it_returns() {
+    let code = CALLS_ON_ZERO.concat();
+    let p = image_with(&code, &[("mylib.dll!exit", RDATA, SymbolKind::Import)]);
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("  extern void exit(int status);"), "{file}");
+    let p = image_with(&code, &[("msvcrt.dll!exit", RDATA, SymbolKind::Import)]);
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("extern _Noreturn void exit("), "{file}");
+}
+
+/// An `exit` another module exports, called while the C runtime's `exit`
+/// is imported too and called by nobody: the name is no one function, so
+/// the export claims nothing.
+#[test]
+fn an_exit_two_modules_export_is_declared_as_it_returns() {
+    let p = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[
+            ("mylib.dll!exit", RDATA, SymbolKind::Import),
+            ("msvcrt.dll!exit", RDATA + 8, SymbolKind::Import),
+        ],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("exit(1)"), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+    let p = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[
+            ("msvcrt.dll!exit", RDATA, SymbolKind::Import),
+            ("msvcrt.dll!abort", RDATA + 8, SymbolKind::Import),
+        ],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("extern _Noreturn void exit("), "{file}");
+}
+
+/// An `exit` the text demangles from a C++ import, called while the C
+/// runtime's `exit` is imported too, is no C `exit`: the name is unsafe,
+/// on ELF (`_Z4exiti`) and on PE (`?exit@@YAXH@Z`) alike.
+#[test]
+fn a_demangled_exit_of_a_cpp_import_is_declared_as_it_returns() {
+    let elf = image_as(
+        BinaryFormat::Elf,
+        &sysv(CALLS_ON_ZERO.concat(), 8),
+        &[
+            ("_Z4exiti", RDATA, SymbolKind::Import),
+            ("exit", RDATA + 8, SymbolKind::Import),
+        ],
+    );
+    let pe = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[
+            ("mylib.dll!?exit@@YAXH@Z", RDATA, SymbolKind::Import),
+            ("msvcrt.dll!exit", RDATA + 8, SymbolKind::Import),
+        ],
+    );
+    for p in [elf, pe] {
+        let file = exported_f(&p, &Overlay::default());
+        assert!(file.contains("exit(1)"), "{file}");
+        assert!(!file.contains("_Noreturn"), "{file}");
+    }
+}
+
+/// A data symbol the text demangles to `exit` bears the name too: the C
+/// runtime's `exit`, called, is declared as it returns.
+#[test]
+fn a_data_symbol_named_exit_leaves_exit_declared_as_it_returns() {
+    let p = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[
+            ("msvcrt.dll!exit", RDATA, SymbolKind::Import),
+            ("_ZL4exit", RDATA + 8, SymbolKind::Local),
+        ],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("exit(1)"), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+}
+
+/// Microsoft x64 code at [`TEXT`] that calls the function at [`TEXT`] +
+/// 0x40 with 1 and returns 0, and at [`TEXT`] + 0x40 an import thunk, `jmp
+/// [RDATA]`.
+const CALLS_THUNK: [(usize, &[u8]); 5] = [
+    (0x00, &[0x48, 0x83, 0xec, 0x28]),       // ASM: sub rsp, 0x28
+    (0x04, &[0xb9, 0x01, 0x00, 0x00, 0x00]), // ASM: mov ecx, 1
+    (0x09, &[0xe8, 0x32, 0x00, 0x00, 0x00]), // ASM: call +0x32 (TEXT + 0x40)
+    (0x0e, &[0x31, 0xc0, 0x48, 0x83, 0xc4, 0x28, 0xc3]), // ASM: xor eax, eax; add rsp, 0x28; ret
+    (0x40, &[0xff, 0x25, 0xba, 0x0f, 0x00, 0x00]), // ASM: jmp [rip+0xfba]
+];
+
+/// Lays out [`CALLS_THUNK`], the thunk's bytes replaced by `callee`.
+///
+/// # Arguments
+///
+/// * `callee` - The bytes at [`TEXT`] + 0x40.
+fn calls_thunk(callee: &[u8]) -> Vec<u8> {
+    let mut code = vec![0xccu8; 0x48];
+    for (at, bytes) in CALLS_THUNK {
+        let bytes = if at == 0x40 { callee } else { bytes };
+        code[at..at + bytes.len()].copy_from_slice(bytes);
+    }
+    code
+}
+
+/// A thunk to the C runtime's `exit` the user named `exit` is declared as
+/// it returns.
+///
+/// The name the text spells is the user's, not the file's, so the export
+/// states nothing it cannot read from the file.
+#[test]
+fn a_function_the_user_named_exit_is_declared_as_it_returns() {
+    let thunk = CALLS_THUNK[4].1;
+    let p = image_with(
+        &calls_thunk(thunk),
+        &[("msvcrt.dll!exit", RDATA, SymbolKind::Import)],
+    );
+    let mut o = Overlay::default();
+    o.names.insert(TEXT + 0x40, "exit".to_owned());
+    let file = exported_f(&p, &o);
+    assert!(file.contains("  extern void exit(int status);"), "{file}");
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("extern _Noreturn void exit("), "{file}");
+}
+
+/// A call through a thunk to the C runtime's `exit` declares it
+/// `_Noreturn`, on PE and on ELF alike.
+#[test]
+fn a_thunk_to_exit_is_declared_noreturn() {
+    let pe = image_with(
+        &calls_thunk(CALLS_THUNK[4].1),
+        &[("msvcrt.dll!exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&pe, &Overlay::default());
+    assert!(
+        file.contains("  extern _Noreturn void exit(int status);"),
+        "{file}"
+    );
+    let code = sysv(calls_thunk(CALLS_THUNK[4].1), 4);
+    let elf = image_as(
+        BinaryFormat::Elf,
+        &code,
+        &[("exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&elf, &Overlay::default());
+    assert!(
+        file.contains("  extern _Noreturn void exit(int status);"),
+        "{file}"
+    );
+}
+
+/// A Mach-O `_exit` and an `exit` of `MSVCR120.dll` are declared
+/// `_Noreturn`.
+///
+/// Mach-O spells a C name with a leading `_`: an `_exit` import is C's
+/// `exit`, which the text names `_exit` as the file does and declares as
+/// POSIX states `_exit`, `_Noreturn` either way.
+#[test]
+fn a_macho_or_msvcr_exit_is_declared_noreturn() {
+    let code = sysv(calls_thunk(CALLS_THUNK[4].1), 4);
+    let macho = image_as(
+        BinaryFormat::MachO,
+        &code,
+        &[("_exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&macho, &Overlay::default());
+    assert!(
+        file.contains("  extern _Noreturn void _exit(int status);"),
+        "{file}"
+    );
+    let msvcr = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[("MSVCR120.dll!exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&msvcr, &Overlay::default());
+    assert!(
+        file.contains("  extern _Noreturn void exit(int status);"),
+        "{file}"
+    );
+}
+
+/// A name two functions share is declared as it returns.
+///
+/// The program imports `exit` through a thunk, which `f` calls, and has a
+/// returning function of its own named `exit` too: the export claims
+/// nothing, where it claims the import's alone.
+#[test]
+fn a_name_two_functions_share_is_declared_as_it_returns() {
+    let mut code = sysv(calls_thunk(CALLS_THUNK[4].1), 4);
+    code.resize(0x51, 0xcc);
+    code[0x50] = 0xc3; // ASM: ret
+    let import = ("exit", RDATA, SymbolKind::Import);
+    let own = ("exit", TEXT + 0x50, SymbolKind::Local);
+    let file = exported_f(
+        &image_as(BinaryFormat::Elf, &code, &[import, own]),
+        &Overlay::default(),
+    );
+    assert!(file.contains("exit(1)"), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+    let file = exported_f(
+        &image_as(BinaryFormat::Elf, &code, &[import]),
+        &Overlay::default(),
+    );
+    assert!(file.contains("extern _Noreturn void exit("), "{file}");
+}
+
+/// A Mach-O import named `exit`, without the `_` every C name has there,
+/// is no C `exit`: no `_Noreturn`.
+#[test]
+fn a_macho_exit_without_the_underscore_is_declared_as_it_returns() {
+    let code = sysv(calls_thunk(CALLS_THUNK[4].1), 4);
+    let p = image_as(
+        BinaryFormat::MachO,
+        &code,
+        &[("exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("exit(1)"), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+}
+
+/// A function no symbol names, which a signature string names `exit`,
+/// bears the name as much as a symbol does: the C runtime's `exit`, called
+/// through its thunk, is declared as it returns.
+#[test]
+fn a_function_a_signature_names_exit_leaves_exit_declared_as_it_returns() {
+    let mut code = calls_thunk(CALLS_THUNK[4].1);
+    code[0x0e..0x18].copy_from_slice(&[0xe8, 0x3d, 0, 0, 0, 0x48, 0x83, 0xc4, 0x28, 0xc3]); // ASM: call +0x3d (TEXT + 0x50); add rsp, 0x28; ret
+    code.resize(0x58, 0xcc);
+    code[0x50..0x58].copy_from_slice(&[0x48, 0x8d, 0x05, 0xb1, 0x0f, 0, 0, 0xc3]); // ASM: lea rax, [rip+0xfb1] (RDATA + 8); ret
+    let data = [&[0u8; 8][..], b"void __cdecl exit(int)\0"].concat();
+    let mut p = crate::raw::image(Arch::X86_64, &code, &data);
+    p.format = BinaryFormat::Pe;
+    p.symbols = vec![
+        Symbol {
+            name: "f".to_owned(),
+            addr: TEXT,
+            kind: SymbolKind::Export,
+        },
+        Symbol {
+            name: "msvcrt.dll!exit".to_owned(),
+            addr: RDATA,
+            kind: SymbolKind::Import,
+        },
+    ];
+    let a = Analysis::compute(&p);
+    assert_eq!(
+        a.function(TEXT + 0x50).and_then(|f| f.name.as_deref()),
+        Some("exit")
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(!file.contains("_Noreturn"), "{file}");
+}
+
+/// The binary's own `exit`, a function that returns, is declared as the
+/// library states `exit`, without `_Noreturn`. A baseline: the export
+/// never flagged the program's own code.
+#[test]
+fn baseline_the_programs_own_exit_is_declared_as_it_returns() {
+    let p = image_with(
+        &calls_thunk(&[0xc3]),
+        &[("exit", TEXT + 0x40, SymbolKind::Export)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("  extern void exit(int status);"), "{file}");
+}
+
+/// The ELF program's own `_exit`, a function that returns, is declared as
+/// POSIX states `_exit`, without `_Noreturn`, where an imported `_exit` is
+/// declared so.
+#[test]
+fn the_programs_own_posix_exit_is_declared_as_it_returns() {
+    let own = sysv(calls_thunk(&[0xc3]), 4);
+    let p = image_as(
+        BinaryFormat::Elf,
+        &own,
+        &[("_exit", TEXT + 0x40, SymbolKind::Local)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("extern void _exit(int status);"), "{file}");
+    let thunk = sysv(calls_thunk(CALLS_THUNK[4].1), 4);
+    let p = image_as(
+        BinaryFormat::Elf,
+        &thunk,
+        &[("_exit", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(
+        file.contains("extern _Noreturn void _exit(int status);"),
+        "{file}"
+    );
+}
+
+/// An import the table does not name is declared as it returns, whatever
+/// its name begins with. A baseline: the export declares no import its
+/// library does not state.
+#[test]
+fn baseline_an_import_the_table_does_not_name_is_declared_as_it_returns() {
+    let p = image_with(
+        &CALLS_ON_ZERO.concat(),
+        &[("msvcrt.dll!exiting", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("exiting("), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+}
+
+/// Microsoft x64 code at [`TEXT`] that calls the import at [`RDATA`] with
+/// 0 and traps after it, so its own path ends at the call.
+const CALLS_THEN_TRAPS: [&[u8]; 4] = [
+    &[0x48, 0x83, 0xec, 0x28],             // ASM: sub rsp, 0x28
+    &[0x31, 0xc9],                         // ASM: xor ecx, ecx
+    &[0xff, 0x15, 0xf4, 0x0f, 0x00, 0x00], // ASM: call [rip+0xff4]
+    &[0xcc],                               // ASM: int3
+];
+
+/// A caller whose path ends at a call proves nothing of the callee: the C
+/// library's `free`, called before a trap, is declared as it returns. A
+/// baseline: no caller's path ever set the flag.
+#[test]
+fn baseline_a_caller_ending_at_a_call_declares_no_noreturn() {
+    let p = image_with(
+        &CALLS_THEN_TRAPS.concat(),
+        &[("msvcrt.dll!free", RDATA, SymbolKind::Import)],
+    );
+    let file = exported_f(&p, &Overlay::default());
+    assert!(file.contains("free("), "{file}");
+    assert!(!file.contains("_Noreturn"), "{file}");
+}
