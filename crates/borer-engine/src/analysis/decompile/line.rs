@@ -173,6 +173,26 @@ pub(super) fn mentions_ident(text: &str, ident: &str) -> bool {
     tokens(text).any(|w| w == ident)
 }
 
+/// Returns the parts of a `for (` header line, split on `; ` without
+/// reading string literals, so a literal holding `; ` yields more parts.
+///
+/// A header written as the text writes it gives its first value, its test
+/// and its step, in order.
+///
+/// # Arguments
+///
+/// * `t` - A trimmed line.
+///
+/// # Returns
+///
+/// The header's parts; nothing for a line that is no `for (` header.
+pub(super) fn header_parts(t: &str) -> impl Iterator<Item = &str> {
+    t.strip_prefix("for (")
+        .and_then(|s| s.strip_suffix(") {"))
+        .into_iter()
+        .flat_map(|h| h.split("; "))
+}
+
 /// The byte positions where `word` occurs as a whole identifier.
 ///
 /// # Arguments

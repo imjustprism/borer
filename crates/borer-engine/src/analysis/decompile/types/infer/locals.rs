@@ -370,13 +370,7 @@ fn local_api_pointer(lines: &[String], at: &[usize], name: &str) -> Option<&'sta
         {
             return None;
         }
-        for part in line
-            .trim()
-            .strip_prefix("for (")
-            .and_then(|s| s.strip_suffix(") {"))
-            .into_iter()
-            .flat_map(|s| s.split("; "))
-        {
+        for part in header_parts(line.trim()) {
             if let Some((lhs, rhs)) = part.split_once(" = ")
                 && lhs.trim() == name
                 && !check_chain_write(lines, name, rhs.trim(), before, &mut found, &mut byte_step)
@@ -919,10 +913,9 @@ fn local_copy_pointer(
                 }
             }
         } else if let Some((lhs, rhs)) = stmt.split_once(" = ").or_else(|| {
-            line.trim()
-                .strip_prefix("for (")
-                .and_then(|s| s.split_once("; "))
-                .and_then(|(init, _)| init.split_once(" = "))
+            header_parts(line.trim())
+                .next()
+                .and_then(|init| init.split_once(" = "))
         }) && rhs.split(" + ").next().unwrap_or("") == name
             && let Some((_, ty)) = ptrs.iter().find(|(n, _)| n == lhs)
         {

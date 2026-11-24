@@ -42,7 +42,7 @@ const LOAD_TYPES: [(&str, usize); 11] = [
 /// The loads through a variable the parameter is copied into ([`copies`])
 /// count too: at their own offsets when the copy only holds the
 /// parameter, and as a walk ([`Witness::SteppedCopy`]) when the copy is
-/// indexed, or stepped ([`steps`]) by the width it reads (any step, for
+/// indexed, or stepped ([`steps()`]) by the width it reads (any step, for
 /// bytes) and read where it points or where a step lands (`c = p[1];
 /// p += 1;`), so bytes read through it make a byte pointer. A wider copy
 /// stepped by another amount, or one read only elsewhere, walks something
@@ -66,7 +66,10 @@ pub(super) fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> 
     let mut walk =
         accesses(lines, param, &mut widths, &mut offsets, &mut types)?.then_some(Witness::Walk);
     let mut unshown = false;
-    for copy in copies(lines, param) {
+    for copy in copies(lines, param)
+        .into_iter()
+        .chain(for_init_copies(lines, param))
+    {
         let (mut own, mut moved) = (BTreeSet::new(), BTreeSet::new());
         let indexed = accesses(lines, &copy, &mut own, &mut moved, &mut types)?;
         widths.extend(own.iter().copied());
@@ -78,13 +81,9 @@ pub(super) fn pointed_at(lines: &[String], param: &str) -> Option<&'static str> 
         let by_width = width == Some(1)
             || steps.iter().all(|s| {
                 s.zip(width)
-                    .is_some_and(|(k, w)| u64::try_from(w).is_ok_and(|w| w == k))
+                    .is_some_and(|(k, w)| u64::try_from(w).is_ok_and(|w| w == k.unsigned_abs()))
             });
-        let lands = moved.contains(&0)
-            || steps
-                .iter()
-                .flatten()
-                .any(|&k| i64::try_from(k).is_ok_and(|k| moved.contains(&k)));
+        let lands = moved.contains(&0) || steps.iter().flatten().any(|k| moved.contains(k));
         if indexed || (!steps.is_empty() && by_width && lands) {
             walk = walk.or(Some(Witness::SteppedCopy));
             offsets.insert(0);
@@ -317,13 +316,13 @@ pub(super) fn copies(lines: &[String], param: &str) -> Vec<String> {
 /// * `lines` - The function, header lines included.
 /// * `param` - The parameter name.
 pub(super) fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
-    let suffix = format!(" = {param};");
     let mut out: Vec<String> = Vec::new();
     for line in lines.iter().filter(|l| !l.starts_with("//")) {
-        let Some(rest) = line.trim().strip_prefix("for (") else {
-            continue;
-        };
-        let Some((dest, _)) = rest.split_once(&suffix) else {
+        let init = header_parts(line.trim()).next();
+        let Some((dest, _)) = init
+            .and_then(|i| i.split_once(" = "))
+            .filter(|(_, v)| *v == param)
+        else {
             continue;
         };
         if !is_ident(dest) || dest == param || out.iter().any(|c| c == dest) {
@@ -345,10 +344,11 @@ pub(super) fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
     out
 }
 
-/// Returns the amounts each line steps a copy of a pointer by.
+/// Returns the amounts each statement steps a copy of a pointer by.
 ///
-/// `p += 4` and `p -= 4` step it by 4, `p++` and `--p` by 1; a step by a
-/// value the text does not spell as a constant (`p += n`) is `None`.
+/// `p += 4` steps it by 4 and `p -= 4` by -4, `p++` by 1 and `--p` by -1,
+/// in the body or as a `for (` header's step ([`header_parts`]); a step by
+/// a value the text does not spell as a constant (`p += n`) is `None`.
 ///
 /// # Arguments
 ///
@@ -357,26 +357,27 @@ pub(super) fn for_init_copies(lines: &[String], param: &str) -> Vec<String> {
 ///
 /// # Returns
 ///
-/// One entry per stepping line, empty when nothing steps the copy.
-fn steps(lines: &[String], copy: &str) -> Vec<Option<u64>> {
+/// One entry per stepping statement, empty when nothing steps the copy.
+fn steps(lines: &[String], copy: &str) -> Vec<Option<i64>> {
+    let constant = |k: &str| parse_const(k).and_then(|k| i64::try_from(k).ok());
     let mut out = Vec::new();
     for t in lines
         .iter()
         .filter(|l| !l.starts_with("//"))
         .map(|l| l.trim())
     {
-        let after = t.strip_prefix(copy).unwrap_or("");
-        if let Some(k) = after
-            .strip_prefix(" += ")
-            .or_else(|| after.strip_prefix(" -= "))
-        {
-            out.push(k.strip_suffix(';').and_then(parse_const));
-        } else if matches!(after, "++;" | "--;")
-            || ["++", "--"]
-                .iter()
-                .any(|op| t.strip_prefix(op).and_then(|r| r.strip_prefix(copy)) == Some(";"))
-        {
-            out.push(Some(1));
+        for st in header_parts(t).chain([t]) {
+            let st = st.strip_suffix(';').unwrap_or(st);
+            let after = st.strip_prefix(copy).unwrap_or("");
+            if let Some(k) = after.strip_prefix(" += ") {
+                out.push(constant(k));
+            } else if let Some(k) = after.strip_prefix(" -= ") {
+                out.push(constant(k).map(|k| -k));
+            } else if after == "++" || st.strip_prefix("++") == Some(copy) {
+                out.push(Some(1));
+            } else if after == "--" || st.strip_prefix("--") == Some(copy) {
+                out.push(Some(-1));
+            }
         }
     }
     out

@@ -448,3 +448,52 @@ fn byte_stores_through_unequal_steps_walk_bytes() {
     let out = polish(raw, 64, &Packs::default());
     assert!(out.contains("uint8_t *a1"), "{out}");
 }
+
+/// A `for` header's step is a step like a body line's: two-byte loads
+/// stepped by 4 there name no element, and bytes stepped by 1 there walk.
+#[test]
+fn a_for_header_step_counts_as_a_step() {
+    let walk = |init: &str, head: &str| {
+        let raw = [
+            "// signature: uint64_t f(uint64_t a1)",
+            "uint64_t p;",
+            "",
+            init,
+            &format!("for ({head}) {{"),
+            "}",
+            "return p;",
+        ]
+        .join("\n");
+        polish(&raw, 64, &Packs::default())
+    };
+    let wider = walk("p = a1;", "; *(uint16_t*)p != 0; p += 4");
+    assert!(wider.contains("void *a1"), "{wider}");
+    let bytes = walk(
+        "p = a1;",
+        "; *(uint8_t*)p != 0 && *(uint8_t*)(p + 1) != 0; p += 1",
+    );
+    assert!(bytes.contains("uint8_t *a1"), "{bytes}");
+    let header_copy = walk(
+        "",
+        "p = a1; *(uint8_t*)p != 0 && *(uint8_t*)(p + 1) != 0; p += 1",
+    );
+    assert!(header_copy.contains("uint8_t *a1"), "{header_copy}");
+}
+
+/// A copy stepped back by one and read one byte back reads where its step
+/// lands: a backward string walk is a byte pointer.
+#[test]
+fn a_backward_step_lands_on_its_read() {
+    let raw = concat!(
+        "// signature: uint64_t f(uint64_t a1)\n",
+        "uint64_t p;\n",
+        "\n",
+        "p = a1;\n",
+        "while (*(uint8_t*)(p - 1) != 0) {\n",
+        "  p -= 1;\n",
+        "}\n",
+        "return p;\n",
+    );
+    let out = polish(raw, 64, &Packs::default());
+    assert!(out.contains("uint8_t *a1"), "{out}");
+}

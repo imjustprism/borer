@@ -626,12 +626,9 @@ fn note_assigned_line<'a>(t: &'a str, assigned: &mut BTreeMap<&'a str, usize>) {
             }
         }
     }
-    if let Some(inner) = t.strip_prefix("for (").and_then(|s| s.strip_suffix(") {")) {
-        for part in inner.split("; ") {
-            note(part, assigned);
-        }
+    for part in header_parts(t).chain([t]) {
+        note(part, assigned);
     }
-    note(t, assigned);
 }
 
 /// Rewrites `*(T*)base` (no offset) in one line as `base->name`.

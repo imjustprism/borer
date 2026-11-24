@@ -35,9 +35,9 @@ pub(in crate::analysis::decompile) use locals::refine_locals;
 /// one too. A `gettext` of a parameter takes the type the callers' string
 /// literals agree on for that operand, and says nothing when they do not.
 /// One the body loads or stores through is
-/// a pointer ([`pointed_at`]), and a `void *` the body reads only bytes
-/// through is a byte pointer. On a 32-bit target the word after a `double` is the
-/// double's high half, not a parameter ([`drop_high_halves`]).
+/// a pointer ([`pointed_at`]), and a `void *` is a byte pointer when that
+/// rule finds bytes walked through it. On a 32-bit target the word after a
+/// `double` is the double's high half, not a parameter ([`drop_high_halves`]).
 ///
 /// A parameter the code showed to be a whole 64-bit word ([`wide_params`])
 /// gets no narrower type from a narrow use: it keeps the word and its
