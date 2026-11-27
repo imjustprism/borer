@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "borer"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "borer-engine",
@@ -99,7 +99,7 @@ dependencies = [
 
 [[package]]
 name = "borer-engine"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "borer-live",
@@ -119,11 +119,11 @@ dependencies = [
 
 [[package]]
 name = "borer-fixtures"
-version = "0.3.1"
+version = "0.3.2"
 
 [[package]]
 name = "borer-front"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "borer-engine",
@@ -134,7 +134,7 @@ dependencies = [
 
 [[package]]
 name = "borer-live"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "borer-engine",
  "libc",
