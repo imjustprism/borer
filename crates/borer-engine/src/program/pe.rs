@@ -868,6 +868,10 @@ pub(super) fn x64_pdata(
     let Some(ex) = &pe.exception_data else {
         return (functions, handlers, chunks);
     };
+    let dir = pe
+        .header
+        .optional_header
+        .and_then(|o| Directory::of(&o, &pe.sections));
     for rf in ex.functions().flatten() {
         let Some(extent) = rva_to_va(base, rf.begin_address)
             .zip(rva_to_va(base, rf.end_address))
@@ -875,7 +879,7 @@ pub(super) fn x64_pdata(
         else {
             continue;
         };
-        let Ok(u) = ex.get_unwind_info(rf, &pe.sections) else {
+        let Some(u) = unwind_info(ex, bytes, rf, dir, &pe.sections) else {
             functions.push(extent);
             continue;
         };
@@ -901,6 +905,111 @@ pub(super) fn x64_pdata(
     }
     chunks.sort_unstable();
     (functions, handlers, chunks)
+}
+
+/// Bytes of one x64 `RUNTIME_FUNCTION` entry.
+const RUNTIME_FUNCTION_LEN: usize = 12;
+
+/// The most unwind-info indirections [`unwind_info`] follows; the linker writes one at most.
+const UNWIND_HOPS_MAX: usize = 8;
+
+/// An x64 image's exception directory, where an indirect unwind address must land.
+#[derive(Clone, Copy)]
+struct Directory {
+    /// Its address, relative to the image base.
+    rva: u32,
+    /// Its file offset.
+    off: usize,
+    /// Its length in bytes, as the data directory states it.
+    len: usize,
+}
+
+impl Directory {
+    /// Returns the exception directory the optional header names, mapped to its file offset.
+    ///
+    /// # Returns
+    ///
+    /// `None` when the header names none or its address maps to no file offset.
+    fn of(
+        opt: &goblin::pe::optional_header::OptionalHeader,
+        sections: &[goblin::pe::section_table::SectionTable],
+    ) -> Option<Directory> {
+        let table = opt.data_directories.get_exception_table()?;
+        let off = goblin::pe::utils::find_offset(
+            usize::try_from(table.virtual_address).ok()?,
+            sections,
+            opt.windows_fields.file_alignment,
+            &goblin::pe::options::ParseOptions::default(),
+        )?;
+        let len = usize::try_from(table.size).ok()?;
+        Some(Directory {
+            rva: table.virtual_address,
+            off,
+            len,
+        })
+    }
+
+    /// Returns the entry that starts at `rva`, read from `bytes`.
+    ///
+    /// # Returns
+    ///
+    /// `None` when `rva` is not the start of an entry inside the directory, or the file
+    /// ends before the entry does.
+    fn entry(self, bytes: &[u8], rva: u32) -> Option<goblin::pe::exception::RuntimeFunction> {
+        let rel = usize::try_from(rva.checked_sub(self.rva)?).ok()?;
+        if rel >= self.len || rel % RUNTIME_FUNCTION_LEN != 0 {
+            return None;
+        }
+        let at = self.off.checked_add(rel)?;
+        Some(goblin::pe::exception::RuntimeFunction {
+            begin_address: u32_le(bytes, at)?,
+            end_address: u32_le(bytes, at.checked_add(4)?)?,
+            unwind_info_address: u32_le(bytes, at.checked_add(8)?)?,
+        })
+    }
+}
+
+/// Returns the unwind info of the x64 entry `rf`: its own, or that of the entry its odd
+/// unwind address names, followed at most [`UNWIND_HOPS_MAX`] times.
+///
+/// goblin's `get_unwind_info` follows the same chain with no bound and maps each hop by
+/// scanning the section table, so an entry that names itself spins forever; it is only
+/// given the entry this resolves, whose address is even. A hop lands only on an entry of
+/// the exception directory, read in place.
+///
+/// # Arguments
+///
+/// * `ex` - The exception directory goblin parsed.
+/// * `bytes` - The file goblin parsed.
+/// * `rf` - The `.pdata` entry.
+/// * `dir` - Where the directory lies; `None` refuses every hop.
+/// * `sections` - The section table, to map the unwind info's address.
+///
+/// # Returns
+///
+/// The unwind info, or `None` when a hop leaves the directory, the chain is longer than
+/// the bound, or goblin cannot read the info.
+fn unwind_info<'a>(
+    ex: &goblin::pe::exception::ExceptionData<'a>,
+    bytes: &[u8],
+    mut rf: goblin::pe::exception::RuntimeFunction,
+    dir: Option<Directory>,
+    sections: &[goblin::pe::section_table::SectionTable],
+) -> Option<goblin::pe::exception::UnwindInfo<'a>> {
+    for _ in 0..UNWIND_HOPS_MAX {
+        if rf.unwind_info_address & 1 == 0 {
+            break;
+        }
+        rf = dir?.entry(bytes, rf.unwind_info_address & !1)?;
+    }
+    if rf.unwind_info_address & 1 != 0 {
+        return None;
+    }
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the entry's unwind address is even, so goblin follows no indirection"
+    )]
+    ex.get_unwind_info(rf, sections).ok()
 }
 
 /// Resolves one PE section's name under `names`, reading `/N` and `//` COFF

@@ -24,6 +24,8 @@ doc-valid-idents = ["SysV", "AArch64", "MinGW", "WinDbg", "GitHub", "ChaCha", ".
 # fs::copy, create_dir_all, remove_file, rename) are not barred here: each
 # write site checks borer_engine::program::unusable_path itself.
 disallowed-methods = [
+  { path = "goblin::pe::exception::ExceptionData::get_unwind_info", reason = "it follows unwind indirections without a bound: use program::pe::unwind_info" },
+  { path = "goblin::pe::exception::ExceptionData::get_unwind_info_with_opts", reason = "it follows unwind indirections without a bound: use program::pe::unwind_info" },
   { path = "std::time::Instant::now", reason = "the engine is deterministic: bound work in steps, not time" },
   { path = "std::time::SystemTime::now", reason = "the engine is deterministic: no answer depends on the time" },
   { path = "std::fs::read", reason = "read a path borer is given with borer_engine::program::read_regular" },
