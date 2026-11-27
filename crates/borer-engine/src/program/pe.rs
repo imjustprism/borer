@@ -842,6 +842,67 @@ pub(super) fn arm64_pdata(
     (functions, fragments)
 }
 
+/// Returns what an x64 image's exception directory states: its functions,
+/// the handlers they register, and the chunks whose unwind info is chained.
+///
+/// # Arguments
+///
+/// * `pe` - The parsed image; no exception directory states nothing.
+/// * `bytes` - The file goblin parsed.
+/// * `base` - The image base the addresses are relative to.
+/// * `data_va` - Maps a file offset to its virtual address, 0 when unmapped.
+///
+/// # Returns
+///
+/// `(functions, handlers, chunks)`: `(start, end)` virtual addresses, the
+/// chunks sorted. Reading the directory can panic in goblin on a damaged
+/// file, so the caller runs this under [`caught`].
+pub(super) fn x64_pdata(
+    pe: &goblin::pe::PE<'_>,
+    bytes: &[u8],
+    base: u64,
+    data_va: &dyn Fn(u64) -> u64,
+) -> (Extents, Vec<crate::headers::ExceptionHandler>, Extents) {
+    use goblin::pe::exception::UnwindHandler::{ExceptionHandler, TerminationHandler};
+    let (mut functions, mut handlers, mut chunks) = (Vec::new(), Vec::new(), Vec::new());
+    let Some(ex) = &pe.exception_data else {
+        return (functions, handlers, chunks);
+    };
+    for rf in ex.functions().flatten() {
+        let Some(extent) = rva_to_va(base, rf.begin_address)
+            .zip(rva_to_va(base, rf.end_address))
+            .filter(|(start, end)| start < end)
+        else {
+            continue;
+        };
+        let Ok(u) = ex.get_unwind_info(rf, &pe.sections) else {
+            functions.push(extent);
+            continue;
+        };
+        if u.chained_info.is_some() {
+            chunks.push(extent);
+            continue;
+        }
+        functions.push(extent);
+        let Some(ExceptionHandler(handler, data) | TerminationHandler(handler, data)) = u.handler
+        else {
+            continue;
+        };
+        let off = (data.as_ptr() as usize).wrapping_sub(bytes.as_ptr() as usize);
+        if off < bytes.len()
+            && let Some(handler) = rva_to_va(base, handler)
+        {
+            handlers.push(crate::headers::ExceptionHandler {
+                function: extent.0,
+                handler,
+                data: data_va(from_usize(off)),
+            });
+        }
+    }
+    chunks.sort_unstable();
+    (functions, handlers, chunks)
+}
+
 /// Resolves one PE section's name under `names`, reading `/N` and `//` COFF
 /// string-table entries boundedly without scanning past the row cap.
 ///

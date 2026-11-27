@@ -29,7 +29,7 @@ pub use file::{
 use file::{Take, magic_name, parse_object, read_program_bytes};
 use pe::{
     SANE_MAX, arm64_pdata, directory_entry, disarm_exports, implausible_imports, loosen_pe,
-    name_imports, pe_symbols, restore, rva_to_va, sound_section_table,
+    name_imports, pe_symbols, restore, rva_to_va, sound_section_table, x64_pdata,
 };
 
 /// Container format of the loaded file.
@@ -1202,61 +1202,13 @@ impl Program {
                     &mut names,
                     &mut symbols,
                 );
-                if arch == Arch::X86_64
-                    && let Some(ex) = &pe.exception_data
-                {
-                    let (found, registered, chunks) = caught(|| {
-                        let mut out = Vec::new();
-                        let mut handlers = Vec::new();
-                        let mut chunks = Vec::new();
-                        for rf in ex.functions().flatten() {
-                            let Some((function, end)) = rva_to_va(image_base, rf.begin_address)
-                                .zip(rva_to_va(image_base, rf.end_address))
-                                .filter(|(function, end)| function < end)
-                            else {
-                                continue;
-                            };
-                            let Ok(u) = ex.get_unwind_info(rf, &pe.sections) else {
-                                out.push((function, end));
-                                continue;
-                            };
-                            if u.chained_info.is_some() {
-                                chunks.push((function, end));
-                                continue;
-                            }
-                            out.push((function, end));
-                            let Some(
-                                goblin::pe::exception::UnwindHandler::ExceptionHandler(
-                                    handler,
-                                    data,
-                                )
-                                | goblin::pe::exception::UnwindHandler::TerminationHandler(
-                                    handler,
-                                    data,
-                                ),
-                            ) = u.handler
-                            else {
-                                continue;
-                            };
-                            let off =
-                                (data.as_ptr() as usize).wrapping_sub(bytes.as_ptr() as usize);
-                            if off < bytes.len()
-                                && let Some(handler) = rva_to_va(image_base, handler)
-                            {
-                                handlers.push(crate::headers::ExceptionHandler {
-                                    function,
-                                    handler,
-                                    data: va_of_off(from_usize(off)),
-                                });
-                            }
-                        }
-                        (out, handlers, chunks)
-                    })
-                    .unwrap_or_default();
+                if arch == Arch::X86_64 {
+                    let (found, registered, chunks) =
+                        caught(|| x64_pdata(pe, &bytes, image_base, &va_of_off))
+                            .unwrap_or_default();
                     function_ranges.extend(found);
                     exception_handlers = registered;
                     chained_chunks = chunks;
-                    chained_chunks.sort_unstable();
                 }
                 if arch == Arch::Arm64
                     && let Some(ex) = &pe.exception_data
